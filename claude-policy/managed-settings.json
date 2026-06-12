@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(dnf copr:*)",
+      "Bash(pip install --user:*)",
+      "Bash(pip3 install --user:*)",
+      "Bash(pipx install:*)",
+      "Bash(npm install -g:*)",
+      "Bash(npm i -g:*)",
+      "Bash(yarn global add:*)",
+      "Bash(pnpm add -g:*)",
+      "Bash(cargo install:*)",
+      "Bash(go install:*)",
+      "Bash(gem install:*)",
+      "Bash(brew install:*)",
+      "Bash(flatpak install:*)",
+      "Bash(snap install:*)",
+      "Write(~/.local/bin/**)",
+      "Write(/usr/local/bin/**)"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  }
+}

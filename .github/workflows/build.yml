@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 4 1,15 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        run: |
+          echo "date=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          no-cache: ${{ github.event_name == 'schedule' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/fedora-dev:latest
+            ghcr.io/${{ github.repository_owner }}/fedora-dev:${{ steps.meta.outputs.date }}
+            ghcr.io/${{ github.repository_owner }}/fedora-dev:${{ steps.meta.outputs.sha }}
