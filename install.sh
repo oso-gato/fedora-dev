@@ -30,6 +30,7 @@ $DNF install \
     podman shadow-utils fuse-overlayfs passt iptables-nft nftables \
     openssh-server mosh tmux tailscale \
     distrobox inotify-tools \
+    fail2ban rsyslog \
     sudo procps-ng glibc-langpack-en nano
 
 # ---- defensive: restore file caps on newuidmap/newgidmap --------------------
@@ -84,18 +85,48 @@ if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null && { [ -n "${SSH_TTY:-}" ] |
 fi
 EOF
 
-# ---- sshd (mosh bootstraps over ssh; also the public fallback door) ----------
+# ---- sshd (key-only; reachable via tailnet :22 AND host-published public :4444)
 # Host keys live on the root-owned tailscale state volume (NOT under core's
 # home — core owns that tree and could swap keys) and are generated at runtime.
+# Public ssh on port 4444 is published by the Quadlet/run.sh; container sshd
+# listens on 22. Keys for core are synced from github.com/oso-gato.keys by the
+# entrypoint at every container start (cached on the home volume so GitHub
+# being briefly unreachable doesn't lock the operator out).
 cat > /etc/ssh/sshd_config.d/99-fedora-dev.conf <<'EOF'
-PasswordAuthentication yes
+PasswordAuthentication no
+PubkeyAuthentication yes
 PermitEmptyPasswords no
 MaxAuthTries 3
 PermitRootLogin no
 AllowUsers core
 HostKey /var/lib/tailscale/hostkeys/ssh_host_ed25519_key
+# AUTHPRIV so rsyslog captures auth events to /var/log/secure for fail2ban.
+SyslogFacility AUTHPRIV
+LogLevel VERBOSE
 EOF
 rm -f /etc/ssh/ssh_host_*_key*   # never ship host keys in a published image
+
+# ---- fail2ban — brute-force mitigation for the public-ssh :4444 path ----
+# fail2ban watches /var/log/secure (rsyslog writes there from sshd's AUTHPRIV
+# facility), bans IPs that fail too many key-auth attempts via iptables-nft.
+# Tailnet CGNAT (100.64.0.0/10) is ignoreip'd — tailnet identity is already
+# authenticated by Tailscale; we don't want a misbehaving tailnet device to
+# ever land on a banned-IP list.
+install -d -m 0755 /etc/fail2ban/jail.d
+cat > /etc/fail2ban/jail.d/sshd-fedora-dev.local <<'EOF'
+[DEFAULT]
+bantime = 1h
+findtime = 10m
+maxretry = 5
+backend = auto
+ignoreip = 127.0.0.1/8 ::1 100.64.0.0/10
+banaction = iptables-multiport
+
+[sshd]
+enabled = true
+port = 22
+logpath = /var/log/secure
+EOF
 
 dnf clean all
 rm -rf /var/cache/dnf /var/cache/libdnf5

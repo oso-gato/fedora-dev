@@ -1,6 +1,6 @@
 # fedora-dev
 
-A headless Fedora container that hosts Claude Code (in an in-container Distrobox "claudebox") for building Fedora-based container images. Daily-refreshed CLI, base image rebuilt monthly, persistent volumes for your work.
+A headless Fedora container that hosts Claude Code (in an in-container Distrobox "claudebox") for building Fedora-based container images. Daily-refreshed CLI, base image rebuilt monthly, persistent volumes for your work, key-only ssh access (no passwords).
 
 ## Purpose
 
@@ -17,13 +17,18 @@ An image that lives only inside this container is unfinished work. If a task wan
 
 ## What you get when fedora-dev runs
 
-A persistent headless workshop reachable over the tailnet:
+A persistent headless workshop with three access paths and no passwords anywhere:
 
-- **`ssh core@<tailnet-ip>` / `mosh core@<tailnet-ip>`** → both land in tmux session `main` automatically. Sessions survive disconnects, container restarts, and image rebuilds (via persistent volumes).
+- **`ssh -p 4444 core@<public-ip>`** → public ssh on host port 4444 → container :22, key-only (authorized keys synced from `github.com/oso-gato.keys` at every container start). fail2ban protects against brute-force scanners.
+- **`ssh core@<vps>.<tailnet>.ts.net`** → keyless via Tailscale SSH (tailnet identity, gated by your Tailscale ACL).
+- **`mosh -p 4444 core@<public-ip>`** (or via tailnet) → roaming-resilient shell; UDP 60000-61000 published.
+
+All paths land in tmux session `main`. Sessions survive disconnects, container restarts, and image rebuilds (via persistent volumes).
+
 - **`claude` from the tmux shell** → drops you into Claude Code running inside claudebox (a Distrobox). The agent's `podman build` invocations drive fedora-dev's own engine via a `CONTAINER_HOST` socket, so builds happen at fedora-dev's nesting level (no third level of overlay-on-overlay).
 - **Daily-fresh Claude Code** — the in-container claudebox is rebuilt every 24h from Anthropic's `latest` channel. Defers if a session is active; rebuilds on your next exit. Your Claude login survives (credentials live in `~/.claude` on the home volume, not in the disposable box).
 - **Monthly-fresh base image** — fedora-dev itself is rebuilt on the 15th by CI (`--no-cache`). Refreshes Fedora packages, tailscale, distrobox, the supervision stack. Image is cosign-signed via GitHub Actions OIDC.
-- **Persistent volumes** — `fedora-dev-home` (`/home/core`) carries your projects, Claude credentials, gh auth, nested podman storage, and the live spec clone across both box rebuilds AND fedora-dev container recreations. `fedora-dev-state` (`/var/lib/tailscale`) carries the tailnet identity + ssh host keys.
+- **Persistent volumes** — `fedora-dev-home` (`/home/core`) carries your projects, Claude credentials, gh auth, nested podman storage, the live spec clone, AND the cached ssh authorized_keys across box rebuilds AND fedora-dev container recreations. `fedora-dev-state` (`/var/lib/tailscale`) carries the tailnet identity + ssh host keys.
 
 ## Using fedora-dev
 
@@ -33,37 +38,42 @@ Two deployment paths, same image.
 
 The repo ships `fedora-dev.container` — a podman Quadlet (declarative systemd-managed deployment) with `Notify=healthy`, `AutoUpdate=registry`, `HealthCmd=`, persistent volumes, and runtime secrets via `EnvironmentFile=`.
 
-If your VPS is provisioned via [`fedora-bootstrap`](https://github.com/oso-gato/fedora-bootstrap) v1.1.1+, fedora-dev is deployed automatically when it's in the bootstrap's `WORKLOAD_CONTAINERS` array — including the Quadlet install, env-file scaffold, monthly refresh harness, busy-probe deferral, and image-digest rollback.
+If your VPS is provisioned via [`fedora-bootstrap`](https://github.com/oso-gato/fedora-bootstrap) v1.1.9+, fedora-dev is deployed automatically when it's in the bootstrap's `WORKLOAD_CONTAINERS` array — Quadlet installed, monthly refresh harness wired, busy-probe deferral active, image-digest rollback on health failure.
 
 For manual setup on any systemd host:
 
 ```sh
-mkdir -p ~/.config/containers/systemd ~/.config/container-refresh
+mkdir -p ~/.config/containers/systemd
 cp fedora-dev.container ~/.config/containers/systemd/
-
-cat > ~/.config/container-refresh/fedora-dev.env <<EOF
-CORE_PASSWORD=<your password>
-# TS_AUTHKEY=tskey-...   # uncomment for unattended tailnet join
-EOF
-chmod 0600 ~/.config/container-refresh/fedora-dev.env
-
 systemctl --user daemon-reload
 systemctl --user enable --now fedora-dev.service
+```
+
+No env files, no secret population. The container's sshd is key-only; keys come from `github.com/oso-gato.keys` synced by the entrypoint at every start.
+
+For unattended tailnet join (optional), create a podman secret first:
+
+```sh
+podman secret create fedora-dev-ts-authkey -    # paste your tskey-... and Ctrl-D
+# then add `Secret=fedora-dev-ts-authkey,target=TS_AUTHKEY,type=env` to the Quadlet
+# before the first start. Skip for interactive tailnet join via login.tailscale.com.
 ```
 
 ### run.sh (interactive / non-systemd hosts)
 
 ```sh
-CORE_PASSWORD='…' [TS_AUTHKEY=tskey-…] [IMAGE=…] ./run.sh
+[TS_AUTHKEY=tskey-…] [IMAGE=…] ./run.sh
 ```
 
-Same runtime spec as the Quadlet (volumes, devices, health-cmd) but a one-shot `podman run -d` with no systemd around it. Useful for the very first deploy when tailnet auth is interactive, or for hosts without systemd.
+Same runtime spec as the Quadlet (volumes, devices, health-cmd, port publishes) but a one-shot `podman run -d` with no systemd around it. Useful for hosts without systemd. No CORE_PASSWORD needed (sshd is key-only).
 
 ### First boot
 
-Takes ~2-5 minutes. The entrypoint clones the live spec from this repo and eagerly assembles claudebox in the background (dnf-installs claude-code + tools inside the box). Subsequent boots are instant. The first `claude` invocation will tail the assemble log if it's still in progress.
+Takes ~2-5 minutes. The entrypoint clones the live spec from this repo, syncs ssh keys from `github.com/oso-gato.keys`, starts rsyslog + sshd + fail2ban + tailscaled, then eagerly assembles claudebox in the background (dnf-installs claude-code + tools inside the box). Subsequent boots are instant. The first `claude` invocation will tail the assemble log if it's still in progress.
 
 If TS_AUTHKEY isn't set, the tailnet join is interactive — `podman logs -f fedora-dev` to find the login.tailscale.com URL, click it once.
+
+**Public ssh access:** as long as `github.com/oso-gato.keys` is reachable on first boot, public ssh on port 4444 works immediately with any of the listed keys. If GitHub was unreachable on first boot, public ssh stays closed until the entrypoint successfully syncs (every container restart re-tries); Tailscale SSH is unaffected.
 
 ## Operating fedora-dev (day-to-day)
 

@@ -9,16 +9,15 @@
 #   systemctl --user status fedora-dev.service
 #   journalctl --user -u fedora-dev.service
 #
-# Prerequisite: a secrets env file at
-#   ~/.config/container-refresh/fedora-dev.env  (mode 0600)
-# containing at minimum:
-#   CORE_PASSWORD=<your password>
-# Optionally:
-#   TS_AUTHKEY=tskey-...   (unattended tailnet join; omit for interactive)
+# v1.1.9: NO RUNTIME SECRETS. sshd is key-only — keys synced from
+# github.com/oso-gato.keys at every container start, cached on home volume.
+# No EnvironmentFile=, no CORE_PASSWORD, no env-file scaffold to populate.
+# Public ssh on host:4444 (container:22, key auth) + mosh public on UDP
+# 60000-61000. Tailscale SSH (tailnet, keyless) remains primary.
 #
-# fedora-bootstrap's setup-user.sh prepares the env file scaffold and copies
-# this Quadlet into place on the VPS. For non-fedora-bootstrap hosts, follow
-# README "Deploy via systemd Quadlet" for manual setup.
+# Optional: TS_AUTHKEY for unattended tailnet join can be added via a
+# `Secret=` directive (podman secret create fedora-dev-ts-authkey -); the
+# entrypoint honors $TS_AUTHKEY if set, falls back to interactive join.
 
 [Unit]
 Description=fedora-dev — headless Fedora workshop for building container images
@@ -41,7 +40,7 @@ AutoUpdate=registry
 # new image triggers retag-to-prior-digest and restart.
 Notify=healthy
 
-# Runtime args — mirror of legacy run.sh.
+# Runtime args — mirror of run.sh.
 AddCapability=NET_ADMIN
 AddDevice=/dev/net/tun
 AddDevice=/dev/fuse
@@ -51,10 +50,13 @@ SecurityLabelDisable=true
 Volume=fedora-dev-home:/home/core
 Volume=fedora-dev-state:/var/lib/tailscale
 
-# Runtime secrets — operator must populate this file before first start.
-# (No `-` prefix = file MUST exist; systemd refuses to start if absent. This
-# is the same fail-fast contract the entrypoint enforces for CORE_PASSWORD.)
-EnvironmentFile=%h/.config/container-refresh/fedora-dev.env
+# Public ports:
+#   4444/tcp -> container :22 (sshd, key-only; keys synced from github.com/oso-gato.keys)
+#   60000-61000/udp -> mosh (bootstraps over the same key-auth ssh)
+# Tailscale SSH on the tailnet IP is separate (handled by tailscaled inside
+# the container, not via these published ports) and remains keyless.
+PublishPort=4444:22
+PublishPort=60000-61000:60000-61000/udp
 
 # Health check (matches run.sh's --health-cmd). pgrep needs procps-ng which is
 # installed in the base image.

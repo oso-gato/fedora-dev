@@ -1,7 +1,9 @@
 #!/bin/bash
 # fedora-dev PID 1 (root). Starts:
-#   * sshd (mosh rides on it; tailscale --ssh is the keyless tailnet door)
+#   * rsyslog (collects sshd auth events to /var/log/secure for fail2ban)
+#   * sshd (key-only; mosh rides on it; tailscale --ssh is the keyless tailnet door)
 #   * tailscaled (+ tailscale up, unattended via TS_AUTHKEY or interactive banner)
+#   * fail2ban (watches /var/log/secure, bans brute-force IPs on public :4444)
 #   * core's rootless podman API socket (CONTAINER_HOST target for the box)
 #   * inotify watcher for in-box claudebox-rebuild flag
 #   * daily-tick loop -> claudebox-daily.sh (rebuild if idle, else defer)
@@ -16,11 +18,10 @@ set -eu
 # rather than getting SIGKILLed after the 10-second podman-stop timeout.
 trap 'kill -TERM 0 2>/dev/null; exit 0' TERM INT
 
-# ---- runtime password (never baked into a layer; container refuses to start
-# without it so a published image can never carry a known default) ------------
-: "${CORE_PASSWORD:?CORE_PASSWORD must be set (use run.sh)}"
-echo "core:${CORE_PASSWORD}" | chpasswd
-unset CORE_PASSWORD
+# CORE_PASSWORD is no longer required (sshd is key-only as of v1.1.9; ssh
+# keys synced from github.com/oso-gato.keys below). Ignore the env var if
+# set, for backward compatibility with pre-v1.1.9 run.sh callers.
+unset CORE_PASSWORD 2>/dev/null || true
 
 # ---- home volume may be empty on first run ----------------------------------
 if [ ! -e /home/core/.bashrc ]; then
@@ -55,8 +56,42 @@ if [ ! -f /var/lib/tailscale/hostkeys/ssh_host_ed25519_key ]; then
 fi
 mkdir -p /run/sshd
 
-# ---- sshd first: reachable even before tailnet auth (mosh rides on sshd) ----
+# ---- sync core's ssh authorized_keys from github.com/oso-gato.keys ---------
+# Key-only sshd auth. Fetch from GitHub each boot, cache on the home volume.
+# If GitHub is briefly unreachable AND a cached file exists, keep the cache.
+# If GitHub is unreachable AND no cache: public ssh key-auth is closed until
+# next reachable sync — Tailscale SSH (keyless) remains the operator's path in.
+runuser -u core -- bash -c '
+    set -u
+    mkdir -p ~/.ssh
+    chmod 0700 ~/.ssh
+    tmp=$(mktemp)
+    if curl -fsSL --max-time 10 https://github.com/oso-gato.keys -o "$tmp" && [ -s "$tmp" ]; then
+        mv "$tmp" ~/.ssh/authorized_keys
+        chmod 0600 ~/.ssh/authorized_keys
+        echo "[ssh-keys] synced from github.com/oso-gato.keys ($(wc -l < ~/.ssh/authorized_keys) keys)"
+    else
+        rm -f "$tmp"
+        if [ -s ~/.ssh/authorized_keys ]; then
+            echo "[ssh-keys] GitHub unreachable; keeping cached ~/.ssh/authorized_keys"
+        else
+            echo "[ssh-keys] WARNING: GitHub unreachable AND no cached keys — public ssh closed; use Tailscale SSH to recover"
+        fi
+    fi
+'
+
+# ---- rsyslog: collect sshd auth events to /var/log/secure (fail2ban reads from there)
+/usr/sbin/rsyslogd -n &
+rsyslog_pid=$!
+
+# ---- sshd: reachable on container :22 (host publishes public :4444 via Quadlet) ----
 /usr/sbin/sshd
+
+# ---- fail2ban: brute-force protection on the public :4444 path ----
+# Starts after sshd so the log target exists. fail2ban tolerates a missing
+# log file at startup (begins watching once it appears).
+fail2ban-server -xf start &
+fail2ban_pid=$!
 
 # ---- tailscaled --------------------------------------------------------------
 /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state \
@@ -222,12 +257,14 @@ runuser -u core -- bash -c '
     fi
 ' &
 
-echo "fedora-dev up: ssh :22 + mosh (UDP 60000-61000), $(podman --version)"
+echo "fedora-dev up: ssh :22 (tailnet) + ssh :4444 (public, key-only) + mosh UDP 60000-61000, $(podman --version)"
 
 # ---- supervision: exit on service death; outer --restart=always heals -------
 while sleep 30; do
     pgrep -x tailscaled         >/dev/null 2>&1 || { echo "tailscaled died";       exit 1; }
     pgrep -x sshd               >/dev/null 2>&1 || { echo "sshd died";             exit 1; }
+    kill -0 "$rsyslog_pid"      2>/dev/null     || { echo "rsyslogd died";         exit 1; }
+    kill -0 "$fail2ban_pid"     2>/dev/null     || { echo "fail2ban-server died";  exit 1; }
     kill -0 "$podman_sock_pid"  2>/dev/null     || { echo "podman socket died";    exit 1; }
     kill -0 "$watcher_pid"      2>/dev/null     || { echo "rebuild watcher died";  exit 1; }
     kill -0 "$tick_pid"         2>/dev/null     || { echo "daily tick died";       exit 1; }

@@ -78,7 +78,9 @@ The fedora-dev image itself. Refreshed monthly via CI.
 | tmux | Fedora current | distro (a) | session multiplexer; every interactive login auto-attaches `main`. Trigger-and-detach is the operator pattern. |
 | distrobox | Fedora current | distro (a) | declaratively bootstraps the in-container claudebox via `distrobox assemble create --file distrobox.ini` |
 | inotify-tools | Fedora current | distro (a) | `inotifywait` in the entrypoint watches `rebuild.request` flag from the in-box agent (replaces systemd `.path` unit; no systemd here by design) |
-| sudo | Fedora current | distro (a) | break-glass escalation for the operator (`core` in `wheel`). Architectural use case: zero — keeping it for emergency manual repair of `/etc`, `/var/lib/tailscale` |
+| fail2ban | Fedora current | distro (a) | brute-force mitigation on the public ssh path (host :4444 → container :22, key-only). Watches `/var/log/secure`, bans IPs via iptables-nft. Tailnet CGNAT 100.64.0.0/10 is `ignoreip`'d. |
+| rsyslog | Fedora current | distro (a) | captures sshd's `AUTHPRIV` events to `/var/log/secure` so fail2ban can read them (no systemd-journald in this container) |
+| sudo | Fedora current | distro (a) | break-glass escalation for the operator (`core` in `wheel`). v1.1.9: no password set on `core` (chpasswd dropped), so sudo is effectively unreachable for the human; break-glass is `podman exec -u 0 fedora-dev bash` from the VPS host. Kept for completeness; near-zero footprint. |
 | procps-ng | Fedora current | distro (a) | `pgrep` for the entrypoint watchdog AND for `run.sh`'s `--health-cmd` |
 | glibc-langpack-en | Fedora current | distro (a) | UTF-8 rendering for tmux and the terminal observing Claude's output |
 | nano | Fedora current | distro (a) | one break-glass editor (Fedora 44's minimal base doesn't reliably ship `vi`). ~600KB |
