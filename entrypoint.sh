@@ -257,7 +257,7 @@ runuser -u core -- bash -c '
     fi
 ' &
 
-echo "fedora-dev up: ssh :22 (tailnet) + ssh :4444 (public, key-only) + mosh UDP 60000-61000, $(podman --version)"
+echo "fedora-dev up: ssh :22 (tailnet) + ssh :4444 (public, key-only) + mosh UDP 61001-62000, $(podman --version)"
 
 # ---- supervision: exit on service death; outer --restart=always heals -------
 while sleep 30; do

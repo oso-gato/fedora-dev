@@ -13,7 +13,7 @@
 # github.com/oso-gato.keys at every container start, cached on home volume.
 # No EnvironmentFile=, no CORE_PASSWORD, no env-file scaffold to populate.
 # Public ssh on host:4444 (container:22, key auth) + mosh public on UDP
-# 60000-61000. Tailscale SSH (tailnet, keyless) remains primary.
+# 61001-62000. Tailscale SSH (tailnet, keyless) remains primary.
 #
 # Optional: TS_AUTHKEY for unattended tailnet join can be added via a
 # `Secret=` directive (podman secret create fedora-dev-ts-authkey -); the
@@ -52,11 +52,11 @@ Volume=fedora-dev-state:/var/lib/tailscale
 
 # Public ports:
 #   4444/tcp -> container :22 (sshd, key-only; keys synced from github.com/oso-gato.keys)
-#   60000-61000/udp -> mosh (bootstraps over the same key-auth ssh)
+#   61001-62000/udp -> mosh (bootstraps over the same key-auth ssh)
 # Tailscale SSH on the tailnet IP is separate (handled by tailscaled inside
 # the container, not via these published ports) and remains keyless.
 PublishPort=4444:22
-PublishPort=60000-61000:60000-61000/udp
+PublishPort=61001-62000:61001-62000/udp
 
 # Health check (matches run.sh's --health-cmd). pgrep needs procps-ng which is
 # installed in the base image.

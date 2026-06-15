@@ -72,9 +72,9 @@ The fedora-dev image itself. Refreshed monthly via CI.
 | fuse-overlayfs | Fedora current | distro (a) | nested rootless storage driver (kernel forbids native overlay-on-overlay) |
 | passt | Fedora current | distro (a) | pasta — podman 5 default rootless network backend |
 | iptables-nft, nftables | Fedora current | distro (a) | tailscaled programs the firewall; crashes without the binaries |
-| openssh-server | Fedora current | distro (a) | the login door: mosh bootstraps over ssh; tmux auto-attach fires on every interactive login. Pulls in `openssh` (which ships `ssh-keygen` for runtime host-key generation) |
-| mosh | Fedora current | distro (a) | roaming-resilient remote shell (UDP, AEAD-authenticated; bootstraps over ssh) |
-| tailscale | Tailscale dnf/rpm repo | vendor (b) | tailnet access — the only exposure path for :22 and mosh's UDP range |
+| openssh-server | Fedora current | distro (a) | the login door (key-only since v1.1.9; keys synced from `github.com/<user>.keys` by entrypoint at every start). Two paths into :22 — Tailscale SSH on tailnet (keyless) AND public ssh on host :4444 → container :22. mosh bootstraps over either ssh path. |
+| mosh | Fedora current | distro (a) | roaming-resilient remote shell (UDP, AEAD-authenticated; bootstraps over ssh). v1.1.9: public UDP range 61001-62000 (non-default, to avoid colliding with the bootstrap host's own public mosh which uses 60000-61000 on the same kernel UDP namespace); clients invoke with `mosh -p 61001:62000 --ssh="ssh -p 4444"` for the public path. |
+| tailscale | Tailscale dnf/rpm repo | vendor (b) | tailnet node + keyless Tailscale SSH on the tailnet IP (primary access path). Co-exists with public ssh :4444 + public mosh 61001-62000 added in v1.1.9. |
 | tmux | Fedora current | distro (a) | session multiplexer; every interactive login auto-attaches `main`. Trigger-and-detach is the operator pattern. |
 | distrobox | Fedora current | distro (a) | declaratively bootstraps the in-container claudebox via `distrobox assemble create --file distrobox.ini` |
 | inotify-tools | Fedora current | distro (a) | `inotifywait` in the entrypoint watches `rebuild.request` flag from the in-box agent (replaces systemd `.path` unit; no systemd here by design) |

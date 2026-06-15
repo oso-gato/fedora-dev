@@ -21,7 +21,7 @@ A persistent headless workshop with three access paths and no passwords anywhere
 
 - **`ssh -p 4444 core@<public-ip>`** → public ssh on host port 4444 → container :22, key-only (authorized keys synced from `github.com/oso-gato.keys` at every container start). fail2ban protects against brute-force scanners.
 - **`ssh core@<vps>.<tailnet>.ts.net`** → keyless via Tailscale SSH (tailnet identity, gated by your Tailscale ACL).
-- **`mosh -p 4444 core@<public-ip>`** (or via tailnet) → roaming-resilient shell; UDP 60000-61000 published.
+- **`mosh -p 61001:62000 --ssh="ssh -p 4444" core@<public-ip>`** (or via tailnet) → roaming-resilient shell; UDP 61001-62000 published. The non-default UDP range avoids colliding with the bootstrap host's own public mosh-server (which uses the default 60000-61000) — the two services share the same kernel UDP namespace.
 
 All paths land in tmux session `main`. Sessions survive disconnects, container restarts, and image rebuilds (via persistent volumes).
 
