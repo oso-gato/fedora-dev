@@ -81,9 +81,9 @@ If a procedure you need isn't here, default to STOP-AND-SURFACE.
 ```sh
 cd ~/.local/share/fedora-dev          # the live git clone
 $EDITOR distrobox.ini                  # append to additional_packages= line (Fedora dnf package)
-$EDITOR README.md                      # add justifying row to Box Packages table
+$EDITOR CLAUDE.md                      # add justifying row to BOX PACKAGES table (in CLAUDE.md since v1.1.6+)
 git commit -am "claudebox: add <tool> — <one-line why>"
-gh pr create --title "claudebox: add <tool>" --body "..."
+gh pr create --title "claudebox: add <tool>" --body "<why this tool, what task needs it>"
 # After human merges, apply immediately:
 claudebox-rebuild                      # session ends; reconnect with `claude`
 # Or do nothing and the daily 04:00 rebuild picks it up.
@@ -152,10 +152,3 @@ cd ~/.local/share/fedora-dev
 cat CONVERT-TO-GIT.md          # exact commands — follow verbatim once the box is online
 ```
 
-### See what the next monthly fedora-dev base refresh would pull
-
-```sh
-podman pull --quiet ghcr.io/oso-gato/fedora-dev:latest > /dev/null \
-  && podman image inspect ghcr.io/oso-gato/fedora-dev:latest \
-       -f '{{.Id}} created={{.Created}}'
-```
