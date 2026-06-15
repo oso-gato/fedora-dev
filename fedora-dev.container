@@ -1,0 +1,72 @@
+# fedora-dev.container — systemd Quadlet for fedora-dev.
+#
+# DROP-IN PATH (rootless / user): ~/.config/containers/systemd/
+# DROP-IN PATH (rootful / system): /etc/containers/systemd/
+#
+# systemd-generator reads this on `systemctl --user daemon-reload` and emits
+# `fedora-dev.service`. Manage via:
+#   systemctl --user start fedora-dev.service
+#   systemctl --user status fedora-dev.service
+#   journalctl --user -u fedora-dev.service
+#
+# Prerequisite: a secrets env file at
+#   ~/.config/container-refresh/fedora-dev.env  (mode 0600)
+# containing at minimum:
+#   CORE_PASSWORD=<your password>
+# Optionally:
+#   TS_AUTHKEY=tskey-...   (unattended tailnet join; omit for interactive)
+#
+# fedora-bootstrap's setup-user.sh prepares the env file scaffold and copies
+# this Quadlet into place on the VPS. For non-fedora-bootstrap hosts, follow
+# README "Deploy via systemd Quadlet" for manual setup.
+
+[Unit]
+Description=fedora-dev — headless Fedora workshop for building container images
+Documentation=https://github.com/oso-gato/fedora-dev
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=ghcr.io/oso-gato/fedora-dev:latest
+ContainerName=fedora-dev
+# Pull a newer manifest on start; the host's workload-refresh harness gates
+# whether a restart actually happens via digest comparison + busy probe.
+Pull=newer
+# Label the container for `podman auto-update` discoverability (manual
+# `podman auto-update --dry-run` checks). The actual update cadence is driven
+# by the bootstrap workload-refresh harness, not the global auto-update timer.
+AutoUpdate=registry
+# Unit considered "active" when the healthcheck transitions to healthy.
+# Combined with rollback logic in container-refresh.sh, a failed-to-healthy
+# new image triggers retag-to-prior-digest and restart.
+Notify=healthy
+
+# Runtime args — mirror of legacy run.sh.
+AddCapability=NET_ADMIN
+AddDevice=/dev/net/tun
+AddDevice=/dev/fuse
+SecurityLabelDisable=true
+
+# Persistent volumes (named) — survive container recreation and image refresh.
+Volume=fedora-dev-home:/home/core
+Volume=fedora-dev-state:/var/lib/tailscale
+
+# Runtime secrets — operator must populate this file before first start.
+# (No `-` prefix = file MUST exist; systemd refuses to start if absent. This
+# is the same fail-fast contract the entrypoint enforces for CORE_PASSWORD.)
+EnvironmentFile=%h/.config/container-refresh/fedora-dev.env
+
+# Health check (matches run.sh's --health-cmd). pgrep needs procps-ng which is
+# installed in the base image.
+HealthCmd=pgrep -x sshd && pgrep -x tailscaled
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=30s
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

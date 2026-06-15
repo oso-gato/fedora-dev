@@ -1,5 +1,31 @@
 # fedora-dev
 
+## Purpose
+
+`fedora-dev` is a headless **build environment** for Fedora-based container
+images. It is one half of a strict two-agent pipeline:
+
+- **`fedora-dev` (this image)** — where Claude Code DEVELOPS and
+  VALIDATION-BUILDS container images. Its output is *pushed git commits* in
+  downstream image repositories. It NEVER deploys to hosts and NEVER manages
+  running containers.
+- **the host's claudebox** (in [`oso-gato/fedora-bootstrap`](https://github.com/oso-gato/fedora-bootstrap))
+  — where Claude Code DEPLOYS and OPERATES those images on the Fedora VPS.
+  It pulls from GHCR and recreates running containers via each image's
+  `run.sh`. It NEVER builds.
+
+The handoff is one-way and explicit:
+
+```
+develop HERE → push to GitHub → CI builds → publishes to
+ghcr.io/oso-gato/<name>:latest → host's claudebox pulls + recreates
+```
+
+An image that lives only inside this container is unfinished work. A finished
+change is pushed, CI-built, GHCR-published. If a task appears to require
+deploying or operating a container on any host, that work belongs to the
+host's claudebox — not here.
+
 ## Objective
 
 **A headless Fedora workshop where Claude Code builds Fedora-based container
@@ -74,9 +100,37 @@ Inside claudebox (`distrobox.ini`'s `additional_packages`). Refreshed daily by t
 
 ## Deploy
 
+Two paths, same image:
+
+### Quadlet (preferred for managed hosts — systemd lifecycle, health-check restart, fedora-bootstrap integration)
+
+The repo ships `fedora-dev.container` — a podman Quadlet (declarative systemd unit). Drop it in, populate the secrets env file, enable:
+
+```sh
+mkdir -p ~/.config/containers/systemd ~/.config/container-refresh
+cp fedora-dev.container ~/.config/containers/systemd/
+
+cat > ~/.config/container-refresh/fedora-dev.env <<EOF
+CORE_PASSWORD=<your password>
+# TS_AUTHKEY=tskey-...   # uncomment for unattended tailnet join
+EOF
+chmod 0600 ~/.config/container-refresh/fedora-dev.env
+
+systemctl --user daemon-reload
+systemctl --user enable --now fedora-dev.service
+```
+
+`fedora-bootstrap` performs all of this automatically when `fedora-dev` is in its `WORKLOAD_CONTAINERS` array — including pulling the Quadlet from this repo, writing the env file scaffold, and wiring the monthly refresh harness with busy-probe deferral and image-digest rollback.
+
+### run.sh (manual / interactive / non-systemd hosts)
+
 ```sh
 CORE_PASSWORD='…' [TS_AUTHKEY=tskey-…] [IMAGE=…] ./run.sh
 ```
+
+Same runtime spec as the Quadlet (volumes, devices, health-cmd, etc.) but bound to a one-shot `podman run -d` invocation with no systemd around it.
+
+### Connection
 
 - The entrypoint refuses to start without `CORE_PASSWORD` — a published image can never carry a default credential.
 - Connect: `ssh core@<tailnet-ip>` or `mosh core@<tailnet-ip>` — both land in tmux session `main`. Ports (22/tcp, 60000-61000/udp) tailnet-only — never publish.
