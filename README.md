@@ -1,110 +1,41 @@
 # fedora-dev
 
+A headless Fedora container that hosts Claude Code (in an in-container Distrobox "claudebox") for building Fedora-based container images. Daily-refreshed CLI, base image rebuilt monthly, persistent volumes for your work.
+
 ## Purpose
 
-`fedora-dev` is a headless **build environment** for Fedora-based container
-images. It is one half of a strict two-agent pipeline:
+`fedora-dev` is a **build environment**. One half of a strict two-agent pipeline:
 
-- **`fedora-dev` (this image)** — where Claude Code DEVELOPS and
-  VALIDATION-BUILDS container images. Its output is *pushed git commits* in
-  downstream image repositories. It NEVER deploys to hosts and NEVER manages
-  running containers.
-- **the host's claudebox** (in [`oso-gato/fedora-bootstrap`](https://github.com/oso-gato/fedora-bootstrap))
-  — where Claude Code DEPLOYS and OPERATES those images on the Fedora VPS.
-  It pulls from GHCR and recreates running containers via each image's
-  `run.sh`. It NEVER builds.
-
-The handoff is one-way and explicit:
+- **`fedora-dev` (this image)** — Claude Code DEVELOPS and VALIDATION-BUILDS container images here. Output is *pushed git commits* in downstream image repositories. **Never** deploys, **never** manages running containers.
+- **the host's claudebox** (in [`oso-gato/fedora-bootstrap`](https://github.com/oso-gato/fedora-bootstrap)) — Claude Code DEPLOYS and OPERATES those images on the Fedora VPS. **Never** builds.
 
 ```
-develop HERE → push to GitHub → CI builds → publishes to
-ghcr.io/oso-gato/<name>:latest → host's claudebox pulls + recreates
+develop HERE → push to GitHub → CI builds → ghcr.io/oso-gato/<name>:latest → host claudebox pulls + recreates
 ```
 
-An image that lives only inside this container is unfinished work. A finished
-change is pushed, CI-built, GHCR-published. If a task appears to require
-deploying or operating a container on any host, that work belongs to the
-host's claudebox — not here.
+An image that lives only inside this container is unfinished work. If a task wants to deploy or operate a container on any host — that work belongs to the host's claudebox, not here.
 
-## Objective
+## What you get when fedora-dev runs
 
-**A headless Fedora workshop where Claude Code builds Fedora-based container
-images.** You attach over ssh or mosh across the tailnet and land in tmux
-automatically (every interactive login attaches to session `main`). From there
-`claude` launches Claude Code inside an in-container **claudebox** (a Distrobox
-container managed declaratively by `distrobox.ini`); the agent uses `podman`
-to build and validate images via a bridge to fedora-dev's engine, then pushes
-to GitHub for CI to take over. mosh makes the connection resilient; even when
-the link dies, the tmux session, the box, and Claude's work survive.
+A persistent headless workshop reachable over the tailnet:
 
-Two cadences keep this current without babysitting:
+- **`ssh core@<tailnet-ip>` / `mosh core@<tailnet-ip>`** → both land in tmux session `main` automatically. Sessions survive disconnects, container restarts, and image rebuilds (via persistent volumes).
+- **`claude` from the tmux shell** → drops you into Claude Code running inside claudebox (a Distrobox). The agent's `podman build` invocations drive fedora-dev's own engine via a `CONTAINER_HOST` socket, so builds happen at fedora-dev's nesting level (no third level of overlay-on-overlay).
+- **Daily-fresh Claude Code** — the in-container claudebox is rebuilt every 24h from Anthropic's `latest` channel. Defers if a session is active; rebuilds on your next exit. Your Claude login survives (credentials live in `~/.claude` on the home volume, not in the disposable box).
+- **Monthly-fresh base image** — fedora-dev itself is rebuilt on the 15th by CI (`--no-cache`). Refreshes Fedora packages, tailscale, distrobox, the supervision stack. Image is cosign-signed via GitHub Actions OIDC.
+- **Persistent volumes** — `fedora-dev-home` (`/home/core`) carries your projects, Claude credentials, gh auth, nested podman storage, and the live spec clone across both box rebuilds AND fedora-dev container recreations. `fedora-dev-state` (`/var/lib/tailscale`) carries the tailnet identity + ssh host keys.
 
-- **fedora-dev base image** — rebuilt monthly via CI on the 15th (`--no-cache`).
-  Refreshes Fedora packages, tailscale, distrobox itself, the supervision stack.
-- **claudebox (Claude Code + its toolset)** — rebuilt **daily** at ~04:00 by an
-  in-container supervisor. Pulls Anthropic's `latest` channel each time. Live spec
-  lives on the home volume so mid-cycle edits survive monthly base recreations.
+## Using fedora-dev
 
-## Build Principles (binding — follow verbatim for any change to this repo)
+Two deployment paths, same image.
 
-| # | Principle | Rule |
-|---|---|---|
-| 1 | BASE | Build only from the official `registry.fedoraproject.org/fedora:${FEDORA_VERSION}` image. Version is a Containerfile `ARG` — never inlined. |
-| 2 | SOURCES | Every package from an official source, exactly one of: (a) Fedora's own repos via dnf; (b) the vendor's/developer's own RPM or dnf repo (`.repo` with `gpgcheck=1`); (c) at worst, a developer/vendor-released AppImage (sha256 logged). Never: COPR or other third-party repos, pip/npm/cargo/brew installs, curl-pipe-sh, tarball drops. **This applies to BOTH the base image AND claudebox's `additional_packages`.** Exceptions only by explicit user waiver, recorded in the relevant Packages table. **Current waivers: none.** |
-| 3 | MINIMAL | dnf only with `--setopt=install_weak_deps=False`. Every package gets a justifying row in the relevant Packages table (Base or Box); a package without a row is a violation. |
-| 4 | VERIFY FIRST | Before adopting or bumping any source/version, fact-check it against the live source (web). Gate risky installs (version-mismatched vendor RPMs, new repos) in a scratch container before editing build files. |
-| 5 | NO SECRETS / NO IDENTITY | No passwords, keys, or personal usernames in any layer, file, or commit. Container user is the generic `core` (uid 1000). Credentials enter only as runtime env vars; entrypoint fails fast when missing. |
-| 6 | PINS | Vendor artifact versions are Containerfile `ARG`s or pinned in `distrobox.ini` — bump there only, after rule 4. |
-| 7 | DEPLOY CONTRACT | Every image ships a `run.sh` that is the only sanctioned way to run it: runtime `--health-cmd` (OCI drops Containerfile HEALTHCHECK), devices, volumes, restart policy. Sensitive ports (ssh/RDP/VNC) stay tailnet-only — never `-p`. |
-| 8 | CI + LAYERED CADENCE | `.github/workflows/build.yml` publishes the base image to GHCR: on push, on the 15th monthly (`--no-cache`), and on manual dispatch. Built-in token only. The IN-CONTAINER claudebox refreshes daily on its own timer + ad-hoc triggers; it never touches CI. |
-| 9 | VALIDATE | After any change: build, deploy via `run.sh`, confirm `(healthy)` plus a functional probe of each access path. Final proof is CI green + a host deploy from claudebox-on-the-host. |
-| 10 | PROPOSE-AND-COMMIT | The in-box agent grows `distrobox.ini`/`policy/`/`box-rebuild.sh` only by editing the LIVE clone at `/home/core/.local/share/fedora-dev/` and opening a PR (`gh pr create`). The human merges; the next box rebuild applies it. Ad-hoc installs in a running box vanish on rebuild by design. |
+### Quadlet (preferred — managed by fedora-bootstrap, or set up manually)
 
-## Base Packages
+The repo ships `fedora-dev.container` — a podman Quadlet (declarative systemd-managed deployment) with `Notify=healthy`, `AutoUpdate=registry`, `HealthCmd=`, persistent volumes, and runtime secrets via `EnvironmentFile=`.
 
-The fedora-dev image itself. Refreshed monthly via CI.
+If your VPS is provisioned via [`fedora-bootstrap`](https://github.com/oso-gato/fedora-bootstrap) v1.1.1+, fedora-dev is deployed automatically when it's in the bootstrap's `WORKLOAD_CONTAINERS` array — including the Quadlet install, env-file scaffold, monthly refresh harness, busy-probe deferral, and image-digest rollback.
 
-| Package | Pin | Source (rule 2 class) | Why required |
-|---|---|---|---|
-| podman | Fedora current | distro (a) | the container ENGINE — claudebox runs on it; the agent's `podman build` lands here via CONTAINER_HOST |
-| shadow-utils | Fedora current | distro (a) | newuidmap/newgidmap setuid helpers — mandatory for nested rootless podman |
-| fuse-overlayfs | Fedora current | distro (a) | nested rootless storage driver (kernel forbids native overlay-on-overlay) |
-| passt | Fedora current | distro (a) | pasta — podman 5 default rootless network backend |
-| iptables-nft, nftables | Fedora current | distro (a) | tailscaled programs the firewall; crashes without the binaries |
-| openssh-server | Fedora current | distro (a) | the login door: mosh bootstraps over ssh; tmux auto-attach fires on every interactive login. Pulls in `openssh` (which ships `ssh-keygen` for runtime host-key generation) |
-| mosh | Fedora current | distro (a) | roaming-resilient remote shell (UDP, AEAD-authenticated; bootstraps over ssh) |
-| tailscale | Tailscale dnf/rpm repo | vendor (b) | tailnet access — the only exposure path for :22 and mosh's UDP range |
-| tmux | Fedora current | distro (a) | session multiplexer; every interactive login auto-attaches `main`. Trigger-and-detach is the operator pattern. |
-| distrobox | Fedora current | distro (a) | declaratively bootstraps the in-container claudebox via `distrobox assemble create --file distrobox.ini` |
-| inotify-tools | Fedora current | distro (a) | `inotifywait` in the entrypoint watches `rebuild.request` flag from the in-box agent (replaces systemd `.path` unit; we have no systemd here by design) |
-| sudo | Fedora current | distro (a) | break-glass escalation for the operator (`core` in `wheel`). Architectural use case: zero — keeping it for emergency manual repair of `/etc`, `/var/lib/tailscale` |
-| procps-ng | Fedora current | distro (a) | `pgrep` for the entrypoint watchdog AND for `run.sh`'s `--health-cmd` |
-| glibc-langpack-en | Fedora current | distro (a) | UTF-8 rendering for tmux and the terminal observing Claude's output |
-| nano | Fedora current | distro (a) | one break-glass editor (Fedora 44's minimal base doesn't reliably ship `vi`). ~600KB |
-
-## Box Packages
-
-Inside claudebox (`distrobox.ini`'s `additional_packages`). Refreshed daily by the in-container box rebuild from Anthropic's `latest` channel + Fedora repos.
-
-| Package | Pin | Source (rule 2 class) | Why required |
-|---|---|---|---|
-| claude-code | Anthropic dnf/rpm repo (**`latest`** channel) | vendor (b) | the agent — claudebox's purpose; refreshed daily so new model releases are accessible day one |
-| git | Fedora current | distro (a) | the VCS engine the agent drives for every project (Containerfiles, downstream image repos). Inside the box because the agent's shell is in the box |
-| gh | GitHub dnf/rpm repo | vendor (b) | GitHub/GHCR auth, PRs (the propose-and-commit lifecycle), releases. Inside the box because the agent uses it; auth state at `~/.config/gh/` lives on the home volume so it's shared with anything else that ever needs it |
-| openssh-clients | Fedora current | distro (a) | outbound ssh for git-over-ssh from inside the box |
-| podman (client) | Fedora current | distro (a) | the agent's `podman build/run/exec/healthcheck` for downstream images. Engine is at fedora-dev's level; CLI in the box drives it via `CONTAINER_HOST` |
-| bubblewrap | Fedora current | distro (a) | Linux user-namespace sandbox; Claude Code's Bash tool uses it for isolated tool execution |
-| socat | Fedora current | distro (a) | paired with bubblewrap for IPC socket relay into/out of the sandbox |
-| host-spawn | Fedora current | distro (a) | distrobox container-side host-exec component. Headless = no flatpak-session-helper, so the actual shims are deliberately NOT wired up; this package's presence prevents distrobox-create from `curl`'ing it from GitHub releases (source-control discipline per rule 2) |
-| rclone | Fedora current | distro (a) | the agent's cloud/SMB/SSH/object-store reach for build files on other network drives |
-
-## Deploy
-
-Two paths, same image:
-
-### Quadlet (preferred for managed hosts — systemd lifecycle, health-check restart, fedora-bootstrap integration)
-
-The repo ships `fedora-dev.container` — a podman Quadlet (declarative systemd unit). Drop it in, populate the secrets env file, enable:
+For manual setup on any systemd host:
 
 ```sh
 mkdir -p ~/.config/containers/systemd ~/.config/container-refresh
@@ -120,65 +51,122 @@ systemctl --user daemon-reload
 systemctl --user enable --now fedora-dev.service
 ```
 
-`fedora-bootstrap` performs all of this automatically when `fedora-dev` is in its `WORKLOAD_CONTAINERS` array — including pulling the Quadlet from this repo, writing the env file scaffold, and wiring the monthly refresh harness with busy-probe deferral and image-digest rollback.
-
-### run.sh (manual / interactive / non-systemd hosts)
+### run.sh (interactive / non-systemd hosts)
 
 ```sh
 CORE_PASSWORD='…' [TS_AUTHKEY=tskey-…] [IMAGE=…] ./run.sh
 ```
 
-Same runtime spec as the Quadlet (volumes, devices, health-cmd, etc.) but bound to a one-shot `podman run -d` invocation with no systemd around it.
+Same runtime spec as the Quadlet (volumes, devices, health-cmd) but a one-shot `podman run -d` with no systemd around it. Useful for the very first deploy when tailnet auth is interactive, or for hosts without systemd.
 
-### Connection
+### First boot
 
-- The entrypoint refuses to start without `CORE_PASSWORD` — a published image can never carry a default credential.
-- Connect: `ssh core@<tailnet-ip>` or `mosh core@<tailnet-ip>` — both land in tmux session `main`. Ports (22/tcp, 60000-61000/udp) tailnet-only — never publish.
-- Volumes: `fedora-dev-home` (/home/core; preserves agent state, claude credentials, the LIVE distrobox.ini clone, podman storage), `fedora-dev-state` (tailscale state + ssh host keys, root-owned so the unprivileged user cannot swap host keys).
-- Tailscale SSH is enabled (`--ssh`): once joined, any tailnet device can `ssh core@<hostname>` keylessly (lands in tmux).
-- **First boot takes ~2-5 minutes** as the entrypoint clones the live spec and eagerly assembles claudebox in the background. Subsequent boots are instant. `claude` from the tmux shell starts the agent.
+Takes ~2-5 minutes. The entrypoint clones the live spec from this repo and eagerly assembles claudebox in the background (dnf-installs claude-code + tools inside the box). Subsequent boots are instant. The first `claude` invocation will tail the assemble log if it's still in progress.
 
-## Claudebox lifecycle
+If TS_AUTHKEY isn't set, the tailnet join is interactive — `podman logs -f fedora-dev` to find the login.tailscale.com URL, click it once.
 
-claudebox is rebuilt — never updated. Three paths, all converge on `box-rebuild.sh` (which runs detached via `setsid nohup` so it outlives the box it tears down):
+## Operating fedora-dev (day-to-day)
 
-1. **Daily** — `entrypoint.sh`'s daily-tick loop (`sleep 86400`) fires `claudebox-daily.sh` at ~04:00 each day. If `claude` is in a session (a SHARED `flock` is held on `~/.local/state/claudebox/session.lock`), the rebuild **defers**: drops a `rebuild.pending` marker. The `claude` wrapper checks the marker on session exit and fires the rebuild then. Live work is never interrupted.
-2. **Ask Claude** — in-box `claudebox-rebuild` writes `~/.local/state/claudebox/rebuild.request`. The fedora-dev entrypoint's `inotifywait` watcher sees it (across the bind-mounted $HOME), consumes the flag, fires `box-rebuild.sh` detached. This session ends shortly; reconnect with `claude`.
-3. **Manual** — `claudebox-rebuild` from the outer tmux shell starts the rebuild directly and tails the log.
+### Connect and work
 
-Every rebuild: `distrobox rm -f claudebox` → `claudebox-assemble.sh` → fresh `distrobox assemble create` from `~/.local/share/fedora-dev/distrobox.ini` → reinstall latest-channel claude-code + tools → re-apply host bridges (`claudebox-init.sh`) → re-stamp policy (`policy/CLAUDE.md` + `managed-settings.json`). Your Claude login survives (it's in `~/.claude`, on the home volume).
+```sh
+ssh core@<tailnet-ip>             # or mosh; both land in tmux 'main'
+claude                            # opens Claude Code inside claudebox
+```
 
-### Live spec vs baked seed
+Detach with `Ctrl-b d`; reattach by logging in again. The tmux session, the claudebox, and Claude's work all survive disconnects.
 
-`distrobox.ini` lives in **two** places:
+Inside the box, the agent uses `podman` to build/test downstream images:
 
-- **Baked into the image** at `/usr/local/share/fedora-dev/` — used ONLY on first boot if the live clone doesn't exist yet (or as a seed when GitHub is unreachable).
-- **Live git clone** at `/home/core/.local/share/fedora-dev/` — the runtime source of truth. Persists on the home volume across fedora-dev container recreations (so mid-cycle edits SURVIVE the monthly base-image refresh).
+```sh
+# (from inside claudebox, after `claude`)
+cd ~/projects/<image-name>
+podman build -t <name>:test -f Containerfile .
+./run.sh                          # validate per the image's Principle 9
+podman ps --filter name=<name>    # confirm (healthy)
+# functional probe per the image's README
+gh pr create                      # propose-and-commit when ready
+```
 
-The agent edits the live clone, opens a PR with `gh pr create`, and the human merges. CI rebuilds the base with the new baked seed; the running container's live clone is unchanged. The agent can `git pull origin main` on the live clone to converge it with main after merge.
+Note: `podman build` here runs in **fedora-dev's engine** via `CONTAINER_HOST` — one level of nesting, fuse-overlayfs storage on the home volume. Built images, layer cache, and stopped containers persist across box rebuilds and fedora-dev recreations.
 
-## Nested builds — `podman build` from inside the box
+### Claudebox lifecycle — when it rebuilds, why your work is safe
 
-As `core` inside claudebox: `podman build/run/exec/healthcheck` "just works" because `CONTAINER_HOST=unix:///run/user/1000/podman/podman.sock` is exported in the box's `/etc/profile.d/10-host-podman.sh` (written by `claudebox-init.sh` post-assemble). That socket is **fedora-dev's** rootless podman API socket, served by `podman system service` supervised in the entrypoint. distrobox bind-mounts `/run/user/1000/` from fedora-dev into the box at the same path.
+claudebox is **rebuilt** (never updated) — every rebuild reinstalls the latest Claude Code + tools. Three rebuild paths:
 
-So `podman build .` inside the box runs in **fedora-dev's engine** (one level of nesting, fuse-overlayfs storage on the home volume at `~/.local/share/containers/`), NOT in another nested engine inside the box. Storage, layer cache, built images, and stopped containers persist across box rebuilds AND across fedora-dev container recreations.
+1. **Daily** — automatic at ~04:00 local. If you're in a `claude` session, the rebuild **defers** (drops a marker); your `claude` wrapper fires the rebuild the moment you exit. Live work is never interrupted.
+2. **Ask Claude** — run `claudebox-rebuild` inside the box. Your session ends shortly; reconnect with `claude`.
+3. **Manual host-shell** — run `claudebox-rebuild` from the outer tmux shell. Starts + tails the rebuild inline.
 
-Subuid/subgid: `core:10000:55000` (sized to fit the outer rootless 65536-ID map; inner chowns to uid ≥ 55001 will fail — enlarge the host range first if ever needed).
+Your Claude login + transcripts survive every rebuild (they live in `~/.claude` on the home volume). Your projects, gh auth, nested podman images and storage — all persist.
 
-No systemd inside: cgroupfs manager + file events logger preconfigured; XDG_RUNTIME_DIR provided by the entrypoint; the rebuild-trigger machinery is supervised by the entrypoint's pgrep watchdog instead of systemd units (faithful to fedora-dev's PID-1 design).
+### Validation discipline (Principle 9)
 
-Host prerequisite (Debian hosts only): if `kernel.unprivileged_userns_apparmor_policy = 1`, nested rootless podman fails — relax the sysctl or run on Fedora-family hosts (SELinux, unaffected; `run.sh` already carries `--security-opt label=disable`).
+Before declaring any built image "done":
 
-## Cadence summary
+1. **Build** with `podman build -f Containerfile .`
+2. **Deploy locally** via the image's `run.sh` (never hand-roll `podman run` — run.sh carries the `--health-cmd` and the right devices/volumes/restart policy)
+3. **Confirm `(healthy)`** in `podman ps`
+4. **Functional-probe each access path** documented in the image's README
 
-| Layer | Cadence | Trigger | Source |
-|---|---|---|---|
-| Base image (RPM updates) | Monthly (15th @ 04:00 UTC) | CI cron `--no-cache` | Fedora + tailscale repos |
-| Base image (spec changes) | On push to `main` | CI `on: push` | merged PRs from in-box agent |
-| Claudebox (CLI + tools) | Daily (~04:00) | in-container `claudebox-daily.sh`; defers if session active | Anthropic `latest` channel + Fedora repos |
-| Claudebox (ad-hoc) | On demand | in-box `claudebox-rebuild` OR host-shell `claudebox-rebuild` | same as daily |
-| fedora-dev container itself | Operator-driven (or host cron) | safe-refresh on monthly cadence; SESSION-LOCK PROBE defers if claude is busy | new fedora-dev image from GHCR |
+Final proof = CI green on GitHub + a host-side deploy from claudebox-on-the-host. Passing local validation that isn't pushed is unfinished work.
 
-The fedora-dev container recreate is the only path that's external to fedora-dev itself — see `fedora-bootstrap` for the host-side `container-refresh.sh` + systemd timer that owns it.
+### Propose-and-commit (governance for the in-box agent)
 
-Base bump: `ARG FEDORA_VERSION` in Containerfile (Fedora releases EOL ~13 months — bump about twice a year, re-verifying vendor repos per principle 4). The box's `image=` line in `distrobox.ini` (fedora-toolbox tag) must be bumped in lockstep.
+Durable changes to fedora-dev itself — the distrobox.ini spec, scripts, policy — flow through git, not ad-hoc edits:
+
+1. Edit the LIVE clone at `~/.local/share/fedora-dev/` (persists across rebuilds)
+2. `gh pr create` from the clone
+3. Human reviews + merges
+4. Next claudebox rebuild applies the merged change (CI rebuilds the base image too, eventually)
+
+Ad-hoc `dnf install` inside the running box works during the session but vanishes on the next rebuild — by design.
+
+## Notes
+
+- **Nested rootless podman on Debian-family hosts**: if `kernel.unprivileged_userns_apparmor_policy = 1`, nested rootless podman fails with `newuidmap: ... Operation not permitted`. Relax the sysctl, add a scoped AppArmor profile granting `userns,`, or run on Fedora-family hosts (SELinux is unaffected; `run.sh` already carries `--security-opt label=disable`).
+- **Distrobox 2.0 (Go rewrite)** is in RC: same manifest/CLI interface promised. Re-verify on Fedora's first 2.0 ship.
+- **Fedora base bump** (44 → 45 etc.): `ARG FEDORA_VERSION` in Containerfile is the single source of truth. The box's `image=quay.io/fedora/fedora-toolbox:N` line in distrobox.ini must bump in lockstep. Fedora releases EOL ~13 months — plan for twice a year.
+
+---
+
+## Appendix — Design overview
+
+PRD-style summary. Binding rules, file inventory, full package tables live in [CLAUDE.md](CLAUDE.md).
+
+### Requirement
+
+A headless container that's a productive Claude Code workshop for building Fedora-based container images, where:
+
+- The agent (Claude Code) is always up to date (within ~24h of any release)
+- The base environment is reproducibly rebuilt from official sources (no curl-pipe-sh, no language-package globals)
+- Builds happen at one nesting level only (no overlay-on-overlay)
+- The operator's work survives every refresh — daily box rebuild, monthly base recreate, container restart
+- Changes flow through git and CI; ad-hoc state vanishes by design
+
+### Design principles
+
+1. **Two-tier image.** Minimal base (supervision + podman engine + tailnet + login plumbing), refreshed monthly. The CLI + dev tools live in a Distrobox `claudebox` rebuilt daily from Anthropic's `latest` channel. Decouples the slow base cadence from the fast tool cadence.
+2. **Persistent state on volumes, not in layers.** `fedora-dev-home` carries everything that matters (projects, credentials, transcripts, podman storage, the live spec clone). Volumes survive box rebuilds AND container recreations. Layers are disposable.
+3. **CONTAINER_HOST bridge for builds.** Claudebox has a `podman` CLI client; it talks to fedora-dev's rootless engine via a Unix socket. Builds run in fedora-dev's engine (one level of nesting), not in a third-level nested engine.
+4. **Propose-and-commit.** The in-box agent grows `distrobox.ini`/`policy/`/scripts only by editing the LIVE git clone and opening a PR. Ad-hoc box installs vanish on rebuild — by design, that's the discipline that keeps the box reproducible.
+5. **Layered cadence keeps the system fresh autonomously.** Monthly base rebuild + daily box rebuild + on-demand triggers. The box rebuild defers on active sessions so live work is never killed.
+6. **Cosign-signed image** (since `9180a24`). Keyless via GitHub Actions OIDC. The signature attaches to the immutable manifest digest; fedora-bootstrap can verify it via `policy.json sigstoreSigned` once enabled fleet-wide.
+
+### Outcomes achieved
+
+- A single `ssh core@<host>; claude` to get into a current Claude Code session, every day, without manual upkeep
+- Build → validate → push cycle for downstream Fedora-based container images
+- Every Anthropic `latest`-channel release is in your box within ~24h
+- Mid-flight Claude work is never killed by scheduled refresh
+- All packages from official sources (Fedora repos / vendor RPMs); explicit waiver list (currently: none)
+- Source-of-truth chain: live spec in container → PR → main → CI → GHCR → next host refresh
+
+### Where to look next
+
+| Looking for | Where |
+|---|---|
+| Binding rules for editing this repo (Build Principles + Packages tables) | [CLAUDE.md](CLAUDE.md) |
+| Runtime law for the in-claudebox agent (its mission, do/don't, source rules) | [policy/CLAUDE.md](policy/CLAUDE.md) |
+| Refresh-script + workload-refresh harness internals | [oso-gato/fedora-bootstrap](https://github.com/oso-gato/fedora-bootstrap) |
+| Per-file purposes inside fedora-dev's repo | [CLAUDE.md](CLAUDE.md) — REPO FILE PURPOSES table |
