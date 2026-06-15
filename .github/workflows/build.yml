@@ -17,6 +17,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write  # OIDC for cosign keyless signing
 
 jobs:
   build:
@@ -32,6 +33,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
       - name: Compute tags
         id: meta
         run: |
@@ -39,6 +43,7 @@ jobs:
           echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -49,3 +54,13 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/fedora-dev:latest
             ghcr.io/${{ github.repository_owner }}/fedora-dev:${{ steps.meta.outputs.date }}
             ghcr.io/${{ github.repository_owner }}/fedora-dev:${{ steps.meta.outputs.sha }}
+
+      # Keyless cosign signing via GitHub Actions OIDC.
+      # Signs the IMMUTABLE manifest digest (not the mutable tags). The
+      # signature attaches to the registry as an OCI artifact next to the
+      # image and is verified by host policy.json on pull (sigstoreSigned).
+      - name: Sign image with cosign
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/fedora-dev
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
