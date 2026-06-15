@@ -1,7 +1,20 @@
 #!/bin/bash
-# PID 1 (root). Starts sshd unconditionally (mosh rides on it), tailscaled with
-# TS_AUTHKEY (unattended) or an ACTION-REQUIRED login banner, then supervises.
+# fedora-dev PID 1 (root). Starts:
+#   * sshd (mosh rides on it; tailscale --ssh is the keyless tailnet door)
+#   * tailscaled (+ tailscale up, unattended via TS_AUTHKEY or interactive banner)
+#   * core's rootless podman API socket (CONTAINER_HOST target for the box)
+#   * inotify watcher for in-box claudebox-rebuild flag
+#   * daily-tick loop -> claudebox-daily.sh (rebuild if idle, else defer)
+#   * eager first-boot claudebox assemble (background)
+# Supervises all of them in a pgrep + kill-0 watchdog loop; outer --restart=always
+# heals on any death.
 set -eu
+
+# Graceful shutdown: when the host's container-refresh.sh `podman stop`s us, we
+# get SIGTERM. Propagate it to our process group so sshd closes connections
+# cleanly, tailscaled deregisters cleanly, supervised children exit cleanly,
+# rather than getting SIGKILLed after the 10-second podman-stop timeout.
+trap 'kill -TERM 0 2>/dev/null; exit 0' TERM INT
 
 # ---- runtime password (never baked into a layer; container refuses to start
 # without it so a published image can never carry a known default) ------------
@@ -13,10 +26,27 @@ unset CORE_PASSWORD
 if [ ! -e /home/core/.bashrc ]; then
     cp -rT /etc/skel /home/core
 fi
-chown core:core /home/core
+# Recursive chown — non-recursive leaves the cp'd dotfiles root-owned, which
+# breaks any non-sudo edit by core inside or outside the box.
+chown -R core:core /home/core
 
 # ---- rootless podman needs a runtime dir (no systemd/PAM session manager) ---
 install -d -m 0700 -o core -g core /run/user/1000
+
+# ---- defensive: restore newuidmap/newgidmap file caps if overlay stripped them
+# Build-time setcap (install.sh) doesn't always survive layer commits in every
+# podman storage configuration; the security.capability xattr can be lost. We
+# verify + restore at boot. Idempotent: no-op when caps are already present.
+for bin in /usr/bin/newuidmap /usr/bin/newgidmap; do
+    [ -x "$bin" ] || continue
+    if ! getcap "$bin" | grep -q "cap_set"; then
+        case "$bin" in
+            */newuidmap) setcap cap_setuid+ep "$bin" ;;
+            */newgidmap) setcap cap_setgid+ep "$bin" ;;
+        esac
+        echo "[caps] restored on $bin"
+    fi
+done
 
 # ---- persistent ssh host keys on the root-owned state volume ----------------
 install -d -m 0700 /var/lib/tailscale/hostkeys
@@ -55,10 +85,150 @@ else
     echo "=================================================================="
 fi
 
+# ============================================================================
+# Box supervisor: live-spec bootstrap + long-running processes + watchdog
+# ============================================================================
+
+# State dir for box lifecycle (session lock, rebuild flag, pending marker, logs)
+install -d -m 0755 -o core -g core /home/core/.local/state/claudebox
+
+# ---- live-spec bootstrap (first boot only) ---------------------------------
+# Clone the fedora-dev repo to /home/core/.local/share/fedora-dev/ — this is the
+# LIVE source of truth for distrobox.ini and the box scripts. It persists on the
+# home volume across fedora-dev container recreations (which is how mid-cycle
+# distrobox.ini edits SURVIVE the monthly base-image refresh).
+#
+# Fallback: if GitHub is genuinely unreachable after 5 retries, copy files from
+# the baked seed WITHOUT git-init. A seeded-no-git state lets the box rebuild,
+# the daily tick, and the inotify watcher all keep working (they read files,
+# not git). The agent's propose-and-commit cycle is blocked until they convert
+# to a real clone — see CONVERT-TO-GIT.md dropped alongside the files.
+# (A previous design did `git init && commit` here to fake a clone, but that
+# leaves an unrelated-history repo that can't `git pull origin main` cleanly.)
+runuser -u core -- bash <<'BOOTSTRAP'
+set -u
+live=/home/core/.local/share/fedora-dev
+seed=/usr/local/share/fedora-dev
+mkdir -p "$(dirname "$live")"
+
+if [ -d "$live/.git" ]; then
+    echo "[live-spec] git clone already present at $live"
+elif [ -f "$live/.seeded-no-git" ]; then
+    echo "[live-spec] seeded-no-git state present; agent must convert to clone (see CONVERT-TO-GIT.md)"
+else
+    cloned=0
+    for attempt in 1 2 3 4 5; do
+        if git clone --depth 1 https://github.com/oso-gato/fedora-dev "$live" 2>/dev/null; then
+            cloned=1; break
+        fi
+        echo "[live-spec] clone attempt $attempt failed; retrying in $((attempt*5))s"
+        sleep $((attempt*5))
+    done
+    if [ "$cloned" = 1 ]; then
+        # Generic per-repo git identity so the agent's first `git commit` doesn't
+        # fail with "Author identity unknown". Generic, non-personal — agent can
+        # override with their own per-PR. Stays out of layers (principle 5).
+        ( cd "$live" \
+          && git config --local user.email "claudebox@fedora-dev.local" \
+          && git config --local user.name  "claudebox" )
+        echo "[live-spec] cloned from GitHub + git identity initialized"
+    else
+        echo "[live-spec] GitHub unreachable after 5 attempts — seeding files only (no git)"
+        mkdir -p "$live"
+        cp -rT "$seed" "$live"
+        date -Iseconds > "$live/.seeded-no-git"
+        cat > "$live/CONVERT-TO-GIT.md" <<'NOTE'
+# This live spec was seeded from the baked image because GitHub was
+# unreachable at first boot.
+
+The box-rebuild, daily-tick, and inotify-watcher all work in this state —
+they read files, not git. What's BLOCKED until you convert: the
+propose-and-commit cycle (`git commit` + `gh pr create`).
+
+To convert to a real git clone, ONCE the box has internet to GitHub:
+
+    cd ~/.local/share/fedora-dev
+    rm -f .seeded-no-git CONVERT-TO-GIT.md
+    git init
+    git remote add origin https://github.com/oso-gato/fedora-dev
+    git fetch --depth 1 origin main
+    git reset --hard origin/main
+    git config --local user.email "claudebox@fedora-dev.local"
+    git config --local user.name  "claudebox"
+
+After this the propose-and-commit flow works normally.
+NOTE
+    fi
+fi
+BOOTSTRAP
+
+# ---- supervised: rootless podman API socket (CONTAINER_HOST target) --------
+# The box's `podman` CLI talks to this socket to drive fedora-dev's engine.
+# Replaces bootstrap's `systemctl --user enable podman.socket` (no systemd here).
+runuser -u core -- podman system service --time=0 \
+    unix:///run/user/1000/podman/podman.sock &
+podman_sock_pid=$!
+
+# ---- supervised: inotify watcher for in-box rebuild flag -------------------
+# When Claude inside the box runs `claudebox-rebuild`, it writes a flag to
+# ~/.local/state/claudebox/rebuild.request. inotifywait MONITOR mode keeps the
+# inotify fd open across events, eliminating the missed-events-between-iterations
+# race a `while inotifywait` loop has. box-rebuild.sh self-serializes via flock,
+# so a spurious double-fire is safe.
+runuser -u core -- bash -c '
+mkdir -p /home/core/.local/state/claudebox
+inotifywait -m -q -e create /home/core/.local/state/claudebox/ --format "%f" 2>/dev/null \
+    | while IFS= read -r fname; do
+        [ "$fname" = "rebuild.request" ] || continue
+        rm -f /home/core/.local/state/claudebox/rebuild.request
+        setsid nohup bash /home/core/.local/share/fedora-dev/box-rebuild.sh \
+            > /home/core/.local/state/claudebox/rebuild.log 2>&1 < /dev/null &
+    done
+' &
+watcher_pid=$!
+
+# ---- supervised: daily-tick loop -------------------------------------------
+# Wall-clock scheduling at ~04:00 local time — survives container restarts
+# (a naive `sleep 86400` would re-base the schedule on every fedora-dev restart,
+# so frequent recreations could mean the daily refresh NEVER fires within a day).
+# claudebox-daily.sh probes the session lock: idle -> rebuild now,
+# active -> drop rebuild.pending (the `claude` wrapper fires it on exit).
+runuser -u core -- bash -c '
+while true; do
+    now=$(date +%s)
+    today4=$(date -d "today 04:00" +%s)
+    if [ "$today4" -gt "$now" ]; then
+        next=$today4
+    else
+        next=$(date -d "tomorrow 04:00" +%s)
+    fi
+    sleep $((next - now))
+    setsid nohup bash /home/core/.local/share/fedora-dev/claudebox-daily.sh \
+        > /home/core/.local/state/claudebox/daily.log 2>&1 < /dev/null &
+done
+' &
+tick_pid=$!
+
+# ---- eager first-boot claudebox assemble (one-shot, background) -----------
+# Doesn't block sshd — you can connect immediately; `claude` will tail this if
+# you try to enter the box before assemble completes.
+runuser -u core -- bash -c '
+    if [ ! -e /home/core/.local/state/claudebox/.assembled ]; then
+        echo "[first-boot] assembling claudebox in the background..."
+        bash /home/core/.local/share/fedora-dev/claudebox-assemble.sh \
+            > /home/core/.local/state/claudebox/first-assemble.log 2>&1 < /dev/null \
+            && echo "[first-boot] claudebox ready" \
+            || echo "[first-boot] assemble FAILED — see ~/.local/state/claudebox/first-assemble.log"
+    fi
+' &
+
 echo "fedora-dev up: ssh :22 + mosh (UDP 60000-61000), $(podman --version)"
 
 # ---- supervision: exit on service death; outer --restart=always heals -------
 while sleep 30; do
-    pgrep -x tailscaled >/dev/null || { echo "tailscaled died"; exit 1; }
-    pgrep -x sshd       >/dev/null || { echo "sshd died";       exit 1; }
+    pgrep -x tailscaled         >/dev/null 2>&1 || { echo "tailscaled died";       exit 1; }
+    pgrep -x sshd               >/dev/null 2>&1 || { echo "sshd died";             exit 1; }
+    kill -0 "$podman_sock_pid"  2>/dev/null     || { echo "podman socket died";    exit 1; }
+    kill -0 "$watcher_pid"      2>/dev/null     || { echo "rebuild watcher died";  exit 1; }
+    kill -0 "$tick_pid"         2>/dev/null     || { echo "daily tick died";       exit 1; }
 done

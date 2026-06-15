@@ -5,7 +5,13 @@ on:
     branches:
       - main
   schedule:
-    - cron: "0 4 1,15 * *"
+    # Monthly --no-cache rebuild on the 15th at 04:00 UTC. The bi-weekly cadence
+    # was too aggressive given the in-fedora-dev claudebox already refreshes
+    # claude-code DAILY from Anthropic's `latest` channel. The base only needs
+    # to pick up upstream RPM updates (Fedora, tailscale, distrobox) — monthly
+    # is plenty. Host-side image refresh respects an in-fedora-dev session lock
+    # so this cron doesn't kill mid-flight work (see fedora-bootstrap).
+    - cron: "0 4 15 * *"
   workflow_dispatch:
 
 permissions:

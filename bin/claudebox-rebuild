@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# fedora-dev — host-shell `claudebox-rebuild`. Baked at /usr/local/bin/claudebox-rebuild.
+#
+# Triggers + follows a full claudebox rebuild. The rebuild itself runs DETACHED
+# (setsid nohup) so Ctrl-C here is safe — the rebuild keeps going.
+#
+# Usage:
+#   claudebox-rebuild              start a rebuild and follow it to completion
+#   claudebox-rebuild --watch-only follow an already-running rebuild (used by `claude`)
+set -uo pipefail
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+state="$HOME/.local/state/claudebox"; mkdir -p "$state"
+log="$state/rebuild.log"
+
+if [ "${1:-}" != "--watch-only" ]; then
+    if pgrep -f "fedora-dev/box-rebuild.sh" >/dev/null 2>&1; then
+        echo ">> claudebox: rebuild already in progress — following it"
+    else
+        echo ">> claudebox: starting rebuild — fresh image + latest Claude Code (~2-5 min)…"
+        : > "$log"
+        setsid nohup bash /home/core/.local/share/fedora-dev/box-rebuild.sh \
+            > "$log" 2>&1 < /dev/null &
+        sleep 1
+    fi
+fi
+
+# Follow the log until the rebuild process exits.
+tail -F -n +1 "$log" 2>/dev/null &
+tail_pid=$!
+trap 'kill $tail_pid 2>/dev/null' EXIT INT TERM
+
+while pgrep -f "fedora-dev/box-rebuild.sh" >/dev/null 2>&1; do
+    sleep 2
+done
+sleep 1
+echo ">> claudebox rebuild COMPLETE — run 'claude' to reconnect."

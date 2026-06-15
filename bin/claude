@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# fedora-dev — the `claude` entry wrapper. Baked at /usr/local/bin/claude.
+#
+# Runs Claude Code INSIDE claudebox. Holds a SHARED `flock` on session.lock for the
+# session's lifetime so that:
+#   * the daily in-box rebuild (claudebox-daily.sh) defers while you work
+#   * the host's monthly fedora-dev refresh (lock-probed via `podman exec`) defers
+#     while you work
+#
+# On exit:
+#   (a) If a Claude-triggered rebuild is running, follow it instead of leaving you
+#       at the prompt thinking you're done.
+#   (b) Else if a daily refresh was deferred AND no other session is active now,
+#       fire the rebuild and follow it.
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+state="$HOME/.local/state/claudebox"; mkdir -p "$state"
+
+# If a rebuild is already in flight, don't enter a half-built box — follow it.
+if pgrep -f "fedora-dev/box-rebuild.sh" >/dev/null 2>&1; then
+    exec /usr/local/bin/claudebox-rebuild --watch-only
+fi
+
+# If first-boot assemble hasn't happened yet (eager assemble still running, or it
+# crashed), wait for it or report.
+if [ ! -e "$state/.assembled" ]; then
+    if pgrep -f "fedora-dev/claudebox-assemble.sh" >/dev/null 2>&1; then
+        echo ">> first-boot claudebox assemble is still running — tailing it…"
+        echo "   ($(date)) Once complete this command will continue."
+        tail -F "$state/first-assemble.log" 2>/dev/null &
+        tail_pid=$!
+        while pgrep -f "fedora-dev/claudebox-assemble.sh" >/dev/null 2>&1; do sleep 2; done
+        kill "$tail_pid" 2>/dev/null
+    else
+        echo ">> first-boot assemble has not run yet — starting it inline."
+        bash /home/core/.local/share/fedora-dev/claudebox-assemble.sh \
+            2>&1 | tee "$state/first-assemble.log"
+    fi
+fi
+
+# Hold the SHARED session lock for the session's lifetime.
+flock -s "$state/session.lock" \
+    distrobox enter claudebox -- bash -lc 'exec /usr/bin/claude "$@"' bash "$@"
+rc=$?
+
+# Post-session: follow a Claude-triggered rebuild, or fire a deferred daily one.
+if pgrep -f "fedora-dev/box-rebuild.sh" >/dev/null 2>&1; then
+    exec /usr/local/bin/claudebox-rebuild --watch-only
+fi
+
+# Atomic check-and-claim of rebuild.pending under EXCLUSIVE session lock:
+# protects against two concurrent `claude` exits both seeing the marker and
+# both firing a rebuild. Subshell opens fd 9 to session.lock; flock -n -x
+# claims; second concurrent exit's flock fails non-blockingly and exits 1.
+# Release the lock (exec 9>&-) BEFORE launching claudebox-rebuild so the lock
+# doesn't get inherited and held by the rebuild process (which would confuse
+# the next daily probe).
+(
+    flock -n -x 9 || exit 1
+    [ -e "$state/rebuild.pending" ] || exit 0
+    rm -f "$state/rebuild.pending"
+    exec 9>&-
+    echo ">> a daily claudebox refresh came due while you were working — rebuilding now…"
+    exec /usr/local/bin/claudebox-rebuild
+) 9>"$state/session.lock"
+
+exit "$rc"

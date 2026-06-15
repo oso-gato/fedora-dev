@@ -2,6 +2,9 @@
   "permissions": {
     "deny": [
       "Bash(dnf copr:*)",
+      "Bash(distrobox-host-exec sudo dnf install:*)",
+      "Bash(distrobox-host-exec sudo dnf -y install:*)",
+      "Bash(distrobox-host-exec sudo rpm -i:*)",
       "Bash(pip install --user:*)",
       "Bash(pip3 install --user:*)",
       "Bash(pipx install:*)",
