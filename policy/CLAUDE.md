@@ -71,3 +71,91 @@ Task mentions any of:
 - Git identity pre-configured per-repo: `claudebox@fedora-dev.local` / `claudebox`. Override per-PR if a different identity is needed.
 - Seeded-no-git state: if `~/.local/share/fedora-dev/.seeded-no-git` exists, follow `CONVERT-TO-GIT.md` in the same dir before any commit.
 - Host reboots / fedora-dev recreations: not yours. Propose; human decides.
+
+## HOW DO I... (operational recipes)
+
+If a procedure you need isn't here, default to STOP-AND-SURFACE.
+
+### Add a tool to claudebox (durable; survives rebuilds)
+
+```sh
+cd ~/.local/share/fedora-dev          # the live git clone
+$EDITOR distrobox.ini                  # append to additional_packages= line (Fedora dnf package)
+$EDITOR README.md                      # add justifying row to Box Packages table
+git commit -am "claudebox: add <tool> — <one-line why>"
+gh pr create --title "claudebox: add <tool>" --body "..."
+# After human merges, apply immediately:
+claudebox-rebuild                      # session ends; reconnect with `claude`
+# Or do nothing and the daily 04:00 rebuild picks it up.
+```
+
+Vendor RPM (source 2b): add a `pre_init_hooks=sh -c '...'` writing the `.repo` file (gpgcheck=1) BEFORE the `additional_packages` install. AppImage (source 2c): install in `claudebox-init.sh` post-assemble, record sha256. Both still need a Box Packages row.
+
+### Trigger a claudebox rebuild now
+
+```sh
+claudebox-rebuild     # works inside the box OR from the outer tmux shell
+# Session ends; box rebuilds detached (~2-5 min); reconnect with `claude`.
+```
+
+### Propose a change to fedora-dev itself (scripts, policy, distrobox.ini, etc.)
+
+```sh
+cd ~/.local/share/fedora-dev          # live clone on the home volume — persists across rebuilds
+$EDITOR <file>
+git commit -am "<scope>: <subject>"
+gh pr create
+# After human merge: the live clone reflects the new spec on `git pull origin main`,
+# OR the next claudebox-rebuild reads the merged spec, OR CI rebuilds the fedora-dev
+# base image with the new baked seed on its monthly cadence.
+```
+
+### Propose a change to fedora-dev's in-box policy (this file)
+
+```sh
+cd ~/.local/share/fedora-dev
+$EDITOR policy/CLAUDE.md               # OR policy/managed-settings.json
+git commit -am "policy: <subject>"
+gh pr create
+# Next claudebox-rebuild re-stamps /etc/claude-code/CLAUDE.md inside the box.
+```
+
+### Validate an image I just built (Principle 9)
+
+```sh
+cd <image-repo-clone>
+podman build -t <name>:test -f Containerfile .   # drives fedora-dev's engine via CONTAINER_HOST
+./run.sh                                          # never hand-roll podman run
+podman ps --filter name=<name>                    # expect (healthy) within healthcheck window
+# Functional-probe each access path the image's README documents
+# (ssh, http, db query, whatever the image exposes).
+gh pr create                                      # ship when all paths pass
+```
+
+### Check my current state
+
+```sh
+claude --version                                          # claude-code version
+head -5 /etc/claude-code/CLAUDE.md                        # this file (stamped — confirms latest)
+podman info --format '{{.Host.SecurityOptions}}' 2>&1     # CONTAINER_HOST sanity
+test -d ~/.local/share/fedora-dev/.git \
+    && (cd ~/.local/share/fedora-dev && git log -1 --format='%h %s on %an') \
+    || cat ~/.local/share/fedora-dev/.seeded-no-git 2>/dev/null || echo "no live spec"
+```
+
+### Convert from seeded-no-git state to a real git clone
+
+Only relevant if `~/.local/share/fedora-dev/.seeded-no-git` exists (entrypoint couldn't reach GitHub on first boot).
+
+```sh
+cd ~/.local/share/fedora-dev
+cat CONVERT-TO-GIT.md          # exact commands — follow verbatim once the box is online
+```
+
+### See what the next monthly fedora-dev base refresh would pull
+
+```sh
+podman pull --quiet ghcr.io/oso-gato/fedora-dev:latest > /dev/null \
+  && podman image inspect ghcr.io/oso-gato/fedora-dev:latest \
+       -f '{{.Id}} created={{.Created}}'
+```
