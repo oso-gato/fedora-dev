@@ -49,6 +49,14 @@ Notify=healthy
 AddCapability=NET_ADMIN
 AddDevice=/dev/net/tun
 AddDevice=/dev/fuse
+# SELinux label separation is INTENTIONALLY OFF. Nested rootless podman +
+# fuse-overlayfs on the home volume + the passed /dev/fuse and /dev/net/tun
+# cannot run under container_t confinement (SELinux denies the overlay mount +
+# device access). Deliberate, reviewed trade-off — NOT a bug to "harden" away:
+# removing it breaks nested builds. Blast radius is bounded by rootless +
+# user-namespace (uid 1000, subuid 10000-64999), NOT by SELinux; the HOST stays
+# enforcing. Do NOT copy this to other workloads without the same analysis.
+# See policy/CLAUDE.md OPERATING FACTS.
 SecurityLabelDisable=true
 
 # Persistent volumes (named) — survive container recreation and image refresh.
