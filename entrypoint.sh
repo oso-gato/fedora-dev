@@ -103,7 +103,7 @@ for _ in $(seq 1 30); do
 done
 
 if [ -n "${TS_AUTHKEY:-}" ]; then
-    until tailscale up --ssh --authkey="${TS_AUTHKEY}" --hostname=fedora-dev; do
+    until tailscale up --ssh --auth-key="${TS_AUTHKEY}" --hostname=fedora-dev; do
         echo "[tailscale] up failed, retrying in 5s"; sleep 5
     done
     echo "==== TAILNET JOINED ===="
