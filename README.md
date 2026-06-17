@@ -36,7 +36,7 @@ Two deployment paths, same image.
 
 ### Quadlet (preferred — managed by fedora-bootstrap, or set up manually)
 
-The repo ships `fedora-dev.container` — a podman Quadlet (declarative systemd-managed deployment) with `Notify=healthy`, `AutoUpdate=registry`, `HealthCmd=`, persistent volumes, and runtime secrets via `EnvironmentFile=`.
+The repo ships `fedora-dev.container` — a podman Quadlet (declarative systemd-managed deployment) with `Notify=healthy`, `AutoUpdate=registry`, `HealthCmd=`, and persistent volumes. **No runtime secrets / no `EnvironmentFile=`** (since v1.1.9): sshd is key-only with keys synced from `github.com/oso-gato.keys` at every start; an optional `TS_AUTHKEY` for unattended tailnet join enters via a `podman secret` + Quadlet `Secret=`, never a plaintext env file.
 
 If your VPS is provisioned via [`fedora-bootstrap`](https://github.com/oso-gato/fedora-bootstrap) v1.1.9+, fedora-dev is deployed automatically when it's in the bootstrap's `WORKLOAD_CONTAINERS` array — Quadlet installed, monthly refresh harness wired, busy-probe deferral active, image-digest rollback on health failure.
 
@@ -110,6 +110,8 @@ claudebox is **rebuilt** (never updated) — every rebuild reinstalls the latest
 
 Your Claude login + transcripts survive every rebuild (they live in `~/.claude` on the home volume). Your projects, gh auth, nested podman images and storage — all persist.
 
+> **Box rebuild vs. whole-container refresh — what "quitting" triggers.** The three paths above rebuild the *claudebox* (Claude Code + tools) and a deferred one fires the moment you **exit** your session. The separate **monthly whole-container refresh** (the base image, host-driven by fedora-bootstrap) *also* defers while a session is live — but it resumes on an **hourly retry timer once the box goes idle, NOT on session exit**. So: quitting accelerates the daily box rebuild; it does **not** advance a deferred monthly container refresh (that waits up to ~1h for the next retry tick).
+
 ### Validation discipline (Principle 9)
 
 Before declaring any built image "done":
@@ -134,7 +136,8 @@ Ad-hoc `dnf install` inside the running box works during the session but vanishe
 
 ## Notes
 
-- **Nested rootless podman on Debian-family hosts**: if `kernel.unprivileged_userns_apparmor_policy = 1`, nested rootless podman fails with `newuidmap: ... Operation not permitted`. Relax the sysctl, add a scoped AppArmor profile granting `userns,`, or run on Fedora-family hosts (SELinux is unaffected; `run.sh` already carries `--security-opt label=disable`).
+- **Nested rootless podman on Debian-family hosts**: if `kernel.unprivileged_userns_apparmor_policy = 1`, nested rootless podman fails with `newuidmap: ... Operation not permitted`. Relax the sysctl, add a scoped AppArmor profile granting `userns,`, or run on a Fedora-family host. (See the SELinux note below for the Fedora confinement trade-off.)
+- **SELinux posture** — the container runs **SELinux-unconfined**: `run.sh` and the Quadlet set `--security-opt label=disable` / `SecurityLabelDisable=true`. This is **intentional and required** — nested rootless podman + fuse-overlayfs on the home volume + the passed `/dev/fuse` and `/dev/net/tun` cannot run under `container_t` confinement. The trade-off: an in-container compromise or escape is bounded only by **rootless + the user namespace** (uid 1000, subuid 10000-64999) and DAC, **not** by SELinux type-enforcement. The **host** stays SELinux-enforcing regardless. Because the container also publishes public ssh:4444 + mosh and holds credentials, the compensating controls are cosign image-signature verification and (optionally) keeping sensitive ports tailnet-only. Do **not** "fix" the label-disable — it breaks nested builds.
 - **Distrobox 2.0 (Go rewrite)** is in RC: same manifest/CLI interface promised. Re-verify on Fedora's first 2.0 ship.
 - **Fedora base bump** (44 → 45 etc.): `ARG FEDORA_VERSION` in Containerfile is the single source of truth. The box's `image=quay.io/fedora/fedora-toolbox:N` line in distrobox.ini must bump in lockstep. Fedora releases EOL ~13 months — plan for twice a year.
 

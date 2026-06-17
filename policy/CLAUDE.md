@@ -71,6 +71,7 @@ Task mentions any of:
 - Git identity pre-configured per-repo: `claudebox@fedora-dev.local` / `claudebox`. Override per-PR if a different identity is needed.
 - Seeded-no-git state: if `~/.local/share/fedora-dev/.seeded-no-git` exists, follow `CONVERT-TO-GIT.md` in the same dir before any commit.
 - Host reboots / fedora-dev recreations: not yours. Propose; human decides.
+- **SELinux is DISABLED for this container by design** (`SecurityLabelDisable=true` in fedora-dev.container, `--security-opt label=disable` in run.sh). Required for nested rootless podman + fuse-overlayfs + the passed `/dev/fuse`/`/dev/net/tun` (container_t confinement denies them). Do NOT re-enable labeling or remove these flags as a "hardening" fix — it breaks nested builds. Changing it is propose-and-commit, never an in-session edit. The HOST stays SELinux-enforcing; the weakening is scoped to this container, whose blast radius is bounded by rootless + user-namespace (uid 1000, subuid 10000-64999).
 
 ## HOW DO I... (operational recipes)
 

@@ -111,7 +111,7 @@ Inside claudebox (`distrobox.ini`'s `additional_packages`). Refreshed daily from
 | install.sh | base image install (Fedora repo + Tailscale repo dnf installs; nested-podman config; sshd config; defensive setcap on newuidmap/newgidmap) |
 | entrypoint.sh | PID 1 (root): supervises sshd + tailscaled + rootless podman API socket + inotify rebuild-flag watcher + daily-tick + first-boot live-clone-or-seed + eager first-boot claudebox assemble; pgrep+kill-0 watchdog; SIGTERM trap for clean shutdown |
 | run.sh | manual deploy contract (`podman run -d`-style with --health-cmd, devices, volumes); fallback for non-systemd hosts |
-| fedora-dev.container | systemd Quadlet for managed deployment (declarative spec with AutoUpdate=registry, Notify=healthy, HealthCmd, Volume=, EnvironmentFile=) |
+| fedora-dev.container | systemd Quadlet for managed deployment (declarative spec: AutoUpdate=registry, Notify=healthy, HealthCmd, Volume=, SecurityLabelDisable=true; **NO EnvironmentFile** — key-only sshd since v1.1.9, optional TS_AUTHKEY via podman `Secret=`) |
 | distrobox.ini | claudebox manifest: image pin, pre_init_hook drops Anthropic `latest`-channel `.repo`, additional_packages |
 | claudebox-init.sh | post-assemble host bridges (CONTAINER_HOST export + in-box `claudebox-rebuild` flag-writer). Runs over quote-safe `distrobox enter -- sudo` channel |
 | claudebox-assemble.sh | called by entrypoint on first boot + by box-rebuild on every rebuild: `distrobox rm -f` (recovery) → `distrobox assemble create` → first-enter retry → bridges + policy stamp |
