@@ -28,9 +28,14 @@ After=network-online.target
 [Container]
 Image=ghcr.io/oso-gato/fedora-dev:latest
 ContainerName=fedora-dev
-# Pull a newer manifest on start; the host's workload-refresh harness gates
-# whether a restart actually happens via digest comparison + busy probe.
-Pull=newer
+# Pull policy: MISSING, not newer. The bootstrap workload-refresh harness is the
+# SOLE puller — it runs an explicit `podman pull` + digest-compare BEFORE it
+# restarts this unit, so a plain restart uses the LOCAL image and never re-contacts
+# the registry on its own. This is load-bearing for the harness's auto-rollback:
+# on a health failure it retags :latest to the prior-good digest LOCALLY and
+# restarts — Pull=newer would re-pull the (bad) registry :latest on that restart
+# and silently defeat the rollback. Do NOT change to Pull=newer/always.
+Pull=missing
 # Label the container for `podman auto-update` discoverability (manual
 # `podman auto-update --dry-run` checks). The actual update cadence is driven
 # by the bootstrap workload-refresh harness, not the global auto-update timer.
@@ -58,9 +63,14 @@ Volume=fedora-dev-state:/var/lib/tailscale
 PublishPort=4444:22
 PublishPort=61001-62000:61001-62000/udp
 
-# Health check (matches run.sh's --health-cmd). pgrep needs procps-ng which is
-# installed in the base image.
-HealthCmd=pgrep -x sshd && pgrep -x tailscaled
+# Health = liveness of the core services PLUS readiness of the nested rootless
+# podman API socket (the CONTAINER_HOST bridge). The socket check catches a
+# broken-but-running image (e.g. the socket failing to bind) so Notify=healthy
+# and the harness's auto-rollback actually fire. Deliberately NOT gated on full
+# claudebox assembly (background + slow on first boot) — that would cause
+# false-unhealthy rollbacks. Must match run.sh's --health-cmd. pgrep needs
+# procps-ng (base image).
+HealthCmd=pgrep -x sshd && pgrep -x tailscaled && test -S /run/user/1000/podman/podman.sock
 HealthInterval=30s
 HealthRetries=3
 HealthStartPeriod=30s
