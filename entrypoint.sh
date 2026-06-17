@@ -200,6 +200,11 @@ BOOTSTRAP
 # ---- supervised: rootless podman API socket (CONTAINER_HOST target) --------
 # The box's `podman` CLI talks to this socket to drive fedora-dev's engine.
 # Replaces bootstrap's `systemctl --user enable podman.socket` (no systemd here).
+# The socket's parent dir must exist first: `podman system service` binds an
+# explicit unix path and does NOT mkdir its parent, so without this the bind
+# fails ("no such file or directory"), the socket dies, and the watchdog below
+# exits PID 1 — crash-looping the container under Restart=always.
+install -d -m 0700 -o core -g core /run/user/1000/podman
 runuser -u core -- podman system service --time=0 \
     unix:///run/user/1000/podman/podman.sock &
 podman_sock_pid=$!
