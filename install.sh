@@ -76,6 +76,34 @@ if [ "$(id -u)" = "1000" ]; then
 fi
 EOF
 
+# ---- surface the Tailscale interactive login on remote logins until the node
+# is on the tailnet. A fresh state volume has no persisted identity, so the
+# one-time browser join has to happen somewhere — and this box has no shell
+# without either the public :4444 ssh door or the tailnet. Print the live login
+# URL on each interactive login until connected. Runs BEFORE the tmux attach
+# below (tmux redraws the screen and would hide it); sorts first by filename.
+cat > /etc/profile.d/zz-tailscale-login.sh <<'EOF'
+# Show the Tailscale login URL on interactive logins while not yet connected.
+# Silent once BackendState=Running (identity persists on the fedora-dev-state
+# volume, so this only nags until the one-time join is done).
+case $- in *i*) ;; *) return ;; esac
+[ -t 0 ] || return
+command -v tailscale >/dev/null 2>&1 || return
+_ts_state=$(tailscale status --json 2>/dev/null | sed -n 's/.*"BackendState": *"\([^"]*\)".*/\1/p')
+if [ -n "$_ts_state" ] && [ "$_ts_state" != "Running" ]; then
+    _ts_url=$(tailscale status --json 2>/dev/null | sed -n 's/.*"AuthURL": *"\([^"]*\)".*/\1/p')
+    printf '\n\033[1;33m  Tailscale is not connected (state: %s).\033[0m\n' "$_ts_state"
+    if [ -n "$_ts_url" ]; then
+        printf '     Open this in a browser to join the tailnet (one-time):\n       \033[4m%s\033[0m\n' "$_ts_url"
+    else
+        printf '     No login URL yet - run:  tailscale up --ssh --hostname=fedora-dev\n'
+    fi
+    printf '     Tailnet SSH works once you approve it; this notice then disappears.\n\n'
+    read -rt 60 -p '     Press Enter to continue to your shell... ' _ts_ack || true
+fi
+unset _ts_state _ts_url _ts_ack 2>/dev/null || true
+EOF
+
 # ---- every interactive remote login lands in the persistent tmux session ----
 cat > /etc/profile.d/zz-tmux-attach.sh <<'EOF'
 # ssh and mosh logins attach to (or create) the shared tmux session "main".
