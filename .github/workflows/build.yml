@@ -58,7 +58,11 @@ jobs:
       # Keyless cosign signing via GitHub Actions OIDC.
       # Signs the IMMUTABLE manifest digest (not the mutable tags). The
       # signature attaches to the registry as an OCI artifact next to the
-      # image and is verified by host policy.json on pull (sigstoreSigned).
+      # image. NOTE: host policy.json does NOT enforce this yet — it is
+      # `insecureAcceptAnything` for ghcr.io/oso-gato/* (permissive). The keyless
+      # signature is an audit trail; `sigstoreSigned` enforcement is operator-gated
+      # (and currently impractical for keyless OIDC cert identities) — see
+      # fedora-bootstrap policy/CLAUDE.md "image signature verification".
       - name: Sign image with cosign
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/fedora-dev
