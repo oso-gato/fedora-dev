@@ -16,8 +16,7 @@ curl -fsSL https://pkgs.tailscale.com/stable/fedora/tailscale.repo \
 
 # ---- base packages ----------------------------------------------------------
 # Tier breakdown (justified in README.md "Base Packages" table):
-#   Engine + storage:  podman, shadow-utils, fuse-overlayfs, passt, iptables-nft,
-#                      nftables
+#   Engine + storage:  podman, shadow-utils, fuse-overlayfs, passt, nftables
 #   Login + observe:   openssh-server, mosh, tmux, tailscale
 #   Box bootstrap:     distrobox, inotify-tools
 #   System plumbing:   sudo, procps-ng, glibc-langpack-en
@@ -27,7 +26,7 @@ curl -fsSL https://pkgs.tailscale.com/stable/fedora/tailscale.repo \
 # CLI client, bubblewrap, socat, host-spawn, rclone) lives INSIDE claudebox —
 # see distrobox.ini's additional_packages.
 $DNF install \
-    podman shadow-utils fuse-overlayfs passt iptables-nft nftables \
+    podman shadow-utils fuse-overlayfs passt nftables \
     openssh-server mosh tmux tailscale \
     distrobox inotify-tools \
     fail2ban-server rsyslog \
@@ -138,11 +137,12 @@ rm -f /etc/ssh/ssh_host_*_key*   # never ship host keys in a published image
 # We install the LEAF `fail2ban-server` (see Base Packages), NOT the `fail2ban`
 # metapackage: the metapackage HARD-pulls fail2ban-firewalld->firewalld +
 # fail2ban-sendmail->esmtp (an unused firewall + MTA), and install_weak_deps=False
-# does NOT block hard Requires. fail2ban-server is the daemon + the iptables-multiport
-# action; its ban backend shells out to the iptables/nft binaries — already base packages
-# here (iptables-nft + nftables), supplied independently, NOT part of fail2ban-server's deps.
+# does NOT block hard Requires. fail2ban-server is the daemon + the nftables ban action;
+# it bans via `nftables[type=multiport]` (the `nft` binary; nftables is a base package). This
+# image is nft-only — tailscaled programs its rules via the nftables Netlink API (no binary
+# needed) and netavark defaults to nftables on Fedora 41+, so no iptables is installed.
 # fail2ban watches /var/log/secure (rsyslog writes there from sshd's AUTHPRIV
-# facility), bans IPs that fail too many key-auth attempts via iptables-nft.
+# facility), bans IPs that fail too many key-auth attempts via nftables.
 # Tailnet CGNAT (100.64.0.0/10) is ignoreip'd — tailnet identity is already
 # authenticated by Tailscale; we don't want a misbehaving tailnet device to
 # ever land on a banned-IP list.
@@ -154,7 +154,7 @@ findtime = 10m
 maxretry = 5
 backend = auto
 ignoreip = 127.0.0.1/8 ::1 100.64.0.0/10
-banaction = iptables-multiport
+banaction = nftables[type=multiport]
 
 [sshd]
 enabled = true
