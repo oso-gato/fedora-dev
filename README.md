@@ -134,6 +134,15 @@ Durable changes to fedora-dev itself — the distrobox.ini spec, scripts, policy
 
 Ad-hoc `dnf install` inside the running box works during the session but vanishes on the next rebuild — by design.
 
+## Troubleshooting & break-glass
+
+fedora-dev is non-systemd: `entrypoint.sh` (PID 1) supervises sshd, tailscaled, the rootless podman socket, rsyslog, fail2ban, and the rebuild watcher via a `pgrep` watchdog, and exits non-zero (so the Quadlet's `Restart=always` heals it) if any die.
+
+- **See what it's doing / why it's unhealthy** — from the VPS host: `podman logs -f fedora-dev` (entrypoint + the eager first-boot claudebox-assemble output) and `podman healthcheck run fedora-dev`.
+- **Break-glass shell** — sshd is key-only and `core` has no password, so the recovery door is **from the host**: `podman exec -u 0 -it fedora-dev bash` (root) or `podman exec -u 1000 -it fedora-dev bash` (the `core` agent).
+- **Tailnet not joining** — the box prints the one-time login URL on each interactive login until connected (or run `tailscale up --ssh --hostname=fedora-dev` inside it). Note "healthy" means the daemons are live, **not** that the node is on the tailnet.
+- **Whole-container recovery / refresh / rollback is HOST-side** (not this repo): the bootstrap host owns pull/recreate/rollback via the workload-refresh harness. To force a refresh or contain a compromise, see [`fedora-bootstrap`](https://github.com/oso-gato/fedora-bootstrap)'s operating + containment recipes — don't hand-roll `podman stop/rm/run` against the running box (it bypasses the busy-probe).
+
 ## Notes
 
 - **Nested rootless podman on Debian-family hosts**: if `kernel.unprivileged_userns_apparmor_policy = 1`, nested rootless podman fails with `newuidmap: ... Operation not permitted`. Relax the sysctl, add a scoped AppArmor profile granting `userns,`, or run on a Fedora-family host. (See the SELinux note below for the Fedora confinement trade-off.)
