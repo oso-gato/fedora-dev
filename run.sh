@@ -17,6 +17,7 @@ IMAGE="${IMAGE:-localhost/fedora-dev:latest}"
 podman run -d --name fedora-dev \
     --restart=always \
     --cap-add NET_ADMIN \
+    --cap-add SYS_ADMIN \
     --device /dev/net/tun \
     --device /dev/fuse \
     --security-opt label=disable \

@@ -46,7 +46,14 @@ AutoUpdate=registry
 Notify=healthy
 
 # Runtime args — mirror of run.sh.
-AddCapability=NET_ADMIN
+# NET_ADMIN: tailscaled programs the nft firewall + mosh. SYS_ADMIN: the nested claudebox
+# (`distrobox enter`) calls sethostname() to name the inner box; podman's default seccomp
+# gates sethostname/setdomainname behind CAP_SYS_ADMIN and seccomp is NOT namespace-aware,
+# so without it the first-boot claudebox assemble dies with `crun: sethostname: Operation
+# not permitted`. Deliberate — do NOT remove: it breaks the nested dev box. Bounded by the
+# rootless userns (uid 1000, subuid 10000-64999), NOT host root, and keeps the FULL default
+# seccomp profile active (vs forking it). Composes with label=disable below.
+AddCapability=NET_ADMIN SYS_ADMIN
 AddDevice=/dev/net/tun
 AddDevice=/dev/fuse
 # SELinux label separation is INTENTIONALLY OFF. Nested rootless podman +
