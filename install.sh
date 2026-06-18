@@ -30,7 +30,7 @@ $DNF install \
     podman shadow-utils fuse-overlayfs passt iptables-nft nftables \
     openssh-server mosh tmux tailscale \
     distrobox inotify-tools \
-    fail2ban rsyslog \
+    fail2ban-server rsyslog \
     sudo procps-ng glibc-langpack-en nano
 
 # ---- defensive: restore file caps on newuidmap/newgidmap --------------------
@@ -135,6 +135,12 @@ EOF
 rm -f /etc/ssh/ssh_host_*_key*   # never ship host keys in a published image
 
 # ---- fail2ban — brute-force mitigation for the public-ssh :4444 path ----
+# We install the LEAF `fail2ban-server` (see Base Packages), NOT the `fail2ban`
+# metapackage: the metapackage HARD-pulls fail2ban-firewalld->firewalld +
+# fail2ban-sendmail->esmtp (an unused firewall + MTA), and install_weak_deps=False
+# does NOT block hard Requires. fail2ban-server is the daemon + the iptables-multiport
+# action; its ban backend shells out to the iptables/nft binaries — already base packages
+# here (iptables-nft + nftables), supplied independently, NOT part of fail2ban-server's deps.
 # fail2ban watches /var/log/secure (rsyslog writes there from sshd's AUTHPRIV
 # facility), bans IPs that fail too many key-auth attempts via iptables-nft.
 # Tailnet CGNAT (100.64.0.0/10) is ignoreip'd — tailnet identity is already
