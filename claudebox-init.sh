@@ -2,14 +2,14 @@
 # fedora-dev — claudebox host bridges. Runs as the BOX's OWN root, NOT fedora-dev's.
 #
 # Invoked from claudebox-assemble.sh, post-assemble, as:
-#   distrobox enter claudebox -- sudo bash /run/host<repo>/claudebox-init.sh <host-uid>
+#   podman exec claudebox bash /run/host<repo>/claudebox-init.sh <host-uid>
 #
 # Why this is a script and not distrobox.ini init_hooks: distrobox-create embeds
 # init_hooks as `-- '<hook>'` (single-quoted) and re-evals the whole create command
 # ON THE HOST, so any quote in the hook breaks out of that wrapper and the body runs
 # as the unprivileged HOST user (Permission denied writing /etc, /usr/local/bin).
 # distrobox-assemble has the mirror-image trap for double quotes. Driving the bridges
-# from here — over the same proven `distrobox enter -- sudo` channel that stamps the
+# from here — over the same proven `podman exec` (container-root) channel that stamps the
 # policy — sends only a path + a numeric uid across the boundary, so there's nothing
 # left to detonate. Idempotent: re-running just rewrites the file + the wrapper.
 set -euo pipefail

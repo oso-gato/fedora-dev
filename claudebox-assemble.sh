@@ -66,9 +66,11 @@ echo "==== post-assemble: host bridges (CONTAINER_HOST + in-box claudebox-rebuil
 # Wire the box's host bridges + stamp policy AS REAL CONTAINER-ROOT via `podman exec`
 # (it enters the box as uid 0), NOT `distrobox enter -- sudo`.
 #
-# Why not sudo: this box runs in a PRIVATE userns (nested rootless), so podman
-# id-shifts the fuse-overlayfs image layers with a chown — and chown(2) clears the
-# setuid bit. /usr/bin/sudo lands as mode 0111 owned by the mapped user, so `sudo`
+# Why not sudo: this box runs in a PRIVATE userns (distrobox --userns keep-id,
+# nested rootless), so podman must id-shift the image into the box's uid range. The
+# chown-free path (idmapped mounts) is kernel-forbidden for unprivileged users, so
+# podman id-shifts via chown(2) — which clears the setuid bit. /usr/bin/sudo lands
+# as mode 0111 owned by the mapped user, so `sudo`
 # fails ("must be owned by uid 0 and have the setuid bit set") and, under `set -e`,
 # this used to abort assemble BEFORE the policy stamp + the .assembled marker —
 # leaving the box without its CONTAINER_HOST bridge or enterprise policy. `podman
