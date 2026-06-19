@@ -53,27 +53,36 @@ done
     exit 1
 }
 
-# Guard: the box's root maps to THIS user (uid 1000) via keep-id, so the steps below
-# can only read the spec at /run/host$LIVE if that path is traversable+readable by
-# this user. /home/core (mode 0755 by default) and ~/.local/share (also 0755) are
-# fine, but fail LOUDLY here if a user has tightened them.
-distrobox enter claudebox -- test -r "/run/host$LIVE/claudebox-init.sh" || {
+# Guard: the post-assemble steps below read the live spec at /run/host$LIVE as the
+# box's container-root (via `podman exec`). Fail LOUDLY now if that bind-mounted path
+# isn't reachable from inside the box — so we never half-stamp it.
+podman exec claudebox test -r "/run/host$LIVE/claudebox-init.sh" || {
     echo "FATAL: claudebox cannot read the live spec at /run/host$LIVE — check that" \
-         "/home/core/.local/share/fedora-dev is traversable+readable by uid 1000." >&2
+         "/home/core/.local/share/fedora-dev is traversable+readable inside the box." >&2
     exit 1
 }
 
 echo "==== post-assemble: host bridges (CONTAINER_HOST + in-box claudebox-rebuild) ===="
-# Wire the box's host bridges. The `sudo` here is the CONTAINER's own root (distrobox
-# grants it passwordless inside the box), NOT fedora-dev's root. We pass only a path
-# + our numeric uid across the boundary, so nothing here can detonate quote-eval.
-distrobox enter claudebox -- sudo bash "/run/host$LIVE/claudebox-init.sh" "$(id -u)"
+# Wire the box's host bridges + stamp policy AS REAL CONTAINER-ROOT via `podman exec`
+# (it enters the box as uid 0), NOT `distrobox enter -- sudo`.
+#
+# Why not sudo: this box runs in a PRIVATE userns (nested rootless), so podman
+# id-shifts the fuse-overlayfs image layers with a chown — and chown(2) clears the
+# setuid bit. /usr/bin/sudo lands as mode 0111 owned by the mapped user, so `sudo`
+# fails ("must be owned by uid 0 and have the setuid bit set") and, under `set -e`,
+# this used to abort assemble BEFORE the policy stamp + the .assembled marker —
+# leaving the box without its CONTAINER_HOST bridge or enterprise policy. `podman
+# exec` is real container-root, needs no setuid, and is just as quote-safe (only a
+# path + a numeric uid cross the boundary). In-box sudo stays non-functional by
+# construction; break-glass into the box is `podman exec -u 0 claudebox …` from
+# fedora-dev (mirrors fedora-dev's own key-only/no-sudo posture).
+podman exec claudebox bash "/run/host$LIVE/claudebox-init.sh" "$(id -u)"
 
 echo "==== post-assemble: stamp enterprise policy into the box ===="
-distrobox enter claudebox -- sudo mkdir -p /etc/claude-code
-distrobox enter claudebox -- sudo cp \
+podman exec claudebox mkdir -p /etc/claude-code
+podman exec claudebox cp \
     "/run/host$LIVE/policy/CLAUDE.md" /etc/claude-code/CLAUDE.md
-distrobox enter claudebox -- sudo cp \
+podman exec claudebox cp \
     "/run/host$LIVE/policy/managed-settings.json" /etc/claude-code/managed-settings.json
 
 # Mark assembled — entrypoint's first-boot guard checks this.
