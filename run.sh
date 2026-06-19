@@ -15,6 +15,7 @@ set -eu
 IMAGE="${IMAGE:-localhost/fedora-dev:latest}"
 
 podman run -d --name fedora-dev \
+    --hostname fedora-dev \
     --restart=always \
     --cap-add NET_ADMIN \
     --cap-add SYS_ADMIN \

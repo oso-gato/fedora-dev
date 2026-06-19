@@ -28,6 +28,10 @@ After=network-online.target
 [Container]
 Image=ghcr.io/oso-gato/fedora-dev:latest
 ContainerName=fedora-dev
+# Stable in-container hostname. Without this, podman falls back to the
+# (truncated) container ID, which regenerates on every recreate/refresh —
+# yielding a new random hostname each cycle. Mirrors run.sh's --hostname.
+HostName=fedora-dev
 # Pull policy: MISSING, not newer. The bootstrap workload-refresh harness is the
 # SOLE puller — it runs an explicit `podman pull` + digest-compare BEFORE it
 # restarts this unit, so a plain restart uses the LOCAL image and never re-contacts
