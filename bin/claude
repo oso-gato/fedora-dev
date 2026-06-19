@@ -15,8 +15,21 @@
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 state="$HOME/.local/state/claudebox"; mkdir -p "$state"
 
+# A claudebox rebuild is in progress iff box-rebuild.sh is holding its
+# self-serialization flock on box-rebuild.lock (it grabs it via `exec 9<>…;
+# flock -n 9` and keeps it across the `exec` into claudebox-assemble.sh). Probe
+# it non-destructively in a subshell with its own fd 9 (released on exit).
+#
+# This REPLACES `pgrep -f fedora-dev/box-rebuild.sh`: that pattern also matched
+# the entrypoint's PERMANENT inotify rebuild-watcher, whose command line embeds
+# that exact path — so the check was ALWAYS true and wedged `claude` into an
+# endless watch-only tail of a rebuild.log that never appears.
+rebuild_in_progress() {
+    ! ( exec 9<>"$state/box-rebuild.lock"; flock -n 9 ) 2>/dev/null
+}
+
 # If a rebuild is already in flight, don't enter a half-built box — follow it.
-if pgrep -f "fedora-dev/box-rebuild.sh" >/dev/null 2>&1; then
+if rebuild_in_progress; then
     exec /usr/local/bin/claudebox-rebuild --watch-only
 fi
 
@@ -43,7 +56,7 @@ flock -s "$state/session.lock" \
 rc=$?
 
 # Post-session: follow a Claude-triggered rebuild, or fire a deferred daily one.
-if pgrep -f "fedora-dev/box-rebuild.sh" >/dev/null 2>&1; then
+if rebuild_in_progress; then
     exec /usr/local/bin/claudebox-rebuild --watch-only
 fi
 

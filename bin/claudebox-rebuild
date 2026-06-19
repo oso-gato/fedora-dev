@@ -12,8 +12,17 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 state="$HOME/.local/state/claudebox"; mkdir -p "$state"
 log="$state/rebuild.log"
 
+# A rebuild is running iff box-rebuild.sh holds its flock on box-rebuild.lock
+# (held across its `exec` into claudebox-assemble.sh). Probe non-destructively
+# in a subshell with its own fd 9. REPLACES `pgrep -f fedora-dev/box-rebuild.sh`,
+# which also matched the entrypoint's permanent inotify rebuild-watcher (its
+# command line embeds that path) — making the wait loop below never terminate.
+rebuild_in_progress() {
+    ! ( exec 9<>"$state/box-rebuild.lock"; flock -n 9 ) 2>/dev/null
+}
+
 if [ "${1:-}" != "--watch-only" ]; then
-    if pgrep -f "fedora-dev/box-rebuild.sh" >/dev/null 2>&1; then
+    if rebuild_in_progress; then
         echo ">> claudebox: rebuild already in progress — following it"
     else
         echo ">> claudebox: starting rebuild — fresh image + latest Claude Code (~2-5 min)…"
@@ -29,7 +38,7 @@ tail -F -n +1 "$log" 2>/dev/null &
 tail_pid=$!
 trap 'kill $tail_pid 2>/dev/null' EXIT INT TERM
 
-while pgrep -f "fedora-dev/box-rebuild.sh" >/dev/null 2>&1; do
+while rebuild_in_progress; do
     sleep 2
 done
 sleep 1
