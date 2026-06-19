@@ -53,6 +53,17 @@ echo "core:10000:55000" > /etc/subgid
 # ---- nested rootless podman (no systemd inside) -----------------------------
 install -d -m 0755 /etc/containers
 cat > /etc/containers/containers.conf <<'EOF'
+[containers]
+# No systemd/journald runs in this image, yet podman still DEFAULTS container logs
+# to the journald driver (its default whenever it detects a usable systemd journal
+# dir — present here even though nothing consumes it). journald logs PLUS the
+# file events backend below make `podman logs --follow`/attach unsupported — which
+# made the FIRST `distrobox enter` (it follows distrobox-init's output) fail with
+# "using --follow with the journald --log-driver but without the journald
+# --events-backend (file) is not supported". The assemble retry loop recovered, but
+# only after a failed attempt + backoff. k8s-file logs make first-enter clean.
+log_driver = "k8s-file"
+
 [engine]
 cgroup_manager = "cgroupfs"
 events_logger = "file"
