@@ -1,5 +1,15 @@
 # fedora-dev
 
+## TL;DR — in plain words
+
+A headless cloud **workshop where Claude builds your container images.** No desktop — you reach it by terminal, run `claude`, and it develops the image source, builds it, and hands it back as a change for you to approve. It's the *build half* of a two-box split: **this box builds; a separate host box deploys.**
+
+- 🔑 **How you get in:** key-only SSH/Mosh (public), or keyless over Tailscale. Every login lands in a persistent `tmux` session, and `claude` drops you into Claude Code — which refreshes itself daily.
+- 🏗️ **What it does:** authors and test-builds container images in its *own* private engine (never your live machines). Daily-fresh Claude, monthly-fresh base image.
+- ✋ **How changes ship — the workflow:** Claude **always opens a PR; it never pushes straight to `main`.** It then **waits for your explicit "merge it"** before merging. You review → you approve → it merges → CI builds. Two steps (propose → approved-merge): safe, traceable, reversible.
+- 🚧 **Where it stops:** it never deploys or runs containers on your live host — that's the host box's job.
+- 🔒 **No passwords anywhere** — key-only doors; credentials only at run time.
+
 A headless Fedora container that hosts Claude Code (in an in-container Distrobox "claudebox") for building Fedora-based container images. Daily-refreshed CLI, base image rebuilt monthly, persistent volumes for your work, key-only ssh access (no passwords).
 
 ## Purpose
