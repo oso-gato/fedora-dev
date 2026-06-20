@@ -18,6 +18,39 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 cd "$LIVE"
 
+# Robust teardown: distrobox/podman `rm -f` can fail to evict a box wedged in
+# podman's `stopping` state. In this nested-rootless setup, crun's SIGKILL may not
+# reap the container init within the stop timeout (`rm -f` reports "given PID did
+# not die within timeout"), leaving podman's recorded state desynced from the live
+# conmon+init. A swallowed failure there is fatal downstream: `assemble create`
+# (replace=false) then reports "claudebox already exists" and never recreates the
+# box, and `distrobox enter` fails with "container ... state improper". So: try the
+# normal removal, VERIFY it actually worked, and if not, SIGKILL the conmon+init
+# PIDs directly (a parent-namespace SIGKILL is unblockable and succeeds where
+# crun's did not), reconcile state, and re-verify — failing LOUDLY rather than
+# assembling against a leftover.
+force_destroy_box() {
+    local name=claudebox
+    distrobox rm -f "$name"  >/dev/null 2>&1 || true
+    podman rm -f -t 0 "$name" >/dev/null 2>&1 || true
+    podman container exists "$name" || return 0
+
+    echo ">> box '$name' did not remove cleanly — escalating (SIGKILL conmon/init)…" >&2
+    local ipid cpid
+    ipid=$(podman inspect "$name" --format '{{.State.Pid}}'       2>/dev/null || true)
+    cpid=$(podman inspect "$name" --format '{{.State.ConmonPid}}' 2>/dev/null || true)
+    [ -n "${ipid:-}" ] && [ "$ipid" != 0 ] && kill -9 "$ipid" 2>/dev/null || true
+    [ -n "${cpid:-}" ] && [ "$cpid" != 0 ] && kill -9 "$cpid" 2>/dev/null || true
+    podman container cleanup "$name" >/dev/null 2>&1 || true
+    podman rm -f -t 0 "$name"        >/dev/null 2>&1 || true
+
+    if podman container exists "$name"; then
+        echo "FATAL: could not destroy wedged box '$name' — refusing to assemble" \
+             "against a leftover (would hit 'already exists' / 'container state improper')." >&2
+        return 1
+    fi
+}
+
 # Self-recovery: remove any partial-state box from a prior failed assemble.
 # `distrobox.ini` has `replace=false`, so `assemble create` REFUSES to overwrite
 # an existing box. Without this rm, ANY partial failure (a network hiccup mid
@@ -26,7 +59,7 @@ cd "$LIVE"
 # fully recoverable on every retry. (box-rebuild.sh's own rm becomes redundant
 # but harmless.)
 echo ">> ensure clean slate (rm any prior partial-state box)…"
-distrobox rm -f claudebox >/dev/null 2>&1 || true
+force_destroy_box
 
 echo "==== assemble: distrobox assemble create --file $LIVE/distrobox.ini ===="
 distrobox assemble create --file "$LIVE/distrobox.ini"
@@ -49,7 +82,7 @@ for attempt in 1 2 3; do
 done
 [ "$ok" = 1 ] || {
     echo "FATAL: distrobox enter -- true failed 3 times — box install incomplete" >&2
-    distrobox rm -f claudebox >/dev/null 2>&1 || true
+    force_destroy_box || true
     exit 1
 }
 
