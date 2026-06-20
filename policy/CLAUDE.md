@@ -28,7 +28,7 @@ OUT:  a merged PR. CI builds → ghcr.io/oso-gato/<name>:latest. Another agent d
 - Operate, recreate, or manage containers on any host.
 - Modify the running fedora-dev or this box outside propose-and-commit. Ad-hoc installs vanish on next rebuild by design.
 - Background long work with `&` / `nohup` / `setsid` to escape the session lock.
-- Push directly to `main` of any repo. PR only.
+- Push directly to `main` of any repo. Land changes as a PR instead: open it and ask the maintainer to review; merge to `main` only after the maintainer reviews and gives an explicit go-ahead — the agent then runs the merge. Two steps (propose → approved-merge) keep changes safe, traceable, and reversible.
 - Install language-package-manager tools onto PATH inside the box.
 - Edit live-installed binaries in `/usr/local/bin` (denied by managed-settings; survives one rebuild at most).
 
