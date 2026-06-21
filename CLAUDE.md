@@ -46,6 +46,15 @@ Ad-hoc `dnf install` or `dnf remove` inside the running box works for the
 current session but VANISHES on the next rebuild — by design. That's the
 discipline that keeps the box reproducible.
 
+## HEADLESS (binding prerequisite)
+
+fedora-dev runs **fully headless** — no physical monitor, GPU, or local login seat is ever
+attached or required. The harness (the claudebox + the supervised services) needs no display, and
+every desktop image built ON this base (the fedora-desktop **xrdp** and **grd** lineages) is
+likewise headless — a *virtual* display rendered by software GL (llvmpipe), reached only over the
+network (ssh / RDP / VNC / web). A change that makes any part depend on a real display, GPU, or
+physical seat is a **defect**, not an option.
+
 ## BUILD PRINCIPLES (binding for every code change)
 
 | # | Principle | Rule |
