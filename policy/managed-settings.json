@@ -19,8 +19,28 @@
       "Bash(flatpak install:*)",
       "Bash(snap install:*)",
       "Write(~/.local/bin/**)",
-      "Write(/usr/local/bin/**)"
+      "Write(/usr/local/bin/**)",
+      "mcp__*merge*",
+      "mcp__*__merge*",
+      "mcp__*__*merge*",
+      "mcp__*pull_request*merge*"
     ],
-    "disableBypassPermissionsMode": "disable"
+    "disableBypassPermissionsMode": "disable",
+    "disableAutoMode": "disable",
+    "allowManagedPermissionRulesOnly": true,
+    "allowManagedHooksOnly": true
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/etc/claude-code/hooks/gate-push.sh"
+          }
+        ]
+      }
+    ]
   }
 }
