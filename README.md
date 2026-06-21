@@ -9,6 +9,7 @@ A headless cloud **workshop where Claude builds your container images.** No desk
 - ✋ **How changes ship — the workflow:** Claude **always opens a PR; it never pushes straight to `main`.** It then **waits for your explicit "merge it"** before merging. You review → you approve → it merges → CI builds. Two steps (propose → approved-merge): safe, traceable, reversible.
 - 🚧 **Where it stops:** it never deploys or runs containers on your live host — that's the host box's job.
 - 🔒 **No passwords anywhere** — key-only doors; credentials only at run time.
+- 🖥️ **Headless by design (binding):** no monitor, GPU, or local seat is ever attached — the box and every image built on it run entirely over the network. A change that needs a physical display is a defect, not an option.
 
 A headless Fedora container that hosts Claude Code (in an in-container Distrobox "claudebox") for building Fedora-based container images. Daily-refreshed CLI, base image rebuilt monthly, persistent volumes for your work, key-only ssh access (no passwords).
 
