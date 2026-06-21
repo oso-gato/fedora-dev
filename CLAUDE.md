@@ -51,7 +51,7 @@ discipline that keeps the box reproducible.
 | # | Principle | Rule |
 |---|---|---|
 | 1 | BASE | Build only from the official `registry.fedoraproject.org/fedora:${FEDORA_VERSION}` image. Version is a Containerfile `ARG` — never inlined. |
-| 2 | SOURCES | Every package from an official source, exactly one of: (a) Fedora's own repos via dnf; (b) the vendor's/developer's own RPM or dnf repo (`.repo` with `gpgcheck=1`); (c) at worst, a developer/vendor-released AppImage (sha256 logged). Never: COPR or other third-party repos, pip/npm/cargo/brew installs, curl-pipe-sh, tarball drops. **Applies to BOTH the base image AND claudebox's `additional_packages`.** Exceptions only by explicit user waiver, recorded as a new row in the relevant Packages table. **Current waivers: none.** |
+| 2 | SOURCES | Every package/artifact from an official source, exactly one of: (a) Fedora's own repos via dnf; (b) the vendor's/developer's own RPM or dnf repo (`.repo` with `gpgcheck=1`); (c) an **official-upstream binary release artifact with NO class-(a)/(b) source** — bounded by the **Class-(c) rules** below (last-resort/zero-base; publisher GPG-signature-or-checksum-verified, fail-closed; one of three self-contained consumption shapes; never loose on `$PATH`; disclosed per-artifact). Never: COPR or other third-party repos, pip/npm/cargo/gem/brew installs, curl-pipe-sh, tarball-on-PATH, flatpak, snap. **Applies to BOTH the base image AND claudebox's `additional_packages`.** Anything outside (a)/(b)/(c)-as-scoped needs an explicit user waiver row. **Class-(c) artifacts in use: none.** |
 | 3 | MINIMAL | dnf only with `--setopt=install_weak_deps=False`. Every package gets a justifying row in the relevant Packages table (BASE or BOX); a package without a row is a violation. **Install the most specific (leaf) package, never a convenience metapackage, unless a recorded architectural reason. `install_weak_deps=False` blocks weak Recommends but NOT a metapackage's hard Requires — so a metapackage can silently pull unused components (e.g. the `fail2ban` metapackage hard-pulls `fail2ban-firewalld`→`firewalld` + `fail2ban-sendmail`→`esmtp`; install `fail2ban-server`). If unsure whether a name is a metapackage, verify (`dnf repoquery --requires <pkg>`) and flag before adding.** |
 | 4 | VERIFY FIRST | Before adopting or bumping any source/version, fact-check it against the live source (web). Gate risky installs (version-mismatched vendor RPMs, new repos) in a scratch container before editing build files. |
 | 5 | NO SECRETS / NO IDENTITY | No passwords, keys, or personal usernames in any layer, file, or commit. Container user is the generic `core` (uid 1000). Credentials enter only as runtime env vars; entrypoint fails fast when missing. |
@@ -60,6 +60,38 @@ discipline that keeps the box reproducible.
 | 8 | CI + LAYERED CADENCE | `.github/workflows/build.yml` publishes the base image to GHCR + cosign-signs it: on push, on the 15th monthly (`--no-cache`), and on manual dispatch. Built-in token only. The IN-CONTAINER claudebox refreshes daily on its own timer + ad-hoc triggers; it never touches CI. |
 | 9 | VALIDATE | After any change: build, deploy via `run.sh`, confirm `(healthy)` plus a functional probe of each access path. Final proof is CI green + a host deploy from claudebox-on-the-host. |
 | 10 | PROPOSE-AND-COMMIT | The in-box agent grows `distrobox.ini`/`policy/`/`box-rebuild.sh`/etc. only by editing the LIVE clone at `/home/core/.local/share/fedora-dev/` and opening a PR. The human merges; the next box rebuild applies. Ad-hoc installs vanish on rebuild. |
+
+### Class-(c) sources — the bounded last-resort exception (fleet-wide; identical in fedora-desktop + fedora-dev + fedora-bootstrap)
+
+**(c)** ONLY when **no class-(a) Fedora package and no class-(b) vendor `.repo`** exists for the
+needed artifact — a **last-resort, zero-base check, re-confirmed at every version bump**; the
+moment it appears in Fedora or a vendor `.repo` it MUST move to (a)/(b): an **official-upstream
+binary release artifact**, fetched over TLS from the project's **own canonical release channel**
+— whose exact host + org/repo (or release-API URL) is **pinned in the disclosure row and
+changeable only as a control-plane change** — never a mirror, aggregator, COPR, PPA, OBS home
+project, language-package-manager registry (Maven Central/npm/PyPI/crates.io/RubyGems), or
+third-party rebuild. Each artifact MUST be **(1) version-pinned** via a Containerfile `ARG` (or
+`distrobox.ini` pin), the SOLE exception being an artifact Principle 6 designates
+latest-at-build; and **(2) integrity-verified before any use** — against the publisher's **GPG
+signature** (`gpg --verify`, key fingerprint pinned in-repo) **whenever one is published**; a
+bare `sha*sum -c` is acceptable **only** when the project publishes no signature; the build
+**fails closed** on any mismatch / missing / unfetchable check. *(For a latest-at-build artifact
+where no hash can be pre-pinned: TLS-authenticated fetch from the publisher's own release API +
+**resolve-and-log** — an auditable record, NOT a fail-closed gate; reserved to explicitly-named
+latest-at-build artifacts only.)* The artifact may be consumed in **exactly one of three
+self-contained shapes**: (i) a developer/vendor **AppImage** run from `/opt` (never a bare
+ELF/script/tarball); (ii) a webapp/archive **deployed into a class-(a) runtime** (an Apache
+`.war` into Fedora's Tomcat); or (iii) a **build-time-only tool** that is itself (c)-verified,
+transforms a named (c) artifact, fetches no further network, installs nothing onto `$PATH`, runs
+deterministically, and is deleted. **A loose executable / script / tarball on `$PATH` is NEVER
+permitted under (c).** Each (c) artifact gets a **disclosure row** in the Packages table (pinned
+canonical URL + version + signature/checksum kind); the table's **enumeration line lists every
+(c) artifact in use**. **Mechanical backstop (CI):** the control-plane diff-guard asserts every
+binary on `$PATH` resolves to an rpm (`rpm -qf`).
+
+**Class-(c) artifacts in use: none.** This repo ships no upstream binary artifact today; the rule
+is carried for fleet parity so any future need inherits the identical bounded definition. (The
+only repo with class-(c) artifacts is fedora-desktop: `guacamole.war` + Obsidian.)
 
 ## BASE PACKAGES
 
