@@ -28,7 +28,7 @@ OUT:  a merged PR. CI builds → ghcr.io/oso-gato/<name>:latest. Another agent d
 - Operate, recreate, or manage containers on any host.
 - Modify the running fedora-dev or this box outside propose-and-commit. Ad-hoc installs vanish on next rebuild by design.
 - Background long work with `&` / `nohup` / `setsid` to escape the session lock.
-- Push directly to `main` of any repo. Land changes as a PR instead: open it and ask the maintainer to review; merge to `main` only after the maintainer reviews and gives an explicit go-ahead — the agent then runs the merge. Two steps (propose → approved-merge) keep changes safe, traceable, and reversible. **Now MECHANICALLY enforced (BUILT, not behavioral):** a managed `PreToolUse` hook (`policy/hooks/gate-push.sh`), wired by `managed-settings.json` (`allowManagedHooksOnly` + `allowManagedPermissionRulesOnly` + `disableAutoMode` + `disableBypassPermissionsMode`), fail-closed DENIES any `git push` / `gh pr merge` / `gh pr create --merge` / `gh api …/merges|/merge` (incl. wrapper-script evasion) unless a one-shot approval marker is present — so the PR-first rule survives prompt-injection, not just good behavior. A CI control-plane diff-guard additionally blocks guardrail-file PRs lacking the `control-plane-approved` label. (Server-side branch protection on `main` — require PR + review — is the PRIMARY backstop, the maintainer's one-time item.)
+- Push directly to `main` of any repo. Land changes as a PR instead: open it and present a discrete **clickable** decision asking the maintainer to review; merge to `main` only after the maintainer gives an explicit clickable go-ahead — **the AGENT (not a human) then runs the merge itself**. Two steps (propose → approved-merge) keep changes safe, traceable, and reversible. **⟵ THIS bullet is the SINGLE canonical statement of the merge rule. Every other mention in this file and in `CLAUDE.md` DEFERS here and never restates the merge step — so there is exactly one wording to read, and "the agent merges on approval" can never be misread as "a human merges."** **Now MECHANICALLY enforced (BUILT, not behavioral):** a managed `PreToolUse` hook (`policy/hooks/gate-push.sh`), wired by `managed-settings.json` (`allowManagedHooksOnly` + `allowManagedPermissionRulesOnly` + `disableAutoMode` + `disableBypassPermissionsMode`), fail-closed DENIES any `git push` / `gh pr merge` / `gh pr create --merge` / `gh api …/merges|/merge` (incl. wrapper-script evasion) unless a one-shot approval marker is present — so the PR-first rule survives prompt-injection, not just good behavior. A CI control-plane diff-guard additionally blocks guardrail-file PRs lacking the `control-plane-approved` label. (Server-side branch protection on `main` — require PR + review — is the PRIMARY backstop, the maintainer's one-time item.)
 - Install language-package-manager tools onto PATH inside the box.
 - Edit live-installed binaries in `/usr/local/bin` (denied by managed-settings; survives one rebuild at most).
 
@@ -45,7 +45,7 @@ NEVER: COPR, third-party repos, `pip install` / `pipx` / `npm install -g` / `yar
 ```
 edit ~/.local/share/fedora-dev/{distrobox.ini|policy/|*.sh}  (live git clone)
   → gh pr create
-  → human merges
+  → maintainer approves (clickable); the AGENT merges   (per the canonical merge rule under DO NOT — the one statement)
   → next claudebox-rebuild applies the merged spec
   → monthly CI rebuilds fedora-dev image baked seed too
 ```
@@ -85,7 +85,7 @@ $EDITOR distrobox.ini                  # append to additional_packages= line (Fe
 $EDITOR CLAUDE.md                      # add justifying row to BOX PACKAGES table (in CLAUDE.md since v1.1.6+)
 git commit -am "claudebox: add <tool> — <one-line why>"
 gh pr create --title "claudebox: add <tool>" --body "<why this tool, what task needs it>"
-# After human merges, apply immediately:
+# After the approved merge lands (you merge on the maintainer's clickable approval — see DO NOT), apply immediately:
 claudebox-rebuild                      # session ends; reconnect with `claude`
 # Or do nothing and the daily 04:00 rebuild picks it up.
 ```
@@ -106,7 +106,7 @@ cd ~/.local/share/fedora-dev          # live clone on the home volume — persis
 $EDITOR <file>
 git commit -am "<scope>: <subject>"
 gh pr create
-# After human merge: the live clone reflects the new spec on `git pull origin main`,
+# After the approved merge lands: the live clone reflects the new spec on `git pull origin main`,
 # OR the next claudebox-rebuild reads the merged spec, OR CI rebuilds the fedora-dev
 # base image with the new baked seed on its monthly cadence.
 ```

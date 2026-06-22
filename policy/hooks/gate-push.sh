@@ -209,4 +209,4 @@ if marker_fresh; then
     exit 0
 fi
 
-deny "Push/merge blocked by the promotion gate. This mutates a remote branch or merges a PR, which requires Arthur's explicit clickable approval. Present the change as a discrete decision; on approval the flow writes a one-shot marker at $MARKER (fresh < ${MARKER_TTL}s) and re-runs. (The vault git-sync 'git -C <vault> push' is exempt and needs no marker.)"
+deny "Push/merge blocked by the promotion gate. This mutates a remote branch or merges a PR, which requires Arthur's explicit clickable approval. The rule is propose -> approve -> the AGENT (not a human) merges: present the change as a discrete clickable decision; on approval the flow writes a one-shot marker at $MARKER (fresh < ${MARKER_TTL}s) and re-runs THIS SAME command, so YOU perform the merge yourself. (The vault git-sync 'git -C <vault> push' is exempt and needs no marker.)"
