@@ -38,7 +38,7 @@ Durable changes to fedora-dev itself flow through git:
 1. Edit the LIVE clone at `~/.local/share/fedora-dev/` (inside the agent's
    session, on the home volume — persists across rebuilds).
 2. `gh pr create` from the clone.
-3. Human merges.
+3. `fedora-dev` merges on Arthur's clickable APPROVE (or Arthur merges) — see THE FLEET in policy/CLAUDE.md.
 4. Next claudebox rebuild applies the merged change. CI rebuilds the base
    image with the new baked seed on its own monthly cadence.
 
@@ -68,7 +68,7 @@ physical seat is a **defect**, not an option.
 | 7 | DEPLOY CONTRACT | Every image (this one and downstream) ships a `run.sh` that is the only sanctioned way to run it: runtime `--health-cmd` (OCI drops Containerfile HEALTHCHECK), devices, volumes, restart policy. Sensitive ports (ssh/RDP/VNC) stay tailnet-only — never `-p`. The Quadlet at the repo top is the systemd-managed equivalent. |
 | 8 | CI + LAYERED CADENCE | `.github/workflows/build.yml` publishes the base image to GHCR + cosign-signs it: on push, on the 15th monthly (`--no-cache`), and on manual dispatch. Built-in token only. The IN-CONTAINER claudebox refreshes daily on its own timer + ad-hoc triggers; it never touches CI. |
 | 9 | VALIDATE | After any change: build, deploy via `run.sh`, confirm `(healthy)` plus a functional probe of each access path. Final proof is CI green + a host deploy from claudebox-on-the-host. |
-| 10 | PROPOSE-AND-COMMIT | The in-box agent grows `distrobox.ini`/`policy/`/`box-rebuild.sh`/etc. only by editing the LIVE clone at `/home/core/.local/share/fedora-dev/` and opening a PR. The human merges; the next box rebuild applies. Ad-hoc installs vanish on rebuild. |
+| 10 | PROPOSE-AND-COMMIT | The in-box agent grows `distrobox.ini`/`policy/`/`box-rebuild.sh`/etc. only by editing the LIVE clone at `/home/core/.local/share/fedora-dev/` and opening a PR. `fedora-dev` merges on Arthur's clickable APPROVE; the next box rebuild applies. Ad-hoc installs vanish on rebuild. |
 
 ### Class-(c) sources — the bounded last-resort exception (fleet-wide; identical in fedora-desktop + fedora-dev + fedora-bootstrap)
 
