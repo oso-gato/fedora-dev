@@ -31,6 +31,7 @@ OUT:  merged `main` (on Arthur's clickable APPROVE) → CI builds + signs → gh
 - Develop Containerfile + install.sh + entrypoint.sh + scripts + policy + CI in cloned image repos under `$HOME`.
 - Build with `podman build` — CLI here drives fedora-dev's engine via `CONTAINER_HOST=unix:///run/user/1000/podman/podman.sock`.
 - Validate per each image repo's Principle 9: build → deploy via `run.sh` → confirm `(healthy)` → functional-probe each access path.
+- Spin up an image **by hand** via its `./spin-up.sh` wizard (ASKS for `TS_AUTHKEY`; blank = `login.tailscale.com` web-login), or **scripted** via the `./run.sh` it wraps (`IMAGE=ghcr.io/oso-gato/<name>:latest` on a real host; `localhost/…` is in-box self-validation only). The HOST itself comes up via `setup.sh`, never a workload `run.sh`. Never hand-roll `podman run`.
 - Add tools to claudebox: edit `~/.local/share/fedora-dev/distrobox.ini` `additional_packages`, add README Packages-table row, `gh pr create`.
 - Run work in the foreground. Session-lock = activity signal; backgrounded work may be killed by host or daily rebuild.
 - Pick up newer claude-code: run `claudebox-rebuild` in the box. This session ends. Reconnect with `claude`.
