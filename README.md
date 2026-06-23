@@ -70,13 +70,21 @@ podman secret create fedora-dev-ts-authkey -    # paste your tskey-... and Ctrl-
 # before the first start. Skip for interactive tailnet join via login.tailscale.com.
 ```
 
-### run.sh (interactive / non-systemd hosts)
+### spin-up.sh (interactive — the recommended by-hand way in)
 
 ```sh
-[TS_AUTHKEY=tskey-…] [IMAGE=…] ./run.sh
+./spin-up.sh
 ```
 
-Same runtime spec as the Quadlet (volumes, devices, health-cmd, port publishes) but a one-shot `podman run -d` with no systemd around it. Useful for hosts without systemd. No CORE_PASSWORD needed (sshd is key-only).
+The fleet-consistent entry point (mirrors `fedora-desktop/spin-up.sh`): it **ASKS for a Tailscale auth key** (`tskey-…`) and the image ref, then hands off to `run.sh`. Give a key for an **unattended** tailnet join; leave it **blank** to fall back to the one-time `login.tailscale.com` **web-login** (URL in `podman logs -f fedora-dev`). Never hand-roll `podman run`.
+
+### run.sh (non-interactive / scripted / non-systemd hosts)
+
+```sh
+[TS_AUTHKEY=tskey-…] IMAGE=ghcr.io/oso-gato/fedora-dev:latest ./run.sh
+```
+
+The env-driven deploy contract `spin-up.sh` wraps — use it directly when the env is already set (e.g. a scripted host deploy). **On a real host pass the GHCR image**; `localhost/…` is only for in-box self-validation (the in-box agent builds locally, then runs `./run.sh` to validate per Principle 9). Same runtime spec as the Quadlet (volumes, devices, health-cmd, port publishes); no CORE_PASSWORD needed (sshd is key-only).
 
 ### First boot
 

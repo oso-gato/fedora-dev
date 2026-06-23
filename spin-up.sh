@@ -27,7 +27,7 @@ ask() {  # ask "<prompt>" ["<default>"]
 echo "=== fedora-dev spin-up ===" >&2
 # Honor an env-supplied TS_AUTHKEY (scripted deploy); otherwise ASK. Blank = web-login fallback.
 TS_AUTHKEY="${TS_AUTHKEY:-$(ask 'Tailscale auth key (tskey-…; blank = interactive web-login join)' '')}"
-IMAGE="${IMAGE:-$(ask 'Image ref' 'localhost/fedora-dev:latest')}"
+IMAGE="${IMAGE:-$(ask 'Image ref (host deploy = ghcr.io; localhost/ = in-box self-validation only)' 'ghcr.io/oso-gato/fedora-dev:latest')}"
 
 if [ -n "$TS_AUTHKEY" ]; then
   echo "  -> UNATTENDED tailnet join (TS_AUTHKEY supplied)." >&2
