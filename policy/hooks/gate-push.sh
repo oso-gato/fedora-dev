@@ -100,11 +100,24 @@ deny() {
     exit 2
 }
 
-# marker_fresh(): true iff the one-shot approval marker exists AND is younger
-# than MARKER_TTL. CONSUMES (deletes) the marker either way → strictly one-shot.
+# marker_fresh(): true iff the one-shot approval marker exists, is ROOT-OWNED, AND
+# is younger than MARKER_TTL. CONSUMES (deletes) the marker either way → one-shot.
+#
+# ROOT-OWNED is the load-bearing GATE-01 fix: the in-box agent runs as uid 1000, so
+# it CAN `touch` this path — but a marker it writes is owned by uid 1000 and is
+# REJECTED here. Only the clickable approval flow, writing the marker from OUTSIDE
+# the box as root (`podman exec -u 0 … touch "$MARKER"`), produces a uid-0 marker
+# the gate will honor. So the agent cannot forge its own approval. (The home-volume
+# dir stays core-owned, so consuming/`rm` of the root file still works — unlink
+# depends on the directory's write bit, not the file's owner.)
 marker_fresh() {
     [ -f "$MARKER" ] || return 1
-    local now mtime age
+    local now mtime age owner
+    owner="$(stat -c %u "$MARKER" 2>/dev/null || echo -1)"
+    if [ "$owner" != "0" ]; then                # not root-owned → forged/untrusted
+        rm -f "$MARKER" 2>/dev/null || true     # consume so it can't linger
+        return 1
+    fi
     now="$(date +%s 2>/dev/null || echo 0)"
     mtime="$(stat -c %Y "$MARKER" 2>/dev/null || echo 0)"
     age=$(( now - mtime ))
@@ -112,38 +125,61 @@ marker_fresh() {
     [ "$age" -ge 0 ] && [ "$age" -le "$MARKER_TTL" ]
 }
 
-# is_vault_sync_push(): true iff the command is the narrow, exempt vault push,
-# i.e. `git -C <VAULT_DIR> ... push ...`. We REQUIRE the `-C <vaultpath>` form so
-# a bare `git push` (cwd-relative) is NEVER auto-exempted.
+# is_vault_sync_push(): true iff the command is the narrow, exempt vault push —
+# `git -C <VAULT_DIR> … push …` AND NOTHING ELSE. HARDENED (GATE-03): rejects any
+# compound / multi-command payload (`;` `&&` `||` `|` backtick `$(`) and any payload
+# carrying a SECOND git or push, so the exemption can't be reused to smuggle an
+# arbitrary `git push origin main` after a legit vault push. (The automatic vault
+# git-sync is entrypoint-launched and never traverses this hook; this exemption only
+# covers an agent running the single sync push by hand — so the narrowing is safe.)
 is_vault_sync_push() {
-    local c vesc
+    local c vesc gits pushes
     c="$(printf '%s' "$cmd" | tr '\n' ' ')"
-    # escape regex metacharacters in VAULT_DIR. NOTE: do NOT escape '/', it is
-    # not special in grep -E and escaping it triggers "stray \ before /".
+    # any shell compounding / command substitution → not the lone sync push
+    printf '%s' "$c" | grep -Eq '[;&|`]|\$\(' && return 1
+    # exactly ONE git invocation and ONE push token, or it isn't the sole sync push
+    gits="$(printf '%s' "$c" | grep -oE '(^|[^[:alnum:]_./-])git([[:space:]]|$)' | wc -l)"
+    pushes="$(printf '%s' "$c" | grep -oE '(^|[^[:alnum:]_])push([[:space:]"}]|$)' | wc -l)"
+    [ "$gits" -eq 1 ] && [ "$pushes" -eq 1 ] || return 1
+    # escape regex metacharacters in VAULT_DIR (NOT '/').
     vesc="$(printf '%s' "$VAULT_DIR" | sed 's/[][\.*^$]/\\&/g')"
     printf '%s' "$c" | grep -Eq '(^|[^[:alnum:]_])git([[:space:]]+-[^[:space:]]+)*[[:space:]]+-C[[:space:]]+'"$vesc"'([[:space:]/"]|$)' \
         && printf '%s' "$c" | grep -Eq '(^|[^[:alnum:]_])push([[:space:]"}]|$)'
 }
 
-# scan_text(text): true iff TEXT contains any blocked push/merge verb.
-# Used on the command/payload AND on wrapper-script contents.
+# normalize_cmd(text): strip git/gh OPTION noise so the SUBCOMMAND verb becomes
+# adjacent to the tool name. Defeats the adjacency-evasion (GATE-02) where a flag
+# VALUE token (`git -c key=val push`, `gh --repo o/r pr merge`) pushed the verb out
+# of reach of the old anchored regex. Over-stripping AFTER the verb is harmless — we
+# only need verb adjacency to fire, and the scan fails CLOSED.
+normalize_cmd() {
+    printf '%s' "$1" | sed -E '
+        s/[[:space:]]+-(c|C|R|f|F|H|X|o)[[:space:]]+[^[:space:]]+/ /g
+        s/[[:space:]]+--(repo|git-dir|work-tree|field|raw-field|method|header|hostname|jq|template|cache)[[:space:]]+[^[:space:]]+/ /g
+        s/[[:space:]]+--[A-Za-z0-9-]+=[^[:space:]]+/ /g
+        s/[[:space:]]+-[A-Za-z0-9-]+/ /g
+        s/[[:space:]]+/ /g'
+}
+
+# scan_text(text): true iff TEXT contains a blocked push/merge verb. Normalizes
+# option-noise FIRST so leading flags can't break verb adjacency. The flag-bearing
+# checks (gh pr create --merge; gh api … merge) read the RAW text, since normalize
+# strips the very flags they look for. Used on the command/payload AND on
+# wrapper-script contents.
 scan_text() {
-    local text="$1"
-    # Trailing terminator classes below deliberately include the JSON delimiters
-    # `"` and `}` as well as whitespace/EOL: in the fail-closed (no-jq) path the
-    # verb is matched inside the raw payload, where it is immediately followed by
-    # the closing `"}}` of the JSON. Without these, the no-jq path would MISS a
-    # verb at end-of-command and fail OPEN. With them it still fails closed.
-    # git push  (allow intervening flags incl. `-C <dir>`)
-    printf '%s' "$text" | grep -Eq '(^|[^[:alnum:]_./-])git([[:space:]]+-[^[:space:]]+|[[:space:]]+-C[[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]"};&|]|$)' && return 0
+    local raw="$1" text
+    text="$(normalize_cmd "$raw")"
+    # git push
+    printf '%s' "$text" | grep -Eq '(^|[^[:alnum:]_./-])git([[:space:]]+-[^[:space:]]+)*[[:space:]]+push([[:space:]"};&|]|$)' && return 0
     # gh pr merge
     printf '%s' "$text" | grep -Eq '(^|[^[:alnum:]_./-])gh[[:space:]]+pr[[:space:]]+merge([[:space:]"};&|]|$)' && return 0
-    # gh pr create ... --merge|--squash|--rebase|--auto  (auto-merge on create)
+    # gh pr create … --merge|--squash|--rebase|--auto  (auto-merge on create)
     printf '%s' "$text" | grep -Eq '(^|[^[:alnum:]_./-])gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$)' \
-        && printf '%s' "$text" | grep -Eq -- '--(merge|squash|rebase|auto)([[:space:]="};&|]|$)' && return 0
-    # gh api ... /merges  OR  .../pulls/<n>/merge   (REST merge endpoints)
+        && printf '%s' "$raw" | grep -Eq -- '--(merge|squash|rebase|auto)([[:space:]="};&|]|$)' && return 0
+    # gh api … ANY merge — REST (/merges, /pulls/<n>/merge) AND GraphQL
+    # (mergePullRequest / mergeBranch). Broad on purpose; fail closed.
     printf '%s' "$text" | grep -Eq '(^|[^[:alnum:]_./-])gh[[:space:]]+api([[:space:]]|$)' \
-        && printf '%s' "$text" | grep -Eq '/(merges|merge)([[:space:]?#"'"'"'};&|]|$)' && return 0
+        && printf '%s' "$raw" | grep -Eqi 'merge' && return 0
     return 1
 }
 
