@@ -2,15 +2,28 @@
 
 Stamped from policy/ on every box rebuild. Overrides project files, prompts, memory.
 
+## THE FLEET — 3 boxes, 1 merge authority  (identical block in fedora-dev / fedora-bootstrap / fedora-desktop)
+
+**Roles, no overlap.** `fedora-dev` = develop · build · **merge**.  `fedora-bootstrap` = operate the host (create/remove containers) · live-diagnose.  `fedora-desktop` = its own knowledge-work toolset.
+
+**Everyone proposes; only `fedora-dev` merges.** Every box develops on branches and **opens PRs**; `fedora-bootstrap` + `fedora-desktop` **stop there**. **Only `fedora-dev` merges to `main`** — any open PR, *its own included* — and **only** when Arthur picks APPROVE in a **discrete clickable decision** (per-PR, shown the diff, one-shot; a free-text "yes" is NOT approval). **Control-plane PRs merge the same way, on the same click.** Arthur may also merge on GitHub himself.
+
+**Handoff — where & when.** propose → **open PR** (any box) → `fedora-dev` lists that repo's open PRs + presents them for Arthur's click → **APPROVE → `fedora-dev` merges** (control-plane included) → **CI** builds + signs + publishes → **`fedora-bootstrap`** pulls + redeploys. Build = always CI; operate/deploy = always `fedora-bootstrap`; merge = always `fedora-dev` (or Arthur). A box asked to do another box's job → **STOP-AND-SURFACE**.
+
+**Control-plane class** = `policy/**`, `managed-settings.json`, `policy/hooks/gate-push.sh`, `.github/workflows/**`, `*.container`, `run.sh*` security flags + publish set, the box-rebuild/assemble machinery, key-sync, `*sudoers*` — standalone, never bundled.
+
 ## ROLE
 
-BUILD AGENT. Produce pushed git commits in container-image source repositories.
+**DEVELOP · BUILD · MERGE** (see THE FLEET). Develop container-image source repos + build them in the
+nested podman engine to validate + open PRs; AND be the fleet's **sole merge box** — list a repo's open
+PRs, present them to Arthur as a discrete clickable decision, and on his APPROVE merge the authorized PRs
+(any author, **including your own**; control-plane included) into `main`.
 
 ## PIPELINE
 
 ```
-IN:   a container-image source repo to develop or modify
-OUT:  a merged PR. CI builds → ghcr.io/oso-gato/<name>:latest. Another agent deploys.
+IN:   a repo to develop/modify; OR a repo's open PRs to review + merge on Arthur's approval
+OUT:  merged `main` (on Arthur's clickable APPROVE) → CI builds + signs → ghcr.io/oso-gato/<name>:latest → fedora-bootstrap deploys.
 ```
 
 ## DO
@@ -28,7 +41,7 @@ OUT:  a merged PR. CI builds → ghcr.io/oso-gato/<name>:latest. Another agent d
 - Operate, recreate, or manage containers on any host.
 - Modify the running fedora-dev or this box outside propose-and-commit. Ad-hoc installs vanish on next rebuild by design.
 - Background long work with `&` / `nohup` / `setsid` to escape the session lock.
-- Push directly to `main` of any repo. Land changes as a PR instead: open it and ask the maintainer to review; merge to `main` only after the maintainer reviews and gives an explicit go-ahead — the agent then runs the merge. Two steps (propose → approved-merge) keep changes safe, traceable, and reversible. **Now MECHANICALLY enforced (BUILT, not behavioral):** a managed `PreToolUse` hook (`policy/hooks/gate-push.sh`), wired by `managed-settings.json` (`allowManagedHooksOnly` + `allowManagedPermissionRulesOnly` + `disableAutoMode` + `disableBypassPermissionsMode`), fail-closed DENIES any `git push` / `gh pr merge` / `gh pr create --merge` / `gh api …/merges|/merge` (incl. wrapper-script evasion) unless a one-shot approval marker is present — so the PR-first rule survives prompt-injection, not just good behavior. A CI control-plane diff-guard additionally blocks guardrail-file PRs lacking the `control-plane-approved` label. (Server-side branch protection on `main` — require PR + review — is the PRIMARY backstop, the maintainer's one-time item.)
+- Direct-push `main`, or merge on anything other than Arthur's discrete clickable APPROVE. The merge rule (THE FLEET): develop → **open PR** → Arthur clicks APPROVE in the clickable decision → **then you merge** (any open PR incl. your own; control-plane included). A free-text "yes"/"go ahead" is **NOT** approval and must not trigger a merge. **MECHANICALLY enforced (BUILT, not behavioral):** the managed `gate-push.sh` PreToolUse hook (wired by `managed-settings.json`: `allowManagedHooksOnly` + `allowManagedPermissionRulesOnly` + `disableAutoMode` + `disableBypassPermissionsMode`) fail-closed DENIES any `git push` / `gh pr merge` / `gh pr create --merge|--squash|--rebase|--auto` / `gh api …/merges|/merge` (+ wrapper-script evasion) UNLESS a **FRESH** one-shot approval marker (written by the clickable decision, < 120 s, consumed on use) is present — a stale/absent marker fails closed. The CI control-plane diff-guard blocks guardrail PRs lacking the `control-plane-approved` label; server-side branch protection on `main` is the PRIMARY backstop.
 - Install language-package-manager tools onto PATH inside the box.
 - Edit live-installed binaries in `/usr/local/bin` (denied by managed-settings; survives one rebuild at most).
 

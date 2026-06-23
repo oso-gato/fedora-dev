@@ -2,12 +2,12 @@
 
 ## TL;DR — in plain words
 
-A headless cloud **workshop where Claude builds your container images.** No desktop — you reach it by terminal, run `claude`, and it develops the image source, builds it, and hands it back as a change for you to approve. It's the *build half* of a two-box split: **this box builds; a separate host box deploys.**
+A headless cloud **workshop where Claude builds your container images.** No desktop — you reach it by terminal, run `claude`, and it develops the image source, builds it, and hands it back as a change for you to approve. It's one of **three boxes**: this box **develops, builds, and is the fleet's sole *merge* box**; the host box operates + live-diagnoses; the desktop box builds its own knowledge-work tools. The other two only *propose* (open PRs) — **this box merges them, on your click.**
 
 - 🔑 **How you get in:** key-only SSH/Mosh (public), or keyless over Tailscale. Every login lands in a persistent `tmux` session, and `claude` drops you into Claude Code — which refreshes itself daily.
 - 🏗️ **What it does:** authors and test-builds container images in its *own* private engine (never your live machines). Daily-fresh Claude, monthly-fresh base image.
-- ✋ **How changes ship — the workflow:** Claude **always opens a PR; it never pushes straight to `main`.** It then **waits for your explicit "merge it"** before merging. You review → you approve → it merges → CI builds. Two steps (propose → approved-merge): safe, traceable, reversible.
-- 🚧 **Where it stops:** it never deploys or runs containers on your live host — that's the host box's job.
+- ✋ **How changes ship — the fleet rule:** every box (this one, the host box, the desktop box) **opens PRs; only this box merges.** It lists a repo's open PRs and presents them for your **one-click APPROVE** — per-PR, you see the diff, a typed "yes" doesn't count — then it merges (control-plane included) → CI builds. Propose → click → merge: safe, traceable, reversible.
+- 🚧 **Where it stops:** it never deploys or runs containers on your live host — that's the host box's job. It builds + merges; it doesn't operate.
 - 🔒 **No passwords anywhere** — key-only doors; credentials only at run time.
 - 🖥️ **Headless by design (binding):** no monitor, GPU, or local seat is ever attached — the box and every image built on it run entirely over the network. A change that needs a physical display is a defect, not an option.
 
