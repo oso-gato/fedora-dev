@@ -44,19 +44,25 @@
 #     "EXCEPTIONS"). Narrowly recognised by the `-C <vault>` form, so the
 #     exemption can't be reused as a blanket `git push` allow.
 #
-# APPROVAL MARKER (one-shot, freshness-gated):
-#   ~/.local/state/claudebox/merge-approved
-#   The clickable promotion-gate flow `touch`es it immediately before performing
-#   the approved push; the hook CONSUMES it (deletes it) so it authorises exactly
-#   one push/merge. Markers older than $MARKER_TTL are ignored and removed — a
-#   leftover from a past approval can't authorise a new push.
+# APPROVAL = a per-action interactive ASK, answered by Arthur in THIS session.
+#   On a push/merge the hook returns permissionDecision:"ask" → Claude Code shows
+#   Arthur a discrete clickable allow/deny for THAT exact command, in the fedora-dev
+#   session, and merges only on his click. The agent CANNOT answer its own prompt:
+#   managed-settings.json sets disableAutoMode + disableBypassPermissionsMode +
+#   allowManagedPermissionRulesOnly + allowManagedHooksOnly, so no auto-mode / bypass
+#   / self-added allow-rule / self-registered hook can satisfy it (verified vs the
+#   Claude Code permission + hook docs, L1). There is NO marker file: the prior marker
+#   had no producer (nothing wrote it) so it could only ever DENY, and it shared the
+#   exact ceiling below — so `ask` is strictly better, not weaker.
+#
+# RESIDUAL CEILING (no in-box hook closes this — documented, not papered over):
+#   PreToolUse hooks do NOT fire under `claude -p` (headless) — anthropics/claude-code
+#   #40506 — so a maliciously-injected agent that spawns `claude -p` bypasses THIS hook
+#   (it would have bypassed a marker identically). Hard containment of a HOSTILE in-box
+#   agent is server-side only (branch protection the box token cannot bypass). This gate
+#   stops the realistic case: the agent merging without Arthur's explicit in-session click.
 # ============================================================================
 set -uo pipefail
-
-# --- state dir + one-shot approval marker -----------------------------------
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claudebox"
-MARKER="$STATE_DIR/merge-approved"
-MARKER_TTL=120          # seconds; an approval older than this is stale
 
 # --- the vault clone path the git-sync pushes (exempt). Override via env. -----
 VAULT_DIR="${VAULT_PATH:-/home/core/obsidian/2nd-brain}"
@@ -100,29 +106,16 @@ deny() {
     exit 2
 }
 
-# marker_fresh(): true iff the one-shot approval marker exists, is ROOT-OWNED, AND
-# is younger than MARKER_TTL. CONSUMES (deletes) the marker either way → one-shot.
-#
-# ROOT-OWNED is the load-bearing GATE-01 fix: the in-box agent runs as uid 1000, so
-# it CAN `touch` this path — but a marker it writes is owned by uid 1000 and is
-# REJECTED here. Only the clickable approval flow, writing the marker from OUTSIDE
-# the box as root (`podman exec -u 0 … touch "$MARKER"`), produces a uid-0 marker
-# the gate will honor. So the agent cannot forge its own approval. (The home-volume
-# dir stays core-owned, so consuming/`rm` of the root file still works — unlink
-# depends on the directory's write bit, not the file's owner.)
-marker_fresh() {
-    [ -f "$MARKER" ] || return 1
-    local now mtime age owner
-    owner="$(stat -c %u "$MARKER" 2>/dev/null || echo -1)"
-    if [ "$owner" != "0" ]; then                # not root-owned → forged/untrusted
-        rm -f "$MARKER" 2>/dev/null || true     # consume so it can't linger
-        return 1
-    fi
-    now="$(date +%s 2>/dev/null || echo 0)"
-    mtime="$(stat -c %Y "$MARKER" 2>/dev/null || echo 0)"
-    age=$(( now - mtime ))
-    rm -f "$MARKER" 2>/dev/null || true        # consume regardless of freshness
-    [ "$age" -ge 0 ] && [ "$age" -le "$MARKER_TTL" ]
+# ask(reason): structured ASK JSON (exit 0) — routes to Claude Code's interactive
+# permission prompt so Arthur clicks allow/deny on THIS exact command, in-session.
+# Hand-written JSON (no jq dependency). This is NOT exit 2 (that is a hard deny);
+# `ask` defers the decision to the human, and the agent cannot answer its own prompt
+# (see the managed-lockdown note in the header). The merge proceeds only on his click.
+ask() {
+    local reason="$1" esc
+    esc="$(printf '%s' "$reason" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' ')"
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}\n' "$esc"
+    exit 0
 }
 
 # is_vault_sync_push(): true iff the command is the narrow, exempt vault push —
@@ -239,10 +232,9 @@ fi
 [ "$blocked" -eq 0 ] && exit 0
 
 # ----------------------------------------------------------------------------
-# 5) It IS a push/merge. Allow ONLY with a fresh one-shot approval marker.
+# 5) It IS a push/merge → require Arthur's explicit clickable approval IN THIS
+#    fedora-dev session. Return "ask": Claude Code shows him allow/deny for this
+#    exact command; the merge runs only if he clicks allow. The agent cannot
+#    answer for him (managed lockdown — see header).
 # ----------------------------------------------------------------------------
-if marker_fresh; then
-    exit 0
-fi
-
-deny "Push/merge blocked by the promotion gate. This mutates a remote branch or merges a PR, which requires Arthur's explicit clickable approval. Present the change as a discrete decision; on approval the flow writes a one-shot marker at $MARKER (fresh < ${MARKER_TTL}s) and re-runs. (The vault git-sync 'git -C <vault> push' is exempt and needs no marker.)"
+ask "fedora-dev wants to push/merge to a remote — this is THE merge to main. Approve ONLY if you (Arthur) intend it; review the command + the PR/diff first. (A free-text 'yes' is not this click — you must allow this prompt. The vault git-sync 'git -C <vault> push' is exempt and never reaches here.)"
