@@ -13,6 +13,18 @@ A headless cloud **workshop where Claude builds your container images.** No desk
 
 A headless Fedora container that hosts Claude Code (in an in-container Distrobox "claudebox") for building Fedora-based container images. Daily-refreshed CLI, base image rebuilt monthly, persistent volumes for your work, key-only ssh access (no passwords).
 
+## Where this sits — the fleet
+
+**This repo is the `fedora-dev` box** of a three-box swarm — **the build + sole merge box.** Full map: **[FLEET.md](FLEET.md)**.
+
+| Box | Role | Builds? | Merges? | Operates host? | Spin up |
+|-----|------|:--:|:--:|:--:|---------|
+| **fedora-dev** *(this one)* | develop · build · **merge** | ✅ nested | ✅ **(sole merger)** | ❌ | `./spin-up.sh` |
+| **fedora-bootstrap** | operate host · live-diagnose → PR | ❌ (CI) | ❌ PR-only | ✅ incl. create/remove | `./day0.sh` (Day-0) |
+| **fedora-desktop** | knowledge-work + own toolset → PR | ❌ (CI) | ❌ PR-only | ❌ | `./spin-up.sh` |
+
+Everyone opens PRs; **only `fedora-dev` merges** — any PR (its own + control-plane) on Arthur's **clickable APPROVE**. See [FLEET.md](FLEET.md) for the handoff + boundaries.
+
 ## Purpose
 
 `fedora-dev` is a **build environment**. One half of a strict two-agent pipeline:
