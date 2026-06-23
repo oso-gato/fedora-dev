@@ -4,7 +4,9 @@
 # HEALTHCHECK), the tun/fuse devices, the restart policy, AND the port
 # publishes for public-IP key-auth ssh (4444) + public mosh (61001-62000/udp).
 #
-#   [TS_AUTHKEY=tskey-…] [IMAGE=…] ./run.sh
+#   [TS_AUTHKEY=tskey-…] [IMAGE=…] ./run.sh   (non-interactive; env-driven)
+#   ./spin-up.sh                               (interactive: ASKS for TS_AUTHKEY,
+#                                               blank = web-login join, then runs this)
 #
 # v1.1.9: sshd is key-only (keys synced from github.com/oso-gato.keys at
 # every container start). NO CORE_PASSWORD required; honored if set, but
