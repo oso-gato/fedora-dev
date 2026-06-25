@@ -58,6 +58,13 @@ throwaway no-secret sandbox; never operates a host.
 - **Control-plane class** (`policy/**`, `managed-settings.json`, `gate-push.sh`,
   `.github/workflows/**`, `*.container`, `run.sh*` security flags, key-sync, `*sudoers*`): standalone,
   never bundled; needs the human-applied `control-plane-approved` label.
+- **Signature flow (baseline build requirement — every image repo):** every fleet image is
+  **key-signed in CI by digest** with the fleet cosign private key, and the host **enforces** it via
+  podman-native `policy.json → sigstoreSigned { keyData }` (no cosign on the host). **Key-based, never
+  keyless** (podman matches only a `subjectEmail`, never a GitHub-Actions workflow-URI identity). A
+  **ground rule built into every repo from the start** — the cryptographic baseline the autonomous
+  pre-merge dev loop stands on (the host runs *un-merged* candidate code, so it must verify CI
+  provenance before running it).
 - **Sources** (dnf → vendor `.repo` → AppImage/`.war`, GPG/sha-verified) · **no secrets in image
   layers** · **headless everywhere** (software-GL); sensitive ports tailnet-only, the desktop's web
   gate the one public door.
