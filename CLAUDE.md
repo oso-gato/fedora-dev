@@ -184,7 +184,7 @@ The nested engine's RUN support is **narrower** than the "build/run/exec works" 
 - **ISOLATED LIVE RUN — blocked.** A container with its OWN netns hits `/proc/sys/net/ipv4/ping_group_range: Read-only file system`; its OWN pidns hits the same `mount proc` denial. Only a **degraded** `--network=host --pid=host` run works (shared namespaces → ambiguous probes + flaky teardown), so live-run is **best-effort / non-gating** in-box.
 - **Faithful live validation belongs on the host** (own namespaces, one less nesting level) — the existing post-merge `container-refresh` health-gate + digest-rollback. The in-box harness gates build+assembly+lint; the host gates live.
 
-`bin/validate.sh <repo-dir> [Containerfile] [build|nobuild]` → per-tier PASS/FAIL + a GREEN/RED verdict the agent iterates on, with no host and no human in the loop.
+`bin/validate.sh <repo-dir> [Containerfile] [build|nobuild]` → per-tier PASS/FAIL + a GREEN/RED verdict the agent iterates on, with no host and no human in the loop. **Repo-agnostic** (validates fedora-dev AND workload repos): auto-detects a **systemd-PID-1** lineage (`ENTRYPOINT /sbin/init` / `STOPSIGNAL SIGRTMIN+3`) and skips the degraded smoke for it (→ assembly-only in-box; its live gate is the host); lints **every shipped `*.sh`**; passes per-repo build-args via `$BUILD_ARGS`. **Host-immutable:** builds into an ephemeral image tree in the dev box's OWN nested engine (never the host live tree), tears down smoke containers on exit, and `DISCARD=1` removes the candidate image after testing. Tested GREEN on fedora-dev + both fedora-desktop lineages (xrdp + grd).
 
 ## CADENCE REFERENCE
 
