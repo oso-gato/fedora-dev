@@ -175,6 +175,17 @@ Subuid/subgid: `core:10000:55000` (sized to fit the outer rootless 65536-ID map;
 
 No systemd inside fedora-dev: cgroupfs manager + file events logger preconfigured; XDG_RUNTIME_DIR provided by the entrypoint; the rebuild-trigger machinery is supervised by the entrypoint's pgrep watchdog instead of systemd units.
 
+### In-box candidate validation — capability boundary + `bin/validate.sh`
+
+The nested engine's RUN support is **narrower** than the "build/run/exec works" line above; `bin/validate.sh` gates exactly the tiers that are faithful at this nesting depth (autonomously established):
+
+- **BUILD — requires `--isolation=chroot`.** A default-isolation build RUN step fails with `mount 'proc' to 'proc': Operation not permitted` (the build container can't mount a fresh `/proc` at this depth). `--isolation=chroot` runs RUN steps in a chroot (no new mount/pid ns) and succeeds.
+- **ASSEMBLY — works.** `podman create` + `podman export | tar -t` + content inspection (no run): the reliable structural check.
+- **ISOLATED LIVE RUN — blocked.** A container with its OWN netns hits `/proc/sys/net/ipv4/ping_group_range: Read-only file system`; its OWN pidns hits the same `mount proc` denial. Only a **degraded** `--network=host --pid=host` run works (shared namespaces → ambiguous probes + flaky teardown), so live-run is **best-effort / non-gating** in-box.
+- **Faithful live validation belongs on the host** (own namespaces, one less nesting level) — the existing post-merge `container-refresh` health-gate + digest-rollback. The in-box harness gates build+assembly+lint; the host gates live.
+
+`bin/validate.sh <repo-dir> [Containerfile] [build|nobuild]` → per-tier PASS/FAIL + a GREEN/RED verdict the agent iterates on, with no host and no human in the loop.
+
 ## CADENCE REFERENCE
 
 | Layer | Cadence | Trigger | Source |
