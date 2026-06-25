@@ -114,13 +114,42 @@ fi
 unset _ts_state _ts_url _ts_ack 2>/dev/null || true
 EOF
 
-# ---- every interactive remote login lands in the persistent tmux session ----
+# ---- every interactive remote login lands in the persistent tmux workspace ----
+# Each login gets its OWN session inside the shared "main" group: the windows
+# (the work) are shared across every client, but each client's geometry and
+# redraw state stay INDEPENDENT. That kills the multi-client geometry race —
+# under one shared session (window-size=latest) a newly-attaching client of a
+# different size forces the shared window to its geometry and paints every other
+# client onto a foreign row/column grid, which is the garble seen on Prompt 3 /
+# WebSSH and the initial garble on native terminals. Session groups give shared
+# windows + per-session size (tmux(1): "Sessions in the same group share the
+# same set of windows ... the current and previous window ... remain
+# independent"). The per-connection "c<pid>" session self-destroys on disconnect
+# (destroy-unattached); the work persists in the detached "main" base session.
 cat > /etc/profile.d/zz-tmux-attach.sh <<'EOF'
-# ssh and mosh logins attach to (or create) the shared tmux session "main".
+# ssh + mosh logins each get their own session in the shared "main" group.
 case $- in *i*) ;; *) return ;; esac
 if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null && { [ -n "${SSH_TTY:-}" ] || [ -t 0 ]; }; then
-    exec tmux new-session -A -s main
+    tmux has-session -t main 2>/dev/null || tmux new-session -d -s main 2>/dev/null || true
+    exec tmux new-session -t main -s "c$$" \; set-option destroy-unattached on
 fi
+EOF
+
+# ---- tmux server config: per-client geometry isolation + clean repaint ----
+# default-terminal: a present, 256-colour-correct TERM for programs inside tmux
+# (the compiled default is the bare "screen"). window-size=smallest + aggressive-
+# resize: if two clients ever view the SAME window at once, fit it to the smaller
+# one so neither is painted on a foreign grid (no garble; the larger screen just
+# letterboxes) — with the session-group attach above, the common one-client-per-
+# window case is already full-size. client-attached/-resized -> refresh-client:
+# force a full server-driven repaint on every attach AND resize, so a client that
+# would not self-redraw (xterm.js / WebSSH) still receives a complete clean frame.
+cat > /etc/tmux.conf <<'EOF'
+set -g default-terminal "tmux-256color"
+set -g window-size smallest
+setw -g aggressive-resize on
+set-hook -g client-attached 'refresh-client'
+set-hook -g client-resized  'refresh-client'
 EOF
 
 # ---- sshd (key-only; reachable via tailnet :22 AND host-published public :4444)
