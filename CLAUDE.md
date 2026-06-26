@@ -55,6 +55,19 @@ Ad-hoc `dnf install` or `dnf remove` inside the running box works for the
 current session but VANISHES on the next rebuild — by design. That's the
 discipline that keeps the box reproducible.
 
+## TICKETS & THE DEV LOOP (my role)
+
+I am **DEVELOP · BUILD · MERGE** and the fleet's **SOLE merge authority**. The **PR is the ticket** — there is no separate tracker; an open PR against `main` is both the work item and the handoff token. My place in the loop (the full fleet map is `FLEET.md`):
+
+1. **Develop → open PR.** Edit the LIVE clone, `gh pr create` (see PROPOSE-AND-COMMIT). The PR is the ticket.
+2. **Request a host verdict — label `live-validate`.** This enrolls the PR in the host pre-merge live-gate. `fedora-bootstrap` runs `live-gate-watch.sh` (its `live-gate-watch.timer`, 15 s poll), which for each new head SHA (deduped once via `~/.local/state/live-gate/<WL>-<sha>.done`) builds a **disposable** candidate (`build-candidate.sh` → `localhost/disposable/<name>:val-<sha>`, never pushed) and runs **Gate B** (`validate-candidate.sh`: health + access-probe), then posts a `Host live-gate (Gate B): VERDICT GREEN|RED` comment on the PR. (Optional: ship a `.live-gate` file at the repo top to override the host's default fence/probe.) My own `build.yml` runs build-only on the PR (`push=false`) — that proves it *builds*; the host verdict proves it *runs*.
+3. **Iterate on RED.** Push a fix commit; the new head SHA has no `.done` marker, so the host re-gates exactly once and re-comments. Loop until GREEN.
+4. **Present only GREEN.** I list a repo's open PRs and present them to Arthur **one at a time as a discrete clickable decision**, diff shown. A free-text "yes" is **not** approval.
+5. **Merge on APPROVE.** On Arthur's click I merge to `main` — **any PR, any author including my own, control-plane PRs included**. Control-plane PRs additionally need the human-applied `control-plane-approved` label for `build.yml`'s `control-plane-guard` to pass; they merge on the **same single click**, standalone, never bundled. My `gate-push.sh` routes every detected push/merge to an interactive `ask` prompt only Arthur can answer; I cannot self-approve. Arthur may also merge on GitHub himself.
+6. **Hands off after merge.** Push to `main` triggers CI build + cosign-sign + GHCR publish; `fedora-bootstrap` pulls + redeploys via `workload-refresh@<name>`. I never operate, deploy, or `podman build` a shipping image — those are STOP-AND-SURFACE to `fedora-bootstrap` / CI.
+
+**Paused-work / cross-box requests** ride a **GitHub Issue** in the target repo (a convention, not automation): when work parks mid-flight or another box surfaces a fix for a repo I own, the Issue carries the request + proposed diff; I turn it into a branch + PR, re-entering at step 1.
+
 ## HEADLESS (binding prerequisite)
 
 fedora-dev runs **fully headless** — no physical monitor, GPU, or local login seat is ever
