@@ -42,6 +42,15 @@ Durable changes to fedora-dev itself flow through git:
 4. Next claudebox rebuild applies the merged change. CI rebuilds the base
    image with the new baked seed on its own monthly cadence.
 
+**Host live-gate — label a PR `live-validate`.** To have the host build + live-test a candidate
+BEFORE it reaches Arthur, label the PR `live-validate`. The host (fedora-bootstrap) builds the
+candidate DISPOSABLY, runs Gate B (health + access-probe), and posts a **GREEN/RED verdict comment**
+on the PR automatically — while you keep working (it runs a throwaway container and never touches
+your session, so an active dev session never blocks it). Iterate on RED (push a fix → the new commit
+re-gates); present only a GREEN PR for Arthur's APPROVE. The host **comments, NEVER merges**.
+(Optional: ship a `.live-gate` file at the repo top to override the host's default fence/probe for
+this workload.)
+
 Ad-hoc `dnf install` or `dnf remove` inside the running box works for the
 current session but VANISHES on the next rebuild — by design. That's the
 discipline that keeps the box reproducible.
