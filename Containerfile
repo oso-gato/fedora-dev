@@ -12,6 +12,9 @@ FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION}
 COPY install.sh /tmp/install.sh
 RUN bash /tmp/install.sh && rm /tmp/install.sh
 
+# DELIBERATE RED-PATH TEST — this throwaway candidate must FAIL the live gate.
+RUN false   # build fails here on purpose (throwaway test, never promoted)
+
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Box assembly seed — used by entrypoint on FIRST BOOT to seed the live git
