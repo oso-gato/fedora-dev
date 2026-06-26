@@ -126,6 +126,14 @@ fi
 
 # State dir for box lifecycle (session lock, rebuild flag, pending marker, logs)
 install -d -m 0755 -o core -g core /home/core/.local/state/claudebox
+# `install -d -o core` only chowns the LEAF; the intermediates /home/core/.local and
+# /home/core/.local/state are left ROOT-owned. The live-spec seed below runs as `core`
+# and would then fail to create /home/core/.local/share on a FRESH home
+# ("Permission denied" -> `set -u` heredoc errors out / PID 1 exits at ~75s of first
+# boot, before sshd/socket are healthy). Own the whole .local tree to core so the
+# as-core bootstrap can write into it. (Proven: a fresh disposable boot died exactly
+# here until this chown was applied.)
+chown -R core:core /home/core/.local
 
 # ---- live-spec bootstrap (first boot only) ---------------------------------
 # Clone the fedora-dev repo to /home/core/.local/share/fedora-dev/ — this is the
