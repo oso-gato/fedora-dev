@@ -62,7 +62,12 @@ echo ">> ensure clean slate (rm any prior partial-state box)…"
 force_destroy_box
 
 echo "==== assemble: distrobox assemble create --file $LIVE/distrobox.ini ===="
-distrobox assemble create --file "$LIVE/distrobox.ini"
+# Defense-in-depth (the REAL fix is box-rebuild.sh running THIS script with fd 9 closed):
+# close fd 9 on the box-CREATING commands so that if any future caller ever execs into this
+# script while holding the box-rebuild.lock on fd 9, the long-lived nested box still cannot
+# inherit that exclusive lock (which wedges box-rebuild.lock open forever and hangs every
+# later rebuild). `9>&-` is harmless when fd 9 is already closed — the normal path.
+distrobox assemble create --file "$LIVE/distrobox.ini" 9>&-
 
 echo ">> first enter: triggers distrobox-init (dnf install claude-code from latest"
 echo "   channel + git + gh + openssh-clients + podman + sandbox deps + rclone) —"
@@ -73,7 +78,7 @@ echo "   this can take ~2-5 minutes on first run"
 # trapping us in a retry loop the next boot wouldn't recover from (covered above).
 ok=0
 for attempt in 1 2 3; do
-    if distrobox enter claudebox -- true; then
+    if distrobox enter claudebox -- true 9>&-; then
         ok=1
         break
     fi

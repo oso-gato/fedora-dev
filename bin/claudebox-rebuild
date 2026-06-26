@@ -12,11 +12,13 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 state="$HOME/.local/state/claudebox"; mkdir -p "$state"
 log="$state/rebuild.log"
 
-# A rebuild is running iff box-rebuild.sh holds its flock on box-rebuild.lock
-# (held across its `exec` into claudebox-assemble.sh). Probe non-destructively
-# in a subshell with its own fd 9. REPLACES `pgrep -f fedora-dev/box-rebuild.sh`,
-# which also matched the entrypoint's permanent inotify rebuild-watcher (its
-# command line embeds that path) — making the wait loop below never terminate.
+# A rebuild is running iff box-rebuild.sh holds its flock on box-rebuild.lock.
+# box-rebuild.sh holds fd 9 for the rebuild's whole duration and runs
+# claudebox-assemble.sh as a CHILD with fd 9 CLOSED (9>&-), so the long-lived box
+# can't inherit the lock and it RELEASES cleanly when box-rebuild.sh exits. Probe
+# non-destructively in a subshell with its own fd 9. REPLACES `pgrep -f
+# fedora-dev/box-rebuild.sh`, which also matched the entrypoint's permanent inotify
+# rebuild-watcher (its command line embeds that path) — making the loop never end.
 rebuild_in_progress() {
     ! ( exec 9<>"$state/box-rebuild.lock"; flock -n 9 ) 2>/dev/null
 }
@@ -38,8 +40,21 @@ tail -F -n +1 "$log" 2>/dev/null &
 tail_pid=$!
 trap 'kill $tail_pid 2>/dev/null' EXIT INT TERM
 
+# Bounded wait (durable backstop): a rebuild releases the lock within ~150s typical,
+# ~450s worst case (cold image pull + first-enter retries — measured on this VPS). Cap
+# at 480s so a genuinely STUCK rebuild can NEVER hang this follower forever (the fd-9
+# leak that used to cause an infinite hang is fixed at box-rebuild.sh:41; this is the
+# belt-and-suspenders backstop). On timeout we STOP WAITING — non-destructive: the
+# detached rebuild keeps running; just re-run `claude` once it has finished.
+waited=0
 while rebuild_in_progress; do
-    sleep 2
+    sleep 2; waited=$((waited+2))
+    if [ "$waited" -ge 480 ]; then
+        echo ">> claudebox rebuild still running after 480s — leaving it to finish in the" >&2
+        echo "   background (it is detached). Re-run 'claude' shortly. If this recurs, inspect" >&2
+        echo "   $log and the box-rebuild.lock state (flock -n box-rebuild.lock)." >&2
+        exit 0
+    fi
 done
 sleep 1
 echo ">> claudebox rebuild COMPLETE — run 'claude' to reconnect."
