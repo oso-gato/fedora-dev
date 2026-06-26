@@ -35,7 +35,14 @@ flock -n 9 || {
 rm -f "$state/rebuild.pending" 2>/dev/null || true
 
 echo ">> claudebox rebuild: removing the existing box (force) …"
-distrobox rm -f claudebox >/dev/null 2>&1 || true
+distrobox rm -f claudebox 9>&- >/dev/null 2>&1 || true
 
 echo ">> claudebox rebuild: re-running assemble from live spec at $LIVE …"
-exec bash "$LIVE/claudebox-assemble.sh"
+# Run assemble as a CHILD with the lock fd (9) CLOSED to it (9>&-) — NOT `exec`. Otherwise the
+# long-lived claudebox container that `distrobox assemble create`/`enter` spawn INHERITS fd 9 and
+# keeps the exclusive flock on box-rebuild.lock open for the box's WHOLE lifetime: the lock never
+# releases, `rebuild_in_progress` stays true forever, and the `claude` / `claudebox-rebuild`
+# wait-loops hang — the update "never comes back up". box-rebuild.sh KEEPS fd 9 (the lock held
+# across the assemble → self-serialization preserved) and releases it by exiting when assemble
+# returns. Proven: a child inheriting fd 9 keeps the lock; the same child with `9>&-` does not.
+bash "$LIVE/claudebox-assemble.sh" 9>&-

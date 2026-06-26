@@ -17,8 +17,10 @@ state="$HOME/.local/state/claudebox"; mkdir -p "$state"
 
 # A claudebox rebuild is in progress iff box-rebuild.sh is holding its
 # self-serialization flock on box-rebuild.lock (it grabs it via `exec 9<>…;
-# flock -n 9` and keeps it across the `exec` into claudebox-assemble.sh). Probe
-# it non-destructively in a subshell with its own fd 9 (released on exit).
+# flock -n 9` and holds it for the rebuild's duration — it runs claudebox-assemble.sh
+# as a CHILD with fd 9 CLOSED, so the long-lived box can't inherit the lock and it
+# releases cleanly when box-rebuild.sh exits). Probe it non-destructively in a
+# subshell with its own fd 9 (released on exit).
 #
 # This REPLACES `pgrep -f fedora-dev/box-rebuild.sh`: that pattern also matched
 # the entrypoint's PERMANENT inotify rebuild-watcher, whose command line embeds
