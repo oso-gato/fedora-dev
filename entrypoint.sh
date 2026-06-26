@@ -282,3 +282,5 @@ while sleep 30; do
     kill -0 "$watcher_pid"      2>/dev/null     || { echo "rebuild watcher died";  exit 1; }
     kill -0 "$tick_pid"         2>/dev/null     || { echo "daily tick died";       exit 1; }
 done
+
+# live-gate loop integration test (no-op) — safe to close. candidate
