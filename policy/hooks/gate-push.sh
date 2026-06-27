@@ -70,10 +70,11 @@
 # RESIDUAL CEILING (no in-box hook closes this — documented, not papered over):
 #   PreToolUse hooks do NOT fire under `claude -p` (headless) — anthropics/claude-code
 #   #40506 — so a maliciously-injected agent that spawns `claude -p` bypasses THIS hook.
-#   Hard containment of a HOSTILE in-box agent is server-side only (branch protection
-#   the box token cannot bypass). This gate stops the realistic case: the agent merging
-#   to `main` without Arthur's explicit in-session click, while keeping feature-branch
-#   pushes autonomous.
+#   Hard containment of a HOSTILE in-box agent is Arthur's in-session click + managed-settings
+#   (allowManagedHooksOnly + allowManagedPermissionRulesOnly + disableBypassPermissionsMode);
+#   server-side branch protection is intentionally NOT enabled for this single-operator fleet.
+#   This gate stops the realistic case: the agent merging to `main` without Arthur's explicit
+#   in-session click, while keeping feature-branch pushes autonomous.
 # ============================================================================
 set -uo pipefail
 

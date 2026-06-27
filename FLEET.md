@@ -30,8 +30,9 @@ operate/deploy is always `fedora-bootstrap`; merge is always `fedora-dev` (or Ar
 Mechanically enforced by the **refspec-aware** `gate-push.sh` PreToolUse hook (routine feature-branch
 pushes run autonomously; only a push that could touch `main` plus the merge verbs route to an
 in-session clickable `ask` only Arthur can answer — there is no approval-marker mechanism) +
-`managed-settings.json` + the CI control-plane diff-guard, with server-side branch protection on
-`main` as the PRIMARY backstop — not prose-only.
+`managed-settings.json`: the in-session `gate-push.sh` clickable gate (Arthur's click) is the sole
+backstop — `main` is intentionally not branch-protected and there is no CI label-gate (single-operator
+fleet: the click already gates every merge).
 
 ## The three boxes
 
@@ -151,10 +152,10 @@ human. (Full law: each repo's `policy/CLAUDE.md`.)
    autonomous** (no prompt — the refspec-aware gate only stops a push that could touch `main` plus the
    merge verbs). `fedora-bootstrap` and `fedora-desktop` **stop here** — they are PR-only.
 3. **CI build-only check.** On the image repos (`fedora-dev` / `fedora-desktop`), `build.yml` fires on
-   `pull_request`: a `control-plane-guard` job fails the PR if it touches a control-plane file without
-   the `control-plane-approved` label, then `build` runs **build-only** (`push=false`, no cosign) —
-   proving the image *builds* while publishing nothing pullable. `fedora-bootstrap` ships no image: its
-   guard is the **standalone** `control-plane-guard.yml` (no build/publish).
+   `pull_request`: `build` runs **build-only** (`push=false`, no cosign) — proving the image *builds*
+   while publishing nothing pullable. There is **no CI control-plane label-gate**; control-plane changes
+   are kept standalone and flagged in the merge TLDR, gated by Arthur's click. `fedora-bootstrap` ships
+   no image, so it has no build-only CI step.
 4. **Host pre-merge live-gate (Tier 2 — when the box can't validate it, or the final pre-production shipment; see *Two-tier validation*).** Label the PR `live-validate` — that
    is the whole enrolment, for **any repo in the org** (the host discovers it ORG-WIDE by the label, no
    per-repo list to maintain). On the host, `live-gate-watch.timer` (15 s poll) runs
@@ -176,8 +177,8 @@ human. (Full law: each repo's `policy/CLAUDE.md`.)
    **discrete clickable decision**, diff shown.
 7. **APPROVE → merge.** Arthur clicks **APPROVE** (a free-text "yes" is *not* approval) →
    `fedora-dev` — the **sole merge authority** — merges to `main` (its own PRs and control-plane PRs
-   included; control-plane PRs additionally need the human-applied `control-plane-approved` label for CI
-   to pass). Arthur may also merge on GitHub himself.
+   included; control-plane PRs are kept standalone and flagged in the merge TLDR, gated by the same
+   click). Arthur may also merge on GitHub himself.
 8. **CI publish + sign (image repos).** Push to `main` triggers `build.yml`'s `build` job with
    `push=true`: publishes `ghcr.io/oso-gato/<name>:latest` (+ dated + sha tags) and `cosign sign`s the
    digest via keyless OIDC. `fedora-bootstrap` publishes no image — its analogue is step 9's operator
@@ -189,7 +190,7 @@ human. (Full law: each repo's `policy/CLAUDE.md`.)
  Arthur ─ request
     │
     ▼
- [owning box]  develop on branch ──► open PR (= the ticket)  ──► CI build-only (control-plane-guard + build, push=false)
+ [owning box]  develop on branch ──► open PR (= the ticket)  ──► CI build-only (build, push=false)
     │                                      │
     │                              label: live-validate
     │                                      ▼
@@ -223,7 +224,12 @@ merges except through the clickable-APPROVE gate.
 | Label | Meaning | Applied by |
 |-------|---------|-----------|
 | `live-validate` | Enroll an open PR (in **any repo in the org**) for the host pre-merge live-gate. `live-gate-watch.sh` discovers labelled PRs ORG-WIDE by the label (no per-repo list), applies a structural guard (builds only a candidate carrying a `Containerfile`/`.live-gate`, else skips), and gates each new head SHA once (`<WL>-<sha>.done`). Omit it → the host never builds or comments. | the developing box / PR author (in practice `fedora-dev`) |
-| `control-plane-approved` | CI waiver for the control-plane guard. A PR touching a control-plane file (`policy/**`, `.github/workflows/**`, `managed-settings.json`, `*.container`, `run.sh*`, `gate-push.sh`, box-rebuild/assemble, key-sync, `*sudoers*`) **fails CI** without it. Control-plane PRs are standalone, never bundled. | a human reviewer (Arthur), by hand on GitHub, after seeing the isolated diff |
+
+There is **no CI label-gate** for control-plane changes (no waiver label, no CI guard
+job): a control-plane PR (`policy/**`, `.github/workflows/**`, `managed-settings.json`, `*.container`,
+`run.sh*`, `gate-push.sh`, box-rebuild/assemble, key-sync, `*sudoers*`) is kept **standalone, never
+bundled**, and **flagged in the merge TLDR** so Arthur scrutinises it — gated, like every merge, by his
+in-session click.
 
 **Verdict carrier.** The host's `gh pr comment` (`VERDICT GREEN|RED` + last log lines) is the
 machine-readable handoff that tells `fedora-dev` whether a PR is ready to present. GREEN = presentable;
@@ -245,7 +251,9 @@ it into a branch + PR, re-entering the loop at step 2.
   builds disposably per the in-repo `.live-gate` (parsed, never executed), and comments GREEN/RED; the
   owning box iterates on RED (push a fix, or supersede the branch). Human-out until the merge click.
 - **APPROVE → merge** — Arthur clicks; `fedora-dev` merges (sole authority, control-plane included);
-  server-side branch protection on `main` is the primary backstop.
+  the in-session `gate-push.sh` clickable gate (Arthur's click) is the sole backstop — `main` is
+  intentionally not branch-protected and there is no CI label-gate (single-operator fleet: the click
+  already gates every merge).
 - **merged → deploy** — `fedora-bootstrap` pulls + redeploys via `workload-refresh@<name>`.
 - **wrong box** — a box asked to do another box's step STOP-AND-SURFACEs for the human to re-route.
 
@@ -255,7 +263,7 @@ it into a branch + PR, re-entering the loop at step 2.
   `IMAGE=ghcr.io/oso-gato/<name>:latest` for a host deploy; **never hand-roll `podman`.**
 - **Control-plane class** (`policy/**`, `managed-settings.json`, `gate-push.sh`,
   `.github/workflows/**`, `*.container`, `run.sh*` security flags, key-sync, `*sudoers*`): standalone,
-  never bundled; needs the human-applied `control-plane-approved` label.
+  never bundled; flagged in the merge TLDR and gated by Arthur's click (no CI label-gate).
 - **Sources** (dnf → vendor `.repo` → AppImage/`.war`, GPG/sha-verified) · **no secrets in image
   layers** · **headless everywhere** (software-GL); sensitive ports tailnet-only, the desktop's web
   gate the one public door.

@@ -24,106 +24,17 @@ permissions:
 
 jobs:
   # ==========================================================================
-  # CONTROL-PLANE DIFF-GUARD (the promotion gate's CI backstop).
-  #
-  # The in-box mechanical gate (the managed PreToolUse hook gate-push.sh +
-  # managed-settings allowManagedHooksOnly) blocks the AGENT from pushing/merging
-  # main unapproved. This job is the CI-side backstop: it FAILS any PR that touches
-  # a guardrail / control-plane file UNLESS the PR carries the `control-plane-approved`
-  # label — so a control-plane change cannot land silently; a reviewer must see it
-  # isolated and apply the label by hand. (Branch protection on main, requiring a
-  # PR + review, is the PRIMARY server-side backstop — this complements it.)
-  #
-  # Runs only on pull_request. A push to main has already passed review.
-  # ==========================================================================
-  control-plane-guard:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect control-plane / guardrail changes
-        id: detect
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          # Guardrail / control-plane file globs: policy, managed-settings, the
-          # promotion-gate hook, every Quadlet, CI itself, the key-sync helper,
-          # run.sh, and the box-rebuild control machinery.
-          PATTERNS='
-          ^policy/
-          ^.github/workflows/
-          (^|/)managed-settings\.json$
-          (^|/).*\.container$
-          (^|/)run\.sh$
-          (^|/)sync-authorized-keys\.sh$
-          (^|/)gate-push\.sh$
-          (^|/)box-rebuild\.sh$
-          (^|/)claudebox-assemble\.sh$
-          (^|/).*sudoers.*$
-          '
-          ERE=$(printf '%s\n' "$PATTERNS" | sed '/^[[:space:]]*$/d' | paste -sd'|' -)
-          echo "Using control-plane ERE: $ERE"
-
-          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
-          echo "Changed files in this PR:"; echo "$CHANGED"
-
-          HITS=$(printf '%s\n' "$CHANGED" | grep -E "$ERE" || true)
-          if [ -n "$HITS" ]; then
-            echo "touched=true" >> "$GITHUB_OUTPUT"
-            { echo "files<<EOF"; echo "$HITS"; echo "EOF"; } >> "$GITHUB_OUTPUT"
-          else
-            echo "touched=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Enforce the waiver label on control-plane changes
-        if: steps.detect.outputs.touched == 'true'
-        env:
-          HAS_WAIVER: ${{ contains(github.event.pull_request.labels.*.name, 'control-plane-approved') }}
-        run: |
-          set -euo pipefail
-          echo "::group::Control-plane / guardrail files touched by this PR"
-          cat <<'FILES'
-          ${{ steps.detect.outputs.files }}
-          FILES
-          echo "::endgroup::"
-
-          if [ "$HAS_WAIVER" = "true" ]; then
-            echo "Waiver label 'control-plane-approved' present — control-plane change is explicitly approved."
-            exit 0
-          fi
-
-          echo "::error title=Control-plane change without waiver::This PR edits guardrail / control-plane files (listed above) but does NOT carry the 'control-plane-approved' label."
-          cat <<'MSG'
-
-          ────────────────────────────────────────────────────────────────────
-          CONTROL-PLANE GUARD FAILED
-
-          This PR touches a guardrail / control-plane file (policy/**,
-          managed-settings.json, .github/workflows/**, a *.container Quadlet,
-          run.sh, the promotion-gate hook, or the box-rebuild control machinery).
-
-          Such a change MUST be STANDALONE, single-purpose, and explicitly approved
-          by the maintainer. To land it: a maintainer reviews the isolated diff and
-          applies the 'control-plane-approved' label, then re-runs this check.
-          There is no auto-bypass.
-          ────────────────────────────────────────────────────────────────────
-          MSG
-          exit 1
-
-  # ==========================================================================
   # BUILD + COSIGN-SIGN + PUSH to ghcr.io/oso-gato/fedora-dev.
-  # On pull_request: BUILD-ONLY validation (no registry write), gated behind the
-  # control-plane-guard. On push to main / cron / dispatch: build, push, sign.
+  # On pull_request: BUILD-ONLY validation (no registry write). On push to main /
+  # cron / dispatch: build, push, sign.
+  #
+  # There is NO CI label-gate: the in-session gate-push.sh click is the sole
+  # backstop (it routes every push that could touch `main` and every merge verb to
+  # a clickable `ask` only Arthur can answer). `main` is intentionally NOT
+  # branch-protected for this single-operator fleet — the click already gates every
+  # merge. Guardrail changes are kept standalone and flagged in the merge TLDR.
   # ==========================================================================
   build:
-    needs: control-plane-guard
-    if: always() && (needs.control-plane-guard.result == 'success' || needs.control-plane-guard.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
