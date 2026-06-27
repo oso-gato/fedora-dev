@@ -135,21 +135,65 @@ if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null && { [ -n "${SSH_TTY:-}" ] |
 fi
 EOF
 
-# ---- tmux server config: per-client geometry isolation + clean repaint ----
-# default-terminal: a present, 256-colour-correct TERM for programs inside tmux
-# (the compiled default is the bare "screen"). window-size=smallest + aggressive-
-# resize: if two clients ever view the SAME window at once, fit it to the smaller
-# one so neither is painted on a foreign grid (no garble; the larger screen just
-# letterboxes) — with the session-group attach above, the common one-client-per-
-# window case is already full-size. client-attached/-resized -> refresh-client:
-# force a full server-driven repaint on every attach AND resize, so a client that
-# would not self-redraw (xterm.js / WebSSH) still receives a complete clean frame.
+# ---- tmux server config: multi-device geometry policy + clean co-view ----
+# THE CONSTRAINT (verified against tmux 3.6 source + a live multi-client harness):
+# a tmux window has exactly ONE size, shared by every client viewing it. You
+# cannot render one window at two sizes at once, so differently-sized devices
+# co-viewing the SAME tab cannot each see it full-size — that limit is unfixable
+# in tmux (one program = one pty = one cell grid). What IS controllable is which
+# single size wins and how the size-mismatched client degrades:
+#   * A client SMALLER than the window: tmux clips it to a clean viewport that
+#     pans to follow the cursor (partial, never garbled).
+#   * A client LARGER than the window: tmux paints the content top-left and fills
+#     the surplus with `fill-character` (NOT stale garbage — it is actively
+#     redrawn every frame; the compiled default is the `·` middle-dot, which is
+#     the "screen full of dots / completely garbled" look the operator reported).
+# CHOICES:
+#   window-size=latest  (DEFAULT) -> the session follows the client that most
+#     recently sent INPUT. Type on the Mac and the whole session is Mac-sized;
+#     pick up the iPad and type and it rescales to the iPad. Both stay connected
+#     (mosh-friendly); the idle device letterboxes/crops cleanly and reclaims
+#     full size the instant you touch it. When the active device disconnects the
+#     session falls back to whoever remains. This is the seamless device-handoff.
+#   fill-character ' ' -> the idle larger device's surplus is BLANK, not `·`.
+#   aggressive-resize on -> windows track only the clients whose current window
+#     they are, so devices parked on DIFFERENT tabs each get their own full size.
+#   client-attached/-resized -> refresh-client forces a full server-driven
+#     repaint on every attach/resize so a client that will not self-redraw
+#     (xterm.js / WebSSH / mosh) gets a complete clean frame after each rescale.
+# SWITCHABLE: prefix+g cycles latest -> smallest -> largest -> latest.
+#   smallest = every device always sees the WHOLE session, sized to the smallest
+#              connected client (big screens blank-letterbox) — good for watching
+#              on a small device while working on a big one.
+#   largest  = the biggest connected screen always wins; smaller devices crop.
 cat > /etc/tmux.conf <<'EOF'
 set -g default-terminal "tmux-256color"
-set -g window-size smallest
+set -g window-size latest
 setw -g aggressive-resize on
+setw -g fill-character ' '
 set-hook -g client-attached 'refresh-client'
 set-hook -g client-resized  'refresh-client'
+set -g @coview latest
+
+# prefix+g: cycle the multi-device geometry policy (see comment above install).
+bind-key g {
+  if-shell -F '#{==:#{@coview},latest}' {
+    set -g window-size smallest
+    set -g @coview smallest
+    display-message 'co-view: SMALLEST - every device sees the whole session; big screens blank-letterbox'
+  } {
+    if-shell -F '#{==:#{@coview},smallest}' {
+      set -g window-size largest
+      set -g @coview largest
+      display-message 'co-view: LARGEST - biggest connected screen wins; smaller devices show a cropped view'
+    } {
+      set -g window-size latest
+      set -g @coview latest
+      display-message 'co-view: LATEST - the device you last typed on wins; whole session rescales to it'
+    }
+  }
+  refresh-client -S
+}
 EOF
 
 # ---- sshd (key-only; reachable via tailnet :22 AND host-published public :4444)

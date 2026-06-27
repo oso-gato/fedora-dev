@@ -190,3 +190,9 @@ it into a branch + PR, re-entering the loop at step 2.
 - **Sources** (dnf → vendor `.repo` → AppImage/`.war`, GPG/sha-verified) · **no secrets in image
   layers** · **headless everywhere** (software-GL); sensitive ports tailnet-only, the desktop's web
   gate the one public door.
+- **Multi-device terminal:** one shared `main` tmux group; a tmux window has ONE size shared by all
+  co-viewing clients, so `/etc/tmux.conf` is `window-size latest` (the device that last sent input
+  wins → whole session rescales) + `fill-character ' '` (idle larger device blank-letterboxes, never
+  `·`-garbles) + `prefix+g` to cycle latest/smallest/largest. Differently-sized devices on the SAME
+  tab can NEVER both be full-size (one program = one pty = one cell grid) — a tmux invariant, not a
+  bug to "fix"; the active device wins and the rest degrade cleanly (crop/blank-letterbox).
