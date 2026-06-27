@@ -99,10 +99,23 @@ dev-container base are immutable — the throwaway tree + all build caches live 
 volume), STILL obeys provenance (class a/b/c, signature/checksum-verified — no loosening for a
 throwaway), and is THROWN AWAY after the build (disposable `localhost/disposable/<name>:val-<sha>`,
 never pushed, `--rm`/`rmi`'d; temp tree removed on teardown). **Churn balance:** persist the build
-cache, discard only the candidate — the podman layer cache on the home volume SURVIVES `rmi` of the
-candidate. Structure Containerfiles HEAVY/STABLE-EARLY (base, dnf install, artifact fetch+verify) and
-CHURN-LATE (COPY'd scripts/config) so a 50× iteration re-downloads nothing; NEVER `--no-cache`/prune
-during churn (that's the monthly clean rebuild). (Full law: each repo's `policy/CLAUDE.md`.)
+caches, discard only the candidate. Structure Containerfiles HEAVY/STABLE-EARLY (base, dnf install,
+artifact fetch+verify) and CHURN-LATE (COPY'd scripts/config); NEVER `--no-cache`/prune during churn
+(that's the monthly clean rebuild). **Churn re-downloads NOTHING across N PRs/iterations (proven
+in-box):** the per-PR/per-SHA disposal removes ONLY the disposable image + temp tree — NEVER the
+caches; the PR/SHA is NOT the cache's disposal signal, and the caches are not keyed to PR/SHA but
+SHARED across every iteration. Two persistent caches on the home volume do the work: (1) the podman
+**layer cache** — churn touching only the late layers reuses the heavy ones, the dnf RUN never
+executes → zero download (survives `rmi`); (2) a persistent dnf **package cache** bind-mounted into
+the build (`-v <home>/.cache/fd-dnf:/var/cache/libdnf5:rw`) — when a PR changes the dnf install line
+the layer re-runs but the RPMs are served from cache, not re-downloaded (~3× faster, 94s→33s; only a
+genuinely-new package downloads once). (`--mount=type=cache` does NOT work under the required
+`--isolation=chroot` — the bind `-v` package cache + the layer cache are the mechanisms.) Each build
+is isolated — its own throwaway tree + unique disposable tag (`val-<sha>`) + unique run container
+(`vcand-$$`) — so nothing cross-contaminates, and the content-addressed caches can't serve a wrong
+version. Storage stays bounded on the limited VPS by a trio: the candidate self-destructs via a
+`trap … EXIT` (fires on green/red/error), an orphan sweeper reaps anything a crash leaks, and a
+bounded cache-GC caps the caches by size/age. (Full law: each repo's `policy/CLAUDE.md`.)
 
 **Engage the human for EXACTLY TWO reasons** (no others): (1) **MATERIALLY COMPLETE** → the clickable
 APPROVE to merge; (2) **MATERIALLY BLOCKED** → a genuine-roadblock decision (not a merge).
