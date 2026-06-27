@@ -27,8 +27,11 @@ APPROVE** (a free-text "yes" is not approval).
 **Handoff:** propose → open PR → `fedora-dev` lists + presents the PRs → you APPROVE → `fedora-dev`
 merges → CI builds + cosign-signs → GHCR → `fedora-bootstrap` pulls + redeploys. Build is always CI;
 operate/deploy is always `fedora-bootstrap`; merge is always `fedora-dev` (or Arthur on the web).
-Mechanically enforced by the `gate-push.sh` PreToolUse hook + `managed-settings.json` + the CI
-control-plane diff-guard — not prose-only.
+Mechanically enforced by the **refspec-aware** `gate-push.sh` PreToolUse hook (routine feature-branch
+pushes run autonomously; only a push that could touch `main` plus the merge verbs route to an
+in-session clickable `ask` only Arthur can answer — there is no approval-marker mechanism) +
+`managed-settings.json` + the CI control-plane diff-guard, with server-side branch protection on
+`main` as the PRIMARY backstop — not prose-only.
 
 ## The three boxes
 
@@ -53,6 +56,17 @@ throwaway no-secret sandbox; never operates a host.
 
 ## The dev loop (the mechanic)
 
+The dev↔host loop runs autonomously EXCEPT the final merge: develop → open PR (feature pushes are
+autonomous) → label it `live-validate` → the host live-gate (Gate B) DISCOVERS it ORG-WIDE by that
+label (no repo list to maintain), fetches the PR head on-demand, applies a STRUCTURAL GUARD (only
+builds a candidate carrying a `Containerfile`/`.live-gate`, else skips cleanly), builds it DISPOSABLY
+per the repo's own in-repo `.live-gate` contract (PARSED, never executed) under loopback-only fences,
+and posts a GREEN/RED verdict comment → iterate (RED: push a fix, or SUPERSEDE the branch if the
+approach was wrong; GREEN: BUILD UPON it) until green → Arthur's discrete clickable APPROVE →
+fedora-dev merges. The human is OUT of the per-iteration loop — only the merge is a click. Repos are
+discovered DYNAMICALLY: create/rename/merge/delete freely; enroll one just by labelling its PR
+`live-validate` and shipping a `.live-gate`.
+
 One loop, the same shape for every repo — only the tail differs (image repos publish to GHCR;
 `fedora-bootstrap` ships no image and "deploys" by the operator re-running `setup.sh`). Work is born
 as a branch, carried as a **PR**, proven on the host, merged by one authority, then deployed. No box
@@ -64,26 +78,34 @@ skips a step; a box asked to do another box's step **STOP-AND-SURFACE**s.
    and can live-diagnose; `fedora-desktop` owns only `fedora-desktop`. A repo a box neither owns nor can
    diagnose is **surface-only** — it proposes a diff and the owning box (or the operator) opens the PR.
 2. **Develop → open PR.** The owning box develops on a branch and opens a PR against `main`. The PR
-   **is** the work item and the handoff token (see *The ticket system*). `fedora-bootstrap` and
-   `fedora-desktop` **stop here** — they are PR-only.
+   **is** the work item and the handoff token (see *The ticket system*). **Feature-branch pushes are
+   autonomous** (no prompt — the refspec-aware gate only stops a push that could touch `main` plus the
+   merge verbs). `fedora-bootstrap` and `fedora-desktop` **stop here** — they are PR-only.
 3. **CI build-only check.** On the image repos (`fedora-dev` / `fedora-desktop`), `build.yml` fires on
    `pull_request`: a `control-plane-guard` job fails the PR if it touches a control-plane file without
    the `control-plane-approved` label, then `build` runs **build-only** (`push=false`, no cosign) —
    proving the image *builds* while publishing nothing pullable. `fedora-bootstrap` ships no image: its
    guard is the **standalone** `control-plane-guard.yml` (no build/publish).
-4. **Host pre-merge live-gate (expected for any runtime change).** Label the PR `live-validate`. On the
-   host, `live-gate-watch.timer` (15 s poll) runs `live-gate-watch.sh`, which lists `live-validate` PRs
-   and, **once per head commit** (dedup marker `~/.local/state/live-gate/<WL>-<sha>.done`), calls
-   `live-gate-run.sh`. That fetches the head, resolves the gate preset (PR-shipped `.live-gate` file
-   first, else host fallback `~/.config/live-gate/<WL>.env`), builds a **disposable** candidate via
-   `build-candidate.sh` (`localhost/disposable/<name>:val-<sha>`, never pushed, `--rm`/`rmi`'d), runs
-   **Gate B** (`validate-candidate.sh`: launch fenced → wait `healthy` → access-path probe), and posts a
-   `Host live-gate (Gate B): VERDICT GREEN|RED` comment back. The host **comments, never merges**.
-5. **Iterate on RED.** A RED verdict → the owning box pushes a fix commit; the new head SHA has no
-   `.done` marker, so the host re-gates it exactly once. Loop until GREEN. **Present only GREEN.**
+4. **Host pre-merge live-gate (expected for any runtime change).** Label the PR `live-validate` — that
+   is the whole enrolment, for **any repo in the org** (the host discovers it ORG-WIDE by the label, no
+   per-repo list to maintain). On the host, `live-gate-watch.timer` (15 s poll) runs
+   `live-gate-watch.sh`, which finds the `live-validate` PRs across the org and, **once per head commit**
+   (dedup marker `~/.local/state/live-gate/<WL>-<sha>.done`), calls `live-gate-run.sh`. That fetches the
+   head on-demand, applies a **STRUCTURAL GUARD** (only builds a candidate carrying a
+   `Containerfile`/`.live-gate`, else skips cleanly), resolves the gate contract from the PR-shipped
+   **in-repo `.live-gate`** (PARSED as a declarative contract, **never executed** as a script; else host
+   fallback `~/.config/live-gate/<WL>.env`), builds a **disposable** candidate via `build-candidate.sh`
+   (`localhost/disposable/<name>:val-<sha>`, never pushed, `--rm`/`rmi`'d), runs **Gate B**
+   (`validate-candidate.sh`: launch under **loopback-only fences** → wait `healthy` → access-path probe),
+   and posts a `Host live-gate (Gate B): VERDICT GREEN|RED` comment back. The host **comments, never
+   merges**.
+5. **Iterate on RED.** A RED verdict → the owning box pushes a fix commit (or **SUPERSEDES** the branch
+   if the approach was wrong); the new head SHA has no `.done` marker, so the host re-gates it exactly
+   once. On GREEN, **BUILD UPON** it. Loop until GREEN. The human is OUT of this per-iteration loop.
+   **Present only GREEN.**
 6. **Present.** `fedora-dev` lists that repo's open PRs and presents them to Arthur one at a time as a
    **discrete clickable decision**, diff shown.
-7. **APPROVE → merge.** Arthur clicks **APPROVE** (one-shot; a free-text "yes" is *not* approval) →
+7. **APPROVE → merge.** Arthur clicks **APPROVE** (a free-text "yes" is *not* approval) →
    `fedora-dev` — the **sole merge authority** — merges to `main` (its own PRs and control-plane PRs
    included; control-plane PRs additionally need the human-applied `control-plane-approved` label for CI
    to pass). Arthur may also merge on GitHub himself.
@@ -131,7 +153,7 @@ merges except through the clickable-APPROVE gate.
 
 | Label | Meaning | Applied by |
 |-------|---------|-----------|
-| `live-validate` | Enroll an open PR for the host pre-merge live-gate. `live-gate-watch.sh` polls `gh pr list --label live-validate --state open` and gates each new head SHA once (`<WL>-<sha>.done`). Omit it → the host never builds or comments. | the developing box / PR author (in practice `fedora-dev`) |
+| `live-validate` | Enroll an open PR (in **any repo in the org**) for the host pre-merge live-gate. `live-gate-watch.sh` discovers labelled PRs ORG-WIDE by the label (no per-repo list), applies a structural guard (builds only a candidate carrying a `Containerfile`/`.live-gate`, else skips), and gates each new head SHA once (`<WL>-<sha>.done`). Omit it → the host never builds or comments. | the developing box / PR author (in practice `fedora-dev`) |
 | `control-plane-approved` | CI waiver for the control-plane guard. A PR touching a control-plane file (`policy/**`, `.github/workflows/**`, `managed-settings.json`, `*.container`, `run.sh*`, `gate-push.sh`, box-rebuild/assemble, key-sync, `*sudoers*`) **fails CI** without it. Control-plane PRs are standalone, never bundled. | a human reviewer (Arthur), by hand on GitHub, after seeing the isolated diff |
 
 **Verdict carrier.** The host's `gh pr comment` (`VERDICT GREEN|RED` + last log lines) is the
@@ -150,8 +172,9 @@ it into a branch + PR, re-entering the loop at step 2.
 - **propose → open PR** — any box, on a repo it owns.
 - **STOP at the PR** — `fedora-bootstrap` and `fedora-desktop` are PR-only; their `gate-push.sh`
   unconditionally denies any push/merge to `main`.
-- **live-validate → host verdict** — `fedora-dev` labels; `fedora-bootstrap` builds disposably and
-  comments GREEN/RED; `fedora-dev` iterates on RED.
+- **live-validate → host verdict** — label any repo's PR; `fedora-bootstrap` discovers it org-wide,
+  builds disposably per the in-repo `.live-gate` (parsed, never executed), and comments GREEN/RED; the
+  owning box iterates on RED (push a fix, or supersede the branch). Human-out until the merge click.
 - **APPROVE → merge** — Arthur clicks; `fedora-dev` merges (sole authority, control-plane included);
   server-side branch protection on `main` is the primary backstop.
 - **merged → deploy** — `fedora-bootstrap` pulls + redeploys via `workload-refresh@<name>`.
