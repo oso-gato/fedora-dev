@@ -215,6 +215,19 @@ is_safe_push() {
     # command substitution → opaque; fail closed.
     printf '%s' "$raw" | grep -Eq '[`]|\$\(' && return 1
 
+    # The refspec relaxation runs ONLY on a SINGLE, fully-literal push command.
+    # Fail closed (→ ASK) on ANY character this parser cannot faithfully resolve to
+    # a literal refspec — the conservative allow-set is exactly what a real push needs
+    # ([A-Za-z0-9._/:+ -]). This single guard kills two evasions at once:
+    #   * shell separators/chains (; & |) → `git push origin main && git push origin
+    #     feat/x` can't hide a main push past the last-push isolation below;
+    #   * quoting/escaping/variables ('" \ $) → `git push origin "main"`,
+    #     `git push origin ma''in`, `X=main git push origin $X` can't de-tokenize into
+    #     `main` after we compare the raw literal destination.
+    printf '%s' "$raw" | grep -Eq '[^A-Za-z0-9._/:+ -]' && return 1
+    # belt-and-suspenders: never relax a command carrying more than one `git push`.
+    [ "$(printf '%s' "$raw" | grep -oE '(^|[^[:alnum:]_./-])git[[:space:]]+push' | wc -l)" -le 1 ] || return 1
+
     text="$(normalize_cmd "$raw")"
     # isolate everything after the (last) `git push`, then stop at any shell
     # separator so a chained second command can't smuggle in refspecs.

@@ -89,6 +89,14 @@ check ASK 'gh pr merge 5'
 check ASK 'gh pr create --squash'
 check ASK 'gh api repos/o/r/merges -f base=main'
 
+echo "== ASK (adversarial: chained / quoted / escaped / variable evasions to main) =="
+check ASK 'git push origin main && git push origin feat/x'
+check ASK 'git push origin main ; git push origin feat/x'
+check ASK 'git push origin "main"'
+check ASK "git push origin ma''in"
+check ASK 'git push origin ma\in'
+check ASK 'X=main git push origin $X'
+
 echo
 echo "== TOTAL: $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
