@@ -84,6 +84,10 @@ physical seat is a **defect**, not an option.
 
 ## BUILD PRINCIPLES (binding for every code change)
 
+**Principle 0 — the self-sustaining apparatus (primary purpose, precedes all others).** `fedora-dev` + `fedora-bootstrap` are ONE self-sustaining development apparatus whose primary purpose is to keep the human OUT of the loop until genuinely needed. The agent does MOST of the work + thinking: when there are options it **BUILDS 2–3, tests them** (throwaway build + host live-gate), **DISCARDS** the wrong ones, and **LANDS the answer ITSELF** — it recommends AND self-tests rather than option-shopping; it **TEARS DOWN and REBUILDS to a ZERO-BASE** rather than defending a first draft; presenting an options-decision is RARE. Engage the human for **EXACTLY TWO reasons**: (1) MATERIALLY COMPLETE → the clickable APPROVE to merge, or (2) MATERIALLY BLOCKED → a genuine-roadblock decision (not a merge). Status-confirmation / option-shopping / "which should I do" are NOT reasons to engage. The **PR is the agent's PROOF OF WORK.** Full text: the *THE SELF-SUSTAINING APPARATUS — AUTONOMY MANDATE & DEFINITION OF DONE* section of `policy/CLAUDE.md`.
+
+**DEFINITION OF DONE (every change — gates presenting to the human).** Done only when ALL hold: (1) the **FULL objective** is materially achieved (the whole objective, not a ~5% rabbit-hole slice); (2) **validated through the loop** — in-box build + assembly GREEN AND the host live-gate verdict GREEN (where the host can't gate it: strongest available validation + explicit host handoff); (3) adheres to the BUILD PRINCIPLES below; (4) a **TLDR** is written and the agent has **CRITICALLY SELF-EXAMINED** it (options considered+discarded, reasoning, fit to BOTH the design AND the task objective, genuine gaps/forks/concessions), dry-running it AS IF the human against the total objective — if the TLDR fails its own scrutiny the agent returns to the loop and does NOT present. The TLDR is the final step before the human.
+
 | # | Principle | Rule |
 |---|---|---|
 | 1 | BASE | Build only from the official `registry.fedoraproject.org/fedora:${FEDORA_VERSION}` image. Version is a Containerfile `ARG` — never inlined. |

@@ -72,6 +72,28 @@ One loop, the same shape for every repo — only the tail differs (image repos p
 as a branch, carried as a **PR**, proven on the host, merged by one authority, then deployed. No box
 skips a step; a box asked to do another box's step **STOP-AND-SURFACE**s.
 
+### The autonomy mandate — the apparatus keeps the human out of the loop
+
+`fedora-dev` + `fedora-bootstrap` are ONE **self-sustaining development apparatus** whose primary
+purpose is to keep the human OUT of the loop until genuinely needed. The owning box does MOST of the
+work + thinking: when there are options it **BUILDS 2–3, tests them** (a throwaway candidate the host
+live-gates), **DISCARDS** the ones that don't fit, and **LANDS the answer ITSELF** — it recommends
+AND self-tests rather than shopping options; it **TEARS DOWN and REBUILDS to a ZERO-BASE** rather than
+defending a first draft. Presenting an options-decision is RARE.
+
+**Engage the human for EXACTLY TWO reasons** (no others): (1) **MATERIALLY COMPLETE** → the clickable
+APPROVE to merge; (2) **MATERIALLY BLOCKED** → a genuine-roadblock decision (not a merge).
+Status-confirmation, option-shopping, and "which should I do" are NOT reasons to engage.
+
+**Definition of done** — a change goes to the human only when ALL hold: the FULL objective is
+materially achieved (the whole objective, not a ~5% slice); it is validated through the loop (in-box
+build + assembly GREEN AND host live-gate GREEN — proven, not merely built); it adheres to the
+build/source principles; and a TLDR is written and **critically self-examined** (options
+considered+discarded, reasoning, fit to both the design and the task objective, genuine gaps) —
+dry-run AS IF the human against the total objective, returning to the loop if it fails its own
+scrutiny. The **PR is the agent's proof of work**; the self-checked TLDR is the final step before the
+human. (Full law: each repo's `policy/CLAUDE.md`.)
+
 1. **Intake & route.** A request lands on the box that *owns* the affected repo — the box that can
    both develop **and** operate/diagnose it. `fedora-dev` owns image-source development for every image
    repo it clones; `fedora-bootstrap` owns `fedora-bootstrap` + `fedora-dev` + any workload it operates

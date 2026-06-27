@@ -25,6 +25,12 @@ A headless Fedora container that hosts Claude Code (in an in-container Distrobox
 
 Everyone opens PRs; **only `fedora-dev` merges** — any PR (its own + control-plane) on Arthur's **clickable APPROVE**. See [FLEET.md](FLEET.md) for the handoff + boundaries.
 
+### How the box works with you — the autonomy contract
+
+The box (together with the host box) is **one self-sustaining apparatus** built to keep you OUT of the loop until you're genuinely needed. It does **most of the work and the thinking**: when there are options it **builds two or three, tests them itself** (a throwaway candidate the host live-gates), throws away the ones that don't fit, and **lands the right answer on its own** — it won't ask you which to pick, and it'll tear down and rebuild its own first draft to get there. The **PR is its proof of work.**
+
+It comes to you for **exactly two reasons**: (1) to **approve a finished, materially-complete change** for merge (your one click), or (2) to **resolve a genuine roadblock** it can't get past on its own. Status updates and "which should I do?" aren't among them. A change is **done** only when it's been validated through the live-gate **and** the box has written a short TLDR and critically checked it against the whole objective — so what reaches you is proven work with a self-checked summary, not a first draft.
+
 ## Purpose
 
 `fedora-dev` is a **build environment**. One half of a strict two-agent pipeline:
