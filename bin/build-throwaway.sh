@@ -40,10 +40,14 @@
 # Env knobs:
 #   FD_DNF_CACHE  persistent dnf cache dir   (default: $HOME/.cache/fd-dnf)
 #   FD_STALE_MIN  orphan age threshold, mins (default: 720 = 12h)
+#   FD_DNF_CACHE_CAP_GB        dnf cache SIZE cap, GB; LRU-prune RPMs over it  (default: 15)
+#   FD_DNF_CACHE_MAX_AGE_DAYS  dnf cache AGE cap, days; prune RPMs older than  (default: 45)
 #   BUILD_ARGS    extra args forwarded verbatim to `podman build` (e.g. --build-arg X=Y)
 set -uo pipefail
 
 DNF_CACHE="${FD_DNF_CACHE:-$HOME/.cache/fd-dnf}"
+DNF_CAP_GB="${FD_DNF_CACHE_CAP_GB:-15}"
+DNF_MAX_AGE_DAYS="${FD_DNF_CACHE_MAX_AGE_DAYS:-45}"
 DISPOSABLE_NS="localhost/disposable"
 TMP_PREFIX="fd-throwaway"
 TMP_ROOT="$HOME/.cache"                 # throwaway trees live on the WRITABLE home volume
@@ -76,6 +80,35 @@ sweep_orphans(){
       rm -rf "$d" 2>/dev/null && echo "sweep: rm orphan tree $d (${age}m old)"
     fi
   done
+  gc_dnf_cache
+}
+
+# ---- bound the persistent dnf package cache: AGE-prune (>MAX_AGE_DAYS) FIRST, then SIZE-prune ------
+# Same caps as the host throwaway-sweep.sh: the dnf bind cache ($DNF_CACHE → /var/cache/libdnf5) is the
+# ONE thing kept across throwaway disposal, so it must be bounded. Order is deliberate: drop genuinely-
+# stale RPMs by AGE first, THEN — if still over the SIZE cap — LRU-evict the oldest remaining until under
+# cap. Age-then-size keeps the freshest churn RPMs hot. Both caps are overridable env (see header).
+gc_dnf_cache(){
+  [ -d "$DNF_CACHE" ] || return 0
+  local cap_bytes cur_kb running _t sz path
+  # (a) AGE prune: RPMs last modified more than FD_DNF_CACHE_MAX_AGE_DAYS days ago.
+  while IFS= read -r -d '' path; do
+    rm -f "$path" 2>/dev/null && echo "gc: dnf age-prune $(basename "$path") (>${DNF_MAX_AGE_DAYS}d)"
+  done < <(find "$DNF_CACHE" -type f -name '*.rpm' -mtime +"$DNF_MAX_AGE_DAYS" -print0 2>/dev/null)
+  # (b) SIZE prune: if still over the cap, LRU-evict oldest RPMs until the total is <= cap.
+  cap_bytes=$(( DNF_CAP_GB * 1024 * 1024 * 1024 ))
+  cur_kb="$(du -sk "$DNF_CACHE" 2>/dev/null | cut -f1)"; cur_kb="${cur_kb:-0}"
+  if [ $(( cur_kb * 1024 )) -gt "$cap_bytes" ]; then
+    echo "gc: dnf cache $(( cur_kb / 1024 ))M > cap ${DNF_CAP_GB}G — LRU-pruning oldest RPMs"
+    running=0
+    # newest first; once the running total passes the cap, every older RPM is pruned.
+    while IFS=$'\t' read -r _t sz path; do
+      running=$(( running + sz ))
+      if [ "$running" -gt "$cap_bytes" ]; then
+        rm -f "$path" 2>/dev/null && echo "gc: dnf size-prune $(basename "$path")"
+      fi
+    done < <(find "$DNF_CACHE" -type f -name '*.rpm' -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -rn)
+  fi
 }
 
 # ---- teardown: discard THIS run's candidate + temp tree; cache survives ---------------
