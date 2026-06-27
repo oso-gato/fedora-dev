@@ -72,6 +72,75 @@ One loop, the same shape for every repo — only the tail differs (image repos p
 as a branch, carried as a **PR**, proven on the host, merged by one authority, then deployed. No box
 skips a step; a box asked to do another box's step **STOP-AND-SURFACE**s.
 
+### The autonomy mandate — the apparatus keeps the human out of the loop
+
+`fedora-dev` + `fedora-bootstrap` are ONE **self-sustaining development apparatus** whose primary
+purpose is to keep the human OUT of the loop until genuinely needed. The owning box does MOST of the
+work + thinking: when there are options it **BUILDS 2–3, tests them** (a throwaway candidate — built
+and validated IN-BOX by default; see *Two-tier validation* below), **DISCARDS** the ones that don't
+fit, and **LANDS the answer ITSELF** — it recommends AND self-tests rather than shopping options; it
+**TEARS DOWN and REBUILDS to a ZERO-BASE** rather than defending a first draft. Presenting an
+options-decision is RARE.
+
+**Two-tier validation — the throwaway is validated at the right tier (NOT every change to the host).**
+**Tier 1 — IN-BOX (the DEFAULT):** the owning box's `podman build` IS the throwaway — it develops,
+validates, and iterates in its OWN nested engine (build → validate → fix → rebuild, rinse/repeat) for
+everything it CAN build+validate itself; NO host involvement; this is where the bulk of the loop runs.
+**Tier 2 — HOST (ONLY two scenarios, engaged via the `live-validate` label):** (1) the box **cannot**
+build/validate the throwaway itself (e.g. the systemd-PID-1 GRD lineage can't boot in the nested
+engine; any instance the nested engine can't fully build+run) → the host runs the throwaway
+build+validate (Gate B); (2) **final pre-production shipment** — after ALL in-box iterations are done,
+ticket the host to build a throwaway, prove it works LIVE on a real host, then tear it down → THEN
+present merge-to-main. In-box iteration does NOT touch the host.
+
+**Throwaway tree & churn (build discipline).** Use the LIVE tree where possible; for anything that must
+DIFFER, bolt on a SEPARATE, TEMPORARY throwaway tree that NEVER mutates the IMMUTABLE live tree (host +
+dev-container base are immutable — the throwaway tree + all build caches live on the WRITABLE home
+volume), STILL obeys provenance (class a/b/c, signature/checksum-verified — no loosening for a
+throwaway), and is THROWN AWAY after the build (disposable `localhost/disposable/<name>:val-<sha>`,
+never pushed, `--rm`/`rmi`'d; temp tree removed on teardown). **Churn balance:** persist the ONE
+durable input — the dnf package cache (a plain bind dir on the home volume, NOT an image layer, so it
+survives `rmi` and every disposal) — and let everything else (candidate image, its layers, temp tree,
+run container) be ephemeral by design. Structure Containerfiles HEAVY/STABLE-EARLY (base, dnf install,
+artifact fetch+verify) and CHURN-LATE (COPY'd scripts/config); NEVER `--no-cache`/prune during churn
+(that's the monthly clean rebuild). **Churn re-downloads NOTHING across N PRs/iterations (proven
+in-box):** the per-PR/per-SHA disposal removes the disposable image + temp tree — and, when it was the
+sole referrer, its intermediate layers too — but NEVER the dnf package cache (not keyed to PR/SHA;
+SHARED across every iteration). One persistent thing, everything else ephemeral by design: (1) the
+persistent dnf **package cache — the ROBUST mechanism**, bind-mounted into the build
+(`-v <home>/.cache/fd-dnf:/var/cache/libdnf5:rw`); a plain dir, NOT an image layer, so it survives
+`rmi` and every disposal. When a PR changes the dnf install line the layer re-runs but the RPMs are
+served from cache, not re-downloaded — proven: a forced dnf re-run downloaded 0 B (vs 9.4 MiB cold),
+3.7× faster; only a genuinely-new package downloads once. (`--mount=type=cache` does NOT work under
+the required `--isolation=chroot` — the bind `-v` package cache is the mechanism.) (2) **ephemeral
+layers — ephemeral by design, and that's the advantage:** a throwaway's layers are pruned with its
+sole candidate's `rmi`, so (a) layer storage self-bounds on the limited VPS (no accumulation, no
+separate layer cache to GC), (b) each throwaway rebuilds fresh from the package cache → current
+package versions, no stale-frozen-layer risk (freshness for free), (c) the only cost is a few local
+CPU-seconds (~3.6 s warm), never bandwidth. While a candidate image still lives (late-layer churn, or
+a kept image) its layer cache also lets the rebuild skip the dnf RUN → zero work — a free accelerator
+— but nothing depends on layers surviving disposal. Each build is isolated — its own throwaway tree +
+unique disposable tag (`val-<sha>`) + unique run container (`vcand-$$`) — so nothing cross-contaminates,
+and the content-addressed dnf package cache (and any live layer cache) can't serve a wrong version.
+Storage stays bounded on the limited VPS by a trio: the candidate self-destructs via a `trap … EXIT`
+(fires on green/red/error), an orphan sweeper reaps anything a crash leaks, and a bounded cache-GC
+caps the dnf package cache age-then-size (RPMs older than 45 days first, then LRU size-prune to ≤15 GB;
+both overridable) — layers self-bound via `rmi`. (Full law: each repo's `policy/CLAUDE.md`.)
+
+**Engage the human for EXACTLY TWO reasons** (no others): (1) **MATERIALLY COMPLETE** → the clickable
+APPROVE to merge; (2) **MATERIALLY BLOCKED** → a genuine-roadblock decision (not a merge).
+Status-confirmation, option-shopping, and "which should I do" are NOT reasons to engage.
+
+**Definition of done** — a change goes to the human only when ALL hold: the FULL objective is
+materially achieved (the whole objective, not a ~5% slice); it is validated through the loop at the
+right tier (Tier-1 in-box build + assembly GREEN for what the box can validate itself, and the host
+live-gate GREEN only where Tier 2 applies — proven, not merely built); it adheres to the
+build/source principles; and a TLDR is written and **critically self-examined** (options
+considered+discarded, reasoning, fit to both the design and the task objective, genuine gaps) —
+dry-run AS IF the human against the total objective, returning to the loop if it fails its own
+scrutiny. The **PR is the agent's proof of work**; the self-checked TLDR is the final step before the
+human. (Full law: each repo's `policy/CLAUDE.md`.)
+
 1. **Intake & route.** A request lands on the box that *owns* the affected repo — the box that can
    both develop **and** operate/diagnose it. `fedora-dev` owns image-source development for every image
    repo it clones; `fedora-bootstrap` owns `fedora-bootstrap` + `fedora-dev` + any workload it operates
@@ -86,7 +155,7 @@ skips a step; a box asked to do another box's step **STOP-AND-SURFACE**s.
    the `control-plane-approved` label, then `build` runs **build-only** (`push=false`, no cosign) —
    proving the image *builds* while publishing nothing pullable. `fedora-bootstrap` ships no image: its
    guard is the **standalone** `control-plane-guard.yml` (no build/publish).
-4. **Host pre-merge live-gate (expected for any runtime change).** Label the PR `live-validate` — that
+4. **Host pre-merge live-gate (Tier 2 — when the box can't validate it, or the final pre-production shipment; see *Two-tier validation*).** Label the PR `live-validate` — that
    is the whole enrolment, for **any repo in the org** (the host discovers it ORG-WIDE by the label, no
    per-repo list to maintain). On the host, `live-gate-watch.timer` (15 s poll) runs
    `live-gate-watch.sh`, which finds the `live-validate` PRs across the org and, **once per head commit**
