@@ -64,15 +64,19 @@ usage(){ sed -n '2,/^set -uo/p' "$0" | sed 's/^# \{0,1\}//; s/^#//'; exit "${1:-
 sweep_orphans(){
   local now img ts age d
   now=$(date +%s)
-  while IFS='|' read -r img ts; do
+  # List disposable image IDs, then read the epoch via `podman image inspect` PER ID. `.Created.Unix`
+  # is a valid time.Time method under `inspect`, but NOT in a `podman images` list --format (there
+  # `.Created` is relative text → the template errors rc=125 and the reap silently no-ops). This
+  # mirrors the proven host throwaway-sweep.sh pattern (list IDs → image inspect each).
+  while read -r img; do
     [ -n "$img" ] || continue
+    ts="$(podman image inspect -f '{{.Created.Unix}}' "$img" 2>/dev/null)" || continue
     case "$ts" in ''|*[!0-9]*) continue;; esac          # need a numeric epoch to age-gate
     age=$(( (now - ts) / 60 ))
     if [ "$age" -ge "$STALE_MIN" ]; then
       podman rmi -f "$img" >/dev/null 2>&1 && echo "sweep: rmi stale image $img (${age}m old)"
     fi
-    # {{.Created.Unix}} = creation epoch (podman's plain {{.Created}} renders relative text)
-  done < <(podman images "$DISPOSABLE_NS/*" --format '{{.Repository}}:{{.Tag}}|{{.Created.Unix}}' 2>/dev/null)
+  done < <(podman images --filter "reference=$DISPOSABLE_NS/*" --format '{{.ID}}' 2>/dev/null | sort -u)
   for d in "$TMP_ROOT/$TMP_PREFIX".* "${TMPDIR:-/tmp}/$TMP_PREFIX".*; do
     [ -d "$d" ] || continue
     age=$(( (now - $(stat -c %Y "$d" 2>/dev/null || echo "$now")) / 60 ))
