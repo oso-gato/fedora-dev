@@ -125,7 +125,7 @@ Task mentions any of:
 
 - `$HOME` = fedora-dev home volume. Persists across box rebuilds AND fedora-dev container recreations.
 - `/run/host` = fedora-dev's root filesystem. Read-only convention.
-- claude-code installed from Anthropic `latest` channel at last box rebuild.
+- claude-code installed from Anthropic `latest` channel at last box rebuild. It is a package-managed dnf RPM at `/usr/bin/claude` and updates ONLY via box rebuild. Its in-place self-update is LOCKED OFF (`DISABLE_UPDATES`/`DISABLE_AUTOUPDATER`) — do NOT run `claude install`/`claude update` to change the version (that path is an intentional no-op: "Updates are disabled by your administrator"). A native build would plant `~/.local/bin/claude`, shadow the RPM on the home volume, and survive every rebuild. To get a newer claude-code, run `claudebox-rebuild`.
 - Git identity pre-configured per-repo: `claudebox@fedora-dev.local` / `claudebox`. Override per-PR if a different identity is needed.
 - Seeded-no-git state: if `~/.local/share/fedora-dev/.seeded-no-git` exists, follow `CONVERT-TO-GIT.md` in the same dir before any commit.
 - Host reboots / fedora-dev recreations: not yours. Propose; human decides.

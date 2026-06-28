@@ -152,7 +152,7 @@ Note: `podman build` here runs in **fedora-dev's engine** via `CONTAINER_HOST` �
 
 ### Claudebox lifecycle — when it rebuilds, why your work is safe
 
-claudebox is **rebuilt** (never updated) — every rebuild reinstalls the latest Claude Code + tools. Three rebuild paths:
+claudebox is **rebuilt** (never updated) — every rebuild reinstalls the latest Claude Code + tools. Claude Code's *own* in-place self-update is deliberately disabled (`DISABLE_UPDATES`/`DISABLE_AUTOUPDATER`): it's a package-managed dnf RPM, so letting it self-install a "native build" would plant a `~/.local/bin/claude` that shadows the RPM on the persistent home volume and survives every rebuild — leaving the box stuck self-updating a stale binary. Updates flow only through the rebuild's `dnf install`. Three rebuild paths:
 
 1. **Daily** — automatic at ~04:00 local. If you're in a `claude` session, the rebuild **defers** (drops a marker); your `claude` wrapper fires the rebuild the moment you exit. Live work is never interrupted.
 2. **Ask Claude** — run `claudebox-rebuild` inside the box. Your session ends shortly; reconnect with `claude`.

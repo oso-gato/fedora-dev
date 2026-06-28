@@ -1,5 +1,9 @@
 {
   "effortLevel": "xhigh",
+  "env": {
+    "DISABLE_UPDATES": "1",
+    "DISABLE_AUTOUPDATER": "1"
+  },
   "permissions": {
     "deny": [
       "Bash(dnf copr:*)",
