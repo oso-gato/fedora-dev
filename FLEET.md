@@ -55,6 +55,60 @@ own repo**, in-container tooling that supports the knowledge work (open to `core
 content governed by the vault's own `CLAUDE.md` (discrete approval); untrusted content parsed in a
 throwaway no-secret sandbox; never operates a host.
 
+### The two-axis model — how the three claudeboxes relate
+
+Each box hosts the same thing — Claude Code in a Distrobox ("claudebox") — so the three are **not**
+three bespoke builds. Each is **one shared invariant plus a point in a grid of two ORTHOGONAL axes.**
+A difference between any two boxes is therefore always exactly one of: the invariant (never — that is
+*drift*, and CI fails it), the **substrate** axis, or the **role** axis. Nothing else.
+
+**The invariant — the claude-code guard payload (identical in all three, ENFORCED).**
+`policy/managed-settings.json` (the agent deny-list + the `DISABLE_UPDATES`/`DISABLE_AUTOUPDATER`
+self-update lockout + bypass/mode/allowManaged + the `gate-push` hook *wiring*), the `claudebox-init.sh`
+self-update lockout + native-build-shadow self-heal, and the claude-code **provenance** (Anthropic
+`latest` channel, `gpgcheck=1`, pinned signing key). `bin/fleet-guard-parity.sh` (CI on push/PR **+
+daily**) compares this payload across all three public repos and **fails the build on any drift** — so
+it cannot silently diverge. It once did: the self-update lockout landed in `fedora-dev` but was missing
+from **both** other boxes until an audit caught it; the parity check is what makes that recurrence
+impossible.
+
+**Axis A — SUBSTRATE (the architecture).** How the box is built and supervised. Drives supervision,
+rebuild serialization, and the init-bridge channel — and *only* those.
+
+| box | substrate |
+|---|---|
+| `fedora-dev` | **container** — `Containerfile` + `entrypoint.sh` as PID 1; *no systemd* (inotify rebuild-watcher + `flock` serialization + `podman exec` init bridge) |
+| `fedora-desktop` | **container** — `Containerfile`(+`.grd`) + `entrypoint.sh`; the `grd` lineage runs **systemd as PID 1** |
+| `fedora-bootstrap` | **host** — `setup.sh` on the VPS; **systemd --user** (timer/unit serialization + `distrobox enter -- sudo` init bridge) |
+
+**Axis B — ROLE (merge authority + job).** Expressed by the `gate-push.sh` terminal verb (the refspec
+parser is identical; only the verb differs) plus each box's job.
+
+| box | role | `gate-push` verb |
+|---|---|---|
+| `fedora-dev` | **MERGER** (sole merge authority) | main-touching push + merge verbs → **ASK** (Arthur's in-session click) |
+| `fedora-bootstrap` | **proposer** (PR-only) | → **DENY** |
+| `fedora-desktop` | **proposer** (PR-only) | → **DENY** |
+
+Role also sets: live-gate ownership (`fedora-bootstrap` *operates* Gate B; `fedora-dev` + `fedora-desktop`
+are *clients* via the `live-validate` label), per-box package sets, and the role-divergent
+`policy/CLAUDE.md`.
+
+**The grid, and the key reading:**
+
+| box | Axis A (substrate) | Axis B (role) |
+|---|---|---|
+| `fedora-dev` | container | **MERGER** (ask) |
+| `fedora-bootstrap` | **host** | proposer (deny) |
+| `fedora-desktop` | container | proposer (deny) |
+
+The axes are independent. **`fedora-bootstrap` and `fedora-desktop` are wired the SAME on role** — both
+proposer/**DENY**, both live-gate clients — so they differ from each other **only on substrate** (bootstrap
+is the host, desktop is a container). **`fedora-dev` differs from both only on role** (it is the sole
+merger) — *not* on substrate (it is a container, like desktop). The familiar "2 containers + 1 host"
+split is Axis A; the "1 merger + 2 proposers" split is Axis B; the two cut across each other, and the
+guard payload underneath is held identical by the parity check.
+
 ## The dev loop (the mechanic)
 
 The dev↔host loop runs autonomously EXCEPT the final merge: develop → open PR (feature pushes are
@@ -266,6 +320,10 @@ it into a branch + PR, re-entering the loop at step 2.
 - **Control-plane class** (`policy/**`, `managed-settings.json`, `gate-push.sh`,
   `.github/workflows/**`, `*.container`, `run.sh*` security flags, key-sync, `*sudoers*`): standalone,
   never bundled; flagged in the merge TLDR and gated by Arthur's click (no CI label-gate).
+- **Claude-code guard payload** (the `managed-settings.json` deny-list + self-update lockout, the
+  `claudebox-init.sh` lockout + native-shadow self-heal, the claude-code provenance): **byte-identical
+  in all three, CI-enforced** by `bin/fleet-guard-parity.sh` (push/PR + daily). This is the *invariant*
+  underneath the two-axis model — Axes A/B may diverge; this may not. See *The two-axis model* above.
 - **Sources** (dnf → vendor `.repo` → AppImage/`.war`, GPG/sha-verified) · **no secrets in image
   layers** · **headless everywhere** (software-GL); sensitive ports tailnet-only, the desktop's web
   gate the one public door.
