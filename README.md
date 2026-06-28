@@ -52,7 +52,7 @@ An image that lives only inside this container is unfinished work. If a task wan
 
 A persistent headless workshop with three access paths and no passwords anywhere:
 
-- **`ssh -p 4444 core@<public-ip>`** → public ssh on host port 4444 → container :22, key-only (authorized keys synced from `github.com/oso-gato.keys` at every container start). fail2ban protects against brute-force scanners.
+- **`ssh -p 4444 core@<public-ip>`** → public ssh on host port 4444 → container :22, key-only. Authorized keys are **allowlisted**: at every container start `sync-authorized-keys.sh` pulls `github.com/oso-gato.keys` and authorizes only keys whose SHA256 fingerprint matches the in-image allowlist (any other key on the account is ignored) — the same fingerprint-allowlist gate the host uses.
 - **`ssh core@<vps>.<tailnet>.ts.net`** → keyless via Tailscale SSH (tailnet identity, gated by your Tailscale ACL).
 - **`mosh -p 61001:62000 --ssh="ssh -p 4444" core@<public-ip>`** (or via tailnet) → roaming-resilient shell; UDP 61001-62000 published. The non-default UDP range avoids colliding with the bootstrap host's own public mosh-server (which uses the default 60000-61000) — the two services share the same kernel UDP namespace.
 
@@ -82,7 +82,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now fedora-dev.service
 ```
 
-No env files, no secret population. The container's sshd is key-only; keys come from `github.com/oso-gato.keys` synced by the entrypoint at every start.
+No env files, no secret population. The container's sshd is key-only; **allowlisted** keys come from `github.com/oso-gato.keys` (filtered by the in-image fingerprint allowlist) synced by the entrypoint at every start.
 
 For unattended tailnet join (optional), create a podman secret first:
 
@@ -114,7 +114,7 @@ Takes ~2-5 minutes. The entrypoint clones the live spec from this repo, syncs ss
 
 If TS_AUTHKEY isn't set, the tailnet join is interactive — `podman logs -f fedora-dev` to find the login.tailscale.com URL, click it once.
 
-**Public ssh access:** as long as `github.com/oso-gato.keys` is reachable on first boot, public ssh on port 4444 works immediately with any of the listed keys. If GitHub was unreachable on first boot, public ssh stays closed until the entrypoint successfully syncs (every container restart re-tries); Tailscale SSH is unaffected.
+**Public ssh access:** as long as `github.com/oso-gato.keys` is reachable on first boot, public ssh on port 4444 works immediately with any **allowlisted** key (a key whose fingerprint matches the in-image allowlist; other keys on the account are ignored). If GitHub was unreachable on first boot, public ssh stays closed until the entrypoint successfully syncs (every container restart re-tries); Tailscale SSH is unaffected.
 
 ## Operating fedora-dev (day-to-day)
 

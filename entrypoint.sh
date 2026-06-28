@@ -56,29 +56,19 @@ if [ ! -f /var/lib/tailscale/hostkeys/ssh_host_ed25519_key ]; then
 fi
 mkdir -p /run/sshd
 
-# ---- sync core's ssh authorized_keys from github.com/oso-gato.keys ---------
-# Key-only sshd auth. Fetch from GitHub each boot, cache on the home volume.
-# If GitHub is briefly unreachable AND a cached file exists, keep the cache.
-# If GitHub is unreachable AND no cache: public ssh key-auth is closed until
-# next reachable sync — Tailscale SSH (keyless) remains the operator's path in.
-runuser -u core -- bash -c '
-    set -u
-    mkdir -p ~/.ssh
-    chmod 0700 ~/.ssh
-    tmp=$(mktemp)
-    if curl -fsSL --max-time 10 https://github.com/oso-gato.keys -o "$tmp" && [ -s "$tmp" ]; then
-        mv "$tmp" ~/.ssh/authorized_keys
-        chmod 0600 ~/.ssh/authorized_keys
-        echo "[ssh-keys] synced from github.com/oso-gato.keys ($(wc -l < ~/.ssh/authorized_keys) keys)"
-    else
-        rm -f "$tmp"
-        if [ -s ~/.ssh/authorized_keys ]; then
-            echo "[ssh-keys] GitHub unreachable; keeping cached ~/.ssh/authorized_keys"
-        else
-            echo "[ssh-keys] WARNING: GitHub unreachable AND no cached keys — public ssh closed; use Tailscale SSH to recover"
-        fi
-    fi
-'
+# ---- sync core's ssh authorized_keys (ALLOWLISTED) from github.com/<user>.keys
+# Key-only sshd auth, gated by an in-image FINGERPRINT ALLOWLIST (see
+# /usr/local/bin/sync-authorized-keys.sh, which mirrors the host's
+# sync-authorized-keys.sh): only keys whose SHA256 fingerprint matches an
+# allowlisted device are authorized + tagged environment="LOGIN_KEY=<name>" —
+# ANY OTHER key on the GitHub account is IGNORED. This closes the prior gap
+# where every key published on the account was auto-authorized on the public
+# :4444 door. Defensive: a failed/empty fetch or zero allowlist matches leaves
+# the existing (home-volume-cached) authorized_keys untouched, so a brief GitHub
+# outage never locks the operator out — keyless Tailscale SSH is the recovery
+# path. The `|| true` keeps a sync hiccup from killing PID 1 (the door stays at
+# whatever the cached authorized_keys already permits).
+runuser -u core -- bash /usr/local/bin/sync-authorized-keys.sh || true
 
 # ---- rsyslog: collect sshd auth events to /var/log/secure (fail2ban reads from there)
 /usr/sbin/rsyslogd -n &
