@@ -1,0 +1,37 @@
+# fedora-dev .live-gate — the workload-shipped, self-describing host live-gate (Gate B) contract.
+# ============================================================================
+# PARSED — NEVER SOURCED — by the host's live-gate (live-gate-run.sh's lg_load reads this file
+# line by line and assigns each KEY=VALUE with `printf -v`; it NEVER `.`/`source`s it, since this
+# file travels in the UNTRUSTED PR head). Declare INERT KEY=VALUE pairs ONLY (one assignment per
+# line, schema keys only, no cross-variable $OTHER refs). Single-quote HEALTH/PROBE so their inner
+# $()/pipes run later INSIDE the fenced candidate (via --health-cmd / `podman exec`), never on the host.
+#
+# WHY THIS EXISTS: fedora-dev shipped no in-repo .live-gate, so the host fell back to a preset that
+# only probed the SSH banner on :22 — proving the image builds + sshd serves, but NEVER that the
+# claude-code self-update LOCKOUT (PR #45) actually holds after a real assemble. This contract closes
+# that gap: it gives the eager first-boot claudebox assemble time to complete on the host, then proves
+# the lockout is LIVE — `claude update` is disabled, and no native-build shadow sits on the home volume.
+#
+# Single default target. FENCE = run.sh's contract MINUS the public `-p` and MINUS real secrets/volumes
+# (the nested-rootless-podman caps + devices + label-disable only). HEALTH mirrors run.sh's --health-cmd.
+
+CAND_FENCE='--cap-add NET_ADMIN --cap-add SYS_ADMIN --device /dev/net/tun --device /dev/fuse --security-opt label=disable'
+HEALTH='pgrep -x sshd && pgrep -x tailscaled && test -S /run/user/1000/podman/podman.sock'
+
+# Access-path probe (run INSIDE the candidate via `podman exec`): wait for the eager first-boot
+# claudebox assemble, then assert PR #45's lockout LIVE —
+#   (1) the box assembled (.assembled marker);
+#   (2) NO native-build launcher shadow on the home volume (~/.local/bin/claude absent / self-healed);
+#   (3) inside the assembled box, `claude update` is DISABLED — a LOCKED box prints
+#       "...disabled by your administrator" (matches `grep -qi disabled`); an UNLOCKED RPM would
+#       instead print "...managed by a package manager", which does NOT match → RED.
+CAND_PROBE='for i in $(seq 1 72); do [ -e /home/core/.local/state/claudebox/.assembled ] && break; sleep 5; done; [ -e /home/core/.local/state/claudebox/.assembled ] && [ ! -e /home/core/.local/bin/claude ] && runuser -u core -- env XDG_RUNTIME_DIR=/run/user/1000 podman exec claudebox bash -lc "claude update 2>&1 | grep -qi disabled"'
+
+# Gate-imposed headroom + first-boot budget for the nested assemble (toolbox pull + dnf install
+# claude-code ~244 MB) — more than a bare-sshd box; the probe itself also waits up to ~6 min for
+# the .assembled marker.
+CAND_MEMORY=4g
+CAND_PIDS=2048
+CAND_HEALTH_START=120s
+CAND_HEALTH_TRIES=24
+CAND_HEALTH_SLEEP=6
