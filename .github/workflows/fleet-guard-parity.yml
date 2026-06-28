@@ -1,0 +1,30 @@
+name: fleet-guard-parity
+
+# Fail loudly when the SHARED claude-code guard payload drifts between fleet claudebox repos
+# (fedora-dev / fedora-bootstrap / fedora-desktop): the managed-settings deny-list + env lockout, the
+# #45 self-update lockout + native-shadow self-heal, and the claude-code provenance. This is the alarm
+# that makes the #45-style SILENT drift impossible to miss — that fix landed in fedora-dev but was
+# missing from BOTH other boxes until a manual audit caught it. See bin/fleet-guard-parity.sh.
+#
+# All fleet repos are PUBLIC, so the check fetches raw content with the built-in token (no secrets,
+# no cross-repo write). The scheduled run catches drift even when neither repo has open PR activity.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "30 4 * * *"   # daily 04:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for bin/fleet-guard-parity.sh)
+        uses: actions/checkout@v4
+      - name: Fleet guard-parity check
+        run: bash bin/fleet-guard-parity.sh
