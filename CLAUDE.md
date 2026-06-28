@@ -165,7 +165,7 @@ Inside claudebox (`distrobox.ini`'s `additional_packages`). Refreshed daily from
 
 | Package | Pin | Source (rule 2 class) | Why required |
 |---|---|---|---|
-| claude-code | Anthropic dnf/rpm repo (`latest` channel) | vendor (b) | the agent — claudebox's purpose; refreshed daily so new model releases are accessible day one |
+| claude-code | Anthropic dnf/rpm repo (`latest` channel) | vendor (b) | the agent — claudebox's purpose; refreshed daily so new model releases are accessible day one. In-place self-update is LOCKED OFF (`DISABLE_UPDATES`/`DISABLE_AUTOUPDATER` — set in `/etc/profile.d` by `claudebox-init.sh` + policy-tier in `managed-settings.json`) so a self-managing "native build" can't plant `~/.local/bin/claude` and shadow the RPM on the home volume; updates flow ONLY via the box rebuild's `dnf install` (the documented "Pick up newer claude-code: run `claudebox-rebuild`" path). `claudebox-init.sh` also self-heals any pre-existing native shadow off the home volume |
 | git | Fedora current | distro (a) | VCS engine the agent drives. Inside the box because the agent's shell is in the box |
 | gh | GitHub dnf/rpm repo | vendor (b) | GitHub/GHCR auth, PRs (propose-and-commit lifecycle), releases. Auth state at `~/.config/gh/` lives on the home volume — shared across box rebuilds |
 | openssh-clients | Fedora current | distro (a) | outbound ssh for git-over-ssh from inside the box |
@@ -188,7 +188,7 @@ Inside claudebox (`distrobox.ini`'s `additional_packages`). Refreshed daily from
 | run.sh | manual deploy contract (`podman run -d`-style with --health-cmd, devices, volumes); the env-driven path `spin-up.sh` wraps; fallback for non-systemd hosts |
 | fedora-dev.container | systemd Quadlet for managed deployment (declarative spec: AutoUpdate=registry, Notify=healthy, HealthCmd, Volume=, SecurityLabelDisable=true; **NO EnvironmentFile** — key-only sshd since v1.1.9, optional TS_AUTHKEY via podman `Secret=`) |
 | distrobox.ini | claudebox manifest: image pin, pre_init_hook drops Anthropic `latest`-channel `.repo`, additional_packages |
-| claudebox-init.sh | post-assemble host bridges (CONTAINER_HOST export + in-box `claudebox-rebuild` flag-writer). Runs over quote-safe `podman exec` (container-root) channel |
+| claudebox-init.sh | post-assemble host bridges (CONTAINER_HOST export + in-box `claudebox-rebuild` flag-writer). Runs over quote-safe `podman exec` (container-root) channel. Also writes the claude-code self-update LOCKOUT (`/etc/profile.d/20-claude-no-selfupdate.sh`: `DISABLE_UPDATES`/`DISABLE_AUTOUPDATER`) and SELF-HEALS any native-build shadow (`~/.local/bin/claude` symlink into `~/.local/share/claude/` + the version store) off the home volume so the package-managed `/usr/bin/claude` always wins |
 | claudebox-assemble.sh | called by entrypoint on first boot + by box-rebuild on every rebuild: `distrobox rm -f` (recovery) → `distrobox assemble create` → first-enter retry → bridges + policy stamp |
 | box-rebuild.sh | full claudebox rebuild (self-serializing via flock); triggered by daily tick / in-box flag / host-shell command — all converge here |
 | claudebox-daily.sh | daily-refresh decision: probe session lock → rebuild now if idle, else write `rebuild.pending` marker (the `claude` wrapper fires it on session exit) |
@@ -196,7 +196,7 @@ Inside claudebox (`distrobox.ini`'s `additional_packages`). Refreshed daily from
 | bin/claudebox-rebuild | host-shell trigger; starts box-rebuild.sh detached + tails the log |
 | bin/build-throwaway.sh | standardized in-box THROWAWAY candidate build: wraps `podman build --isolation=chroot` with the persistent dnf cache (`$HOME/.cache/fd-dnf`→`/var/cache/libdnf5`) + the home-volume layer cache so churn re-downloads nothing; tags `localhost/disposable/<name>:val-<sha-or-rand>` (never pushed); trap teardown rmi's the candidate + rm's any temp tree on EXIT (success/fail/INT/TERM/HUP) while the caches persist; sweeps orphan disposable images + temp trees first so a kill-9 leaves nothing on the home volume; builds only the repo's OWN Containerfile (provenance) and never mutates the immutable live tree (`-c <srcdir>` bolts on a separate throwaway COPY tree on the writable home volume). Complements `bin/validate.sh` (the full T1–T4 verdict harness) |
 | policy/CLAUDE.md | runtime law for the in-claudebox agent (its role, do/don't, propose-and-commit, validation discipline) |
-| policy/managed-settings.json | deny-rule guardrails (defense-in-depth) + bypass-permissions disabled (managed tier) |
+| policy/managed-settings.json | deny-rule guardrails (defense-in-depth) + bypass-permissions disabled (managed tier) + `env` lockout (`DISABLE_UPDATES`/`DISABLE_AUTOUPDATER`) so claude-code never self-updates in-place (paired with the profile.d lockout in `claudebox-init.sh`) |
 | .github/workflows/build.yml | CI: on push + 15th monthly (--no-cache) + manual; build-push-action + cosign keyless signing via OIDC |
 
 ## NESTED BUILDS — CONTAINER_HOST BRIDGE (reference)
