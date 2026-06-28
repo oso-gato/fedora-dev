@@ -4,13 +4,16 @@
 # (never the host live OS/tree); test containers tear down on exit. The CALLER discards the
 # candidate image (rmi) after testing — pass DISCARD=1 to have this script do it for you.
 # Faithful systemd/live validation stays host-side; in-box gates what's faithful here.
-#   T1 build (gate)    : podman build --isolation=chroot  [+ $BUILD_ARGS]
+#   T1 build (gate)    : podman build --isolation=chroot + the persistent dnf-cache bind  [+ $BUILD_ARGS]
+#                        (same -v …/fd-dnf:/var/cache/libdnf5 build-throwaway.sh + the host gate use,
+#                         so T1 reproduces the REAL build env — catches bind-mount-only failures)
 #   T2 assembly (gate) : create + export + inspect (entrypoint present, sane size)
 #   T3 lint (gate)     : bash -n on every shipped *.sh in the repo
 #   T4 smoke (info)    : degraded boot for NON-systemd lineages only; systemd-PID-1 => assembly-only
 set -uo pipefail
 REPO="${1:?usage: validate.sh <repo-dir> [containerfile] [build|nobuild]}"; FILE="${2:-Containerfile}"; DOBUILD="${3:-build}"
 NAME="$(basename "$REPO")"; TAG="localhost/${NAME}:candidate-$(echo "$FILE" | tr -c 'a-zA-Z0-9' - )"; OUT="$(mktemp -d)"; fail=0
+DNF_CACHE="${FD_DNF_CACHE:-$HOME/.cache/fd-dnf}"   # persistent dnf cache bound into T1 (matches build-throwaway.sh + the host live-gate)
 g(){ printf '  %-22s %s\n' "$1" "$2"; case "$2" in FAIL*|NO-*) fail=1;; esac; }
 i(){ printf '  %-22s %s\n' "$1" "$2"; }
 SYS=0; grep -qE 'ENTRYPOINT.*(/sbin/init|systemd)|STOPSIGNAL[[:space:]]+SIGRTMIN' "$REPO/$FILE" 2>/dev/null && SYS=1
@@ -18,8 +21,12 @@ echo "repo=$NAME file=$FILE systemd-PID-1=$SYS tag=$TAG"
 
 echo "== T1 build (gate) =="
 if [ "$DOBUILD" = build ]; then
+  mkdir -p "$DNF_CACHE"
   # shellcheck disable=SC2086
-  podman build --isolation=chroot ${BUILD_ARGS:-} -t "$TAG" -f "$REPO/$FILE" "$REPO" >"$OUT/build.log" 2>&1 \
+  # Bind the persistent dnf cache at /var/cache/libdnf5 — the SAME mount build-throwaway.sh + the host
+  # live-gate use — so T1 reproduces the real build env (and catches bind-mount-only failures, e.g. an
+  # `rm -rf /var/cache/libdnf5` that fails EBUSY only when the cache is a live mountpoint).
+  podman build --isolation=chroot -v "$DNF_CACHE:/var/cache/libdnf5:rw" ${BUILD_ARGS:-} -t "$TAG" -f "$REPO/$FILE" "$REPO" >"$OUT/build.log" 2>&1 \
     && g build PASS || { g build FAIL; tail -20 "$OUT/build.log"; echo "VERDICT: RED (build)"; exit 1; }
 else podman image exists "$TAG" && g build SKIP-exists || { g build NO-IMAGE; exit 1; }; fi
 
