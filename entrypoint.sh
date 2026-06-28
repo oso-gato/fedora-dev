@@ -175,20 +175,24 @@ elif [ -f "$live/.seeded-no-git" ]; then
     # CONVERT the seed to a real clone instead of parking for a human. This removes
     # the dead-end an offline first boot used to leave (propose-and-commit was blocked
     # until the agent ran CONVERT-TO-GIT.md by hand). A later reachable boot heals it.
-    if git ls-remote https://github.com/oso-gato/fedora-dev HEAD >/dev/null 2>&1; then
+    if timeout 20 git ls-remote https://github.com/oso-gato/fedora-dev HEAD >/dev/null 2>&1; then
         echo "[live-spec] seeded-no-git + GitHub reachable -> self-healing to a real clone"
         bak="${live}.heal-bak.$(date +%s)"
         if mv "$live" "$bak" \
-           && git clone --depth 1 https://github.com/oso-gato/fedora-dev "$live" 2>/dev/null; then
+           && timeout 120 git clone --depth 1 https://github.com/oso-gato/fedora-dev "$live" 2>/dev/null; then
             ( cd "$live" \
               && git config --local user.email "claudebox@fedora-dev.local" \
               && git config --local user.name  "claudebox" )
             rm -rf "$bak"
             echo "[live-spec] self-heal OK (seed backed up then removed; clone is authoritative)"
-        else
+        elif [ -e "$bak" ]; then
+            # the seed was moved aside (mv ok, clone failed) -> restore it
             rm -rf "$live" 2>/dev/null || true
             mv "$bak" "$live" 2>/dev/null || true
             echo "[live-spec] self-heal failed; restored the seed, staying seeded-no-git"
+        else
+            # mv itself failed -> $live is still the untouched seed, leave it
+            echo "[live-spec] self-heal failed before backup; seed untouched, staying seeded-no-git"
         fi
     else
         echo "[live-spec] seeded-no-git; GitHub still unreachable — staying seeded (self-heals next reachable boot)"

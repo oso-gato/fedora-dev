@@ -19,7 +19,7 @@ curl -fsSL https://pkgs.tailscale.com/stable/fedora/tailscale.repo \
 #   Engine + storage:  podman, shadow-utils, fuse-overlayfs, passt, nftables
 #   Login + observe:   openssh-server, mosh, tmux, tailscale
 #   Box bootstrap:     distrobox, inotify-tools
-#   System plumbing:   sudo, procps-ng, glibc-langpack-en, openssl
+#   System plumbing:   sudo, procps-ng, glibc-langpack-en, openssl, git-core
 #   Break-glass:       nano
 #
 # Everything else the agent uses (claude-code, gh, git, openssh-clients, podman
@@ -29,7 +29,7 @@ $DNF install \
     podman shadow-utils fuse-overlayfs passt nftables \
     openssh-server mosh tmux tailscale \
     distrobox inotify-tools \
-    sudo procps-ng glibc-langpack-en openssl nano
+    sudo procps-ng glibc-langpack-en openssl git-core nano
 
 # ---- defensive: restore file caps on newuidmap/newgidmap --------------------
 # shadow-utils' RPM scriptlet sets these caps, BUT they can be lost in some
