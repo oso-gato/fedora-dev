@@ -29,7 +29,6 @@ $DNF install \
     podman shadow-utils fuse-overlayfs passt nftables \
     openssh-server mosh tmux tailscale \
     distrobox inotify-tools \
-    fail2ban-server rsyslog \
     sudo procps-ng glibc-langpack-en nano
 
 # ---- defensive: restore file caps on newuidmap/newgidmap --------------------
@@ -216,40 +215,15 @@ AllowUsers core
 # blanket PermitUserEnvironment. Mirrors the host's sshd_config.d/20-login-key.conf.
 PermitUserEnvironment LOGIN_KEY
 HostKey /var/lib/tailscale/hostkeys/ssh_host_ed25519_key
-# AUTHPRIV so rsyslog captures auth events to /var/log/secure for fail2ban.
-SyslogFacility AUTHPRIV
-LogLevel VERBOSE
 EOF
 rm -f /etc/ssh/ssh_host_*_key*   # never ship host keys in a published image
 
-# ---- fail2ban — brute-force mitigation for the public-ssh :4444 path ----
-# We install the LEAF `fail2ban-server` (see Base Packages), NOT the `fail2ban`
-# metapackage: the metapackage HARD-pulls fail2ban-firewalld->firewalld +
-# fail2ban-sendmail->esmtp (an unused firewall + MTA), and install_weak_deps=False
-# does NOT block hard Requires. fail2ban-server is the daemon + the nftables ban action;
-# it bans via `nftables[type=multiport]` (the `nft` binary; nftables is a base package). This
-# image is nft-only — tailscaled programs its rules via the nftables Netlink API (no binary
-# needed) and netavark defaults to nftables on Fedora 41+, so no iptables is installed.
-# fail2ban watches /var/log/secure (rsyslog writes there from sshd's AUTHPRIV
-# facility), bans IPs that fail too many key-auth attempts via nftables.
-# Tailnet CGNAT (100.64.0.0/10) is ignoreip'd — tailnet identity is already
-# authenticated by Tailscale; we don't want a misbehaving tailnet device to
-# ever land on a banned-IP list.
-install -d -m 0755 /etc/fail2ban/jail.d
-cat > /etc/fail2ban/jail.d/sshd-fedora-dev.local <<'EOF'
-[DEFAULT]
-bantime = 1h
-findtime = 10m
-maxretry = 5
-backend = auto
-ignoreip = 127.0.0.1/8 ::1 100.64.0.0/10
-banaction = nftables[type=multiport]
-
-[sshd]
-enabled = true
-port = 22
-logpath = /var/log/secure
-EOF
+# NOTE: no fail2ban / rsyslog. The public ssh door is KEY-ONLY (PasswordAuthentication
+# no) and fingerprint-ALLOWLISTED (sync-authorized-keys.sh) — there is no password to
+# brute-force, so a fail2ban jail bought nothing here. It also never actually ran: this
+# container has no systemd-journald, and the stock rsyslog reads the journal (not /dev/log),
+# so /var/log/secure stayed empty and the jail saw zero events. Dropped both rather than
+# repair a control with no purpose on a key-only door (decision: keys are the access control).
 
 dnf clean all
 rm -rf /var/cache/dnf /var/cache/libdnf5

@@ -110,7 +110,7 @@ The env-driven deploy contract `spin-up.sh` wraps — use it directly when the e
 
 ### First boot
 
-Takes ~2-5 minutes. The entrypoint clones the live spec from this repo, syncs ssh keys from `github.com/oso-gato.keys`, starts rsyslog + sshd + fail2ban + tailscaled, then eagerly assembles claudebox in the background (dnf-installs claude-code + tools inside the box). Subsequent boots are instant. The first `claude` invocation will tail the assemble log if it's still in progress.
+Takes ~2-5 minutes. The entrypoint clones the live spec from this repo, syncs the allowlisted ssh keys from `github.com/oso-gato.keys`, starts sshd + tailscaled, then eagerly assembles claudebox in the background (dnf-installs claude-code + tools inside the box). Subsequent boots are instant. The first `claude` invocation will tail the assemble log if it's still in progress.
 
 If TS_AUTHKEY isn't set, the tailnet join is interactive — `podman logs -f fedora-dev` to find the login.tailscale.com URL, click it once.
 
@@ -186,7 +186,7 @@ Ad-hoc `dnf install` inside the running box works during the session but vanishe
 
 ## Troubleshooting & break-glass
 
-fedora-dev is non-systemd: `entrypoint.sh` (PID 1) supervises sshd, tailscaled, the rootless podman socket, rsyslog, fail2ban, and the rebuild watcher via a `pgrep` watchdog, and exits non-zero (so the Quadlet's `Restart=always` heals it) if any die.
+fedora-dev is non-systemd: `entrypoint.sh` (PID 1) supervises sshd, tailscaled, the rootless podman socket, and the rebuild watcher via a `pgrep` watchdog, and exits non-zero (so the Quadlet's `Restart=always` heals it) if any die.
 
 - **See what it's doing / why it's unhealthy** — from the VPS host: `podman logs -f fedora-dev` (entrypoint + the eager first-boot claudebox-assemble output) and `podman healthcheck run fedora-dev`.
 - **Break-glass shell** — sshd is key-only and `core` has no password, so the recovery door is **from the host**: `podman exec -u 0 -it fedora-dev bash` (root) or `podman exec -u 1000 -it fedora-dev bash` (the `core` agent).
