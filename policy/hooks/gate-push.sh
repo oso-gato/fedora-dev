@@ -277,7 +277,7 @@ if has_git_push "$cmd"; then
     if [ "$clean" -eq 1 ] && is_safe_push "$cmd"; then
         exit 0
     fi
-    ask "fedora-dev wants to push to a remote that could touch main (or the target could not be parsed). Approve ONLY if you (Arthur) intend a main-targeting push; review the command first. Feature-branch pushes with an explicit non-main refspec run without asking."
+    ask "fedora-dev wants to push to a remote that could touch main (or the target could not be parsed). Approve ONLY if you (Arthur) intend a main-targeting push; review the command first. Feature-branch pushes with an explicit non-main refspec run without asking — but ONLY when the push is BARE: a pipe/redirect/chain (| tail, 2>&1, &&) makes the target unparseable and lands here. Re-run the push ALONE and capture its output in a separate command to avoid this prompt."
 fi
 
 # ----------------------------------------------------------------------------
