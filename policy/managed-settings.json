@@ -1,5 +1,6 @@
 {
   "effortLevel": "xhigh",
+  "enableWorkflows": true,
   "env": {
     "DISABLE_UPDATES": "1",
     "DISABLE_AUTOUPDATER": "1"
