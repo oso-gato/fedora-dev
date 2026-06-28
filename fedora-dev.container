@@ -74,6 +74,14 @@ SecurityLabelDisable=true
 Volume=fedora-dev-home:/home/core
 Volume=fedora-dev-state:/var/lib/tailscale
 
+# Optional STANDING GitHub credential — so the in-box dev loop never stops for auth.
+# Provide the App private key as a podman secret + the App identity as env, then
+# uncomment the two lines (the key mounts into tmpfs at /run/secrets/gh_app_key,
+# never persisted; the entrypoint mints a <=1h installation token on demand):
+#   podman secret create gh_app_key ./app-private-key.pem
+# Secret=gh_app_key,type=mount,target=gh_app_key
+# Environment=GH_APP_ID=000000 GH_APP_INSTALLATION_ID=00000000
+
 # Public ports:
 #   4444/tcp -> container :22 (sshd, key-only; keys synced from github.com/oso-gato.keys)
 #   61001-62000/udp -> mosh (bootstraps over the same key-auth ssh)
