@@ -54,7 +54,7 @@ fi
 
 # Hold the SHARED session lock for the session's lifetime.
 flock -s "$state/session.lock" \
-    distrobox enter claudebox -- bash -lc 'exec /usr/bin/claude --settings "{\"ultracode\":true}" "$@"' bash "$@"
+    distrobox enter claudebox -- bash -lc 'exec /usr/bin/claude --settings "{\"ultracode\":true,\"enableWorkflows\":true}" "$@"' bash "$@"
 rc=$?
 
 # Post-session: follow a Claude-triggered rebuild, or fire a deferred daily one.
