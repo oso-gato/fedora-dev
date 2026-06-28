@@ -4,6 +4,10 @@
 # (never the host live OS/tree); test containers tear down on exit. The CALLER discards the
 # candidate image (rmi) after testing — pass DISCARD=1 to have this script do it for you.
 # Faithful systemd/live validation stays host-side; in-box gates what's faithful here.
+#   T0 .live-gate (gate): lint the in-repo `.live-gate` contract via bin/lint-live-gate.sh (the host's
+#                        VENDORED lg_load + sanity checks) — catches contract bugs at Tier-1 BEFORE the
+#                        host round-trip (unexpanded $_GD_* cross-ref / non-absolute SECRET_MOUNT / a
+#                        publish flag in the fence / an lg_load-rejected contract). No-op if no .live-gate.
 #   T1 build (gate)    : podman build --isolation=chroot + the persistent dnf-cache bind  [+ $BUILD_ARGS]
 #                        (same -v …/fd-dnf:/var/cache/libdnf5 build-throwaway.sh + the host gate use,
 #                         so T1 reproduces the REAL build env — catches bind-mount-only failures)
@@ -18,6 +22,12 @@ g(){ printf '  %-22s %s\n' "$1" "$2"; case "$2" in FAIL*|NO-*) fail=1;; esac; }
 i(){ printf '  %-22s %s\n' "$1" "$2"; }
 SYS=0; grep -qE 'ENTRYPOINT.*(/sbin/init|systemd)|STOPSIGNAL[[:space:]]+SIGRTMIN' "$REPO/$FILE" 2>/dev/null && SYS=1
 echo "repo=$NAME file=$FILE systemd-PID-1=$SYS tag=$TAG"
+
+echo "== T0 .live-gate contract (gate) =="
+LINT="$(dirname "$(readlink -f "$0")")/lint-live-gate.sh"
+if [ -f "$LINT" ]; then
+  if bash "$LINT" "$REPO" >"$OUT/livegate.log" 2>&1; then g live-gate PASS; else g live-gate FAIL; sed 's/^/    /' "$OUT/livegate.log"; fi
+else i live-gate "skipped (lint-live-gate.sh not adjacent)"; fi
 
 echo "== T1 build (gate) =="
 if [ "$DOBUILD" = build ]; then
@@ -58,5 +68,5 @@ else
 fi
 
 [ "${DISCARD:-0}" = 1 ] && { podman rmi -f "$TAG" >/dev/null 2>&1; i discard "image tree removed (host-immutable)"; }
-echo; echo "VERDICT: $([ $fail = 0 ] && echo GREEN || echo RED)   (gated T1-T3; logs: $OUT)"
+echo; echo "VERDICT: $([ $fail = 0 ] && echo GREEN || echo RED)   (gated T0-T3; logs: $OUT)"
 exit $fail
