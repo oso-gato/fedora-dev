@@ -30,7 +30,7 @@ COPY policy/ /usr/local/share/fedora-dev/policy/
 
 # Operator wrappers (the only entry points from the outer tmux shell). Baked
 # here because managed-settings.json denies runtime writes to /usr/local/bin.
-COPY --chmod=755 bin/claude bin/claudebox-rebuild /usr/local/bin/
+COPY --chmod=755 bin/claude bin/claudebox-rebuild bin/gh-app-auth.sh /usr/local/bin/
 
 ENV LANG=en_US.UTF-8
 
