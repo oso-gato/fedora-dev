@@ -125,6 +125,40 @@ install -d -m 0755 -o core -g core /home/core/.local/state/claudebox
 # here until this chown was applied.)
 chown -R core:core /home/core/.local
 
+# ---- provision a STANDING GitHub credential (non-interactive, auto-rotating) ---
+# Lets the autonomous dev loop (git push / gh pr create / label) run without ever
+# stopping for auth. Preferred: a GitHub App installation token (gh-app-auth.sh mints
+# it fresh from the App private key — <=1h, repo-scoped, ON DEMAND for git so nothing
+# is persisted; the box's gh CLI gets a hosts.yml refreshed on a tick below). Fallback:
+# a static $GH_TOKEN. The key/token enters ONLY at runtime (Build Principle 5 — never a
+# layer). No credential -> the box still boots unauthenticated (operator can auth by
+# hand); propose-and-commit just needs one. Runs as core (its ~/.config holds the auth).
+if [ -n "${GH_APP_ID:-}" ] && { [ -n "${GH_APP_PRIVATE_KEY:-}" ] || [ -r "${GH_APP_PRIVATE_KEY_FILE:-/run/secrets/gh_app_key}" ]; }; then
+    if runuser -u core -- env HOME=/home/core \
+            GH_APP_ID="${GH_APP_ID}" \
+            GH_APP_INSTALLATION_ID="${GH_APP_INSTALLATION_ID:-}" \
+            GH_APP_PRIVATE_KEY="${GH_APP_PRIVATE_KEY:-}" \
+            GH_APP_PRIVATE_KEY_FILE="${GH_APP_PRIVATE_KEY_FILE:-/run/secrets/gh_app_key}" \
+            bash /usr/local/bin/gh-app-auth.sh install; then
+        echo "[gh-auth] standing GitHub App credential provisioned"
+    else
+        echo "[gh-auth] App credential provisioning FAILED — continuing unauthenticated"
+    fi
+elif [ -n "${GH_TOKEN:-}" ]; then
+    runuser -u core -- env HOME=/home/core GH_TOKEN="${GH_TOKEN}" bash -c '
+        mkdir -p ~/.config/gh
+        [ -f ~/.config/gh/config.yml ] || printf "version: 1\ngit_protocol: https\n" > ~/.config/gh/config.yml
+        printf "github.com:\n    users:\n        x-access-token:\n            oauth_token: %s\n    git_protocol: https\n    oauth_token: %s\n    user: x-access-token\n" "$GH_TOKEN" "$GH_TOKEN" > ~/.config/gh/hosts.yml
+        chmod 600 ~/.config/gh/hosts.yml
+        git config --global credential.helper store
+        printf "https://x-access-token:%s@github.com\n" "$GH_TOKEN" > ~/.git-credentials
+        chmod 600 ~/.git-credentials' \
+        && echo "[gh-auth] provisioned from static GH_TOKEN" \
+        || echo "[gh-auth] GH_TOKEN provisioning failed — continuing unauthenticated"
+else
+    echo "[gh-auth] no credential supplied; running unauthenticated (propose-and-commit needs one)"
+fi
+
 # ---- live-spec bootstrap (first boot only) ---------------------------------
 # Clone the fedora-dev repo to /home/core/.local/share/fedora-dev/ — this is the
 # LIVE source of truth for distrobox.ini and the box scripts. It persists on the
@@ -147,7 +181,28 @@ mkdir -p "$(dirname "$live")"
 if [ -d "$live/.git" ]; then
     echo "[live-spec] git clone already present at $live"
 elif [ -f "$live/.seeded-no-git" ]; then
-    echo "[live-spec] seeded-no-git state present; agent must convert to clone (see CONVERT-TO-GIT.md)"
+    # Self-heal: if GitHub is reachable now (and we may now hold a credential),
+    # CONVERT the seed to a real clone instead of parking for a human. This removes
+    # the dead-end an offline first boot used to leave (propose-and-commit was blocked
+    # until the agent ran CONVERT-TO-GIT.md by hand). A later reachable boot heals it.
+    if git ls-remote https://github.com/oso-gato/fedora-dev HEAD >/dev/null 2>&1; then
+        echo "[live-spec] seeded-no-git + GitHub reachable -> self-healing to a real clone"
+        bak="${live}.heal-bak.$(date +%s)"
+        if mv "$live" "$bak" \
+           && git clone --depth 1 https://github.com/oso-gato/fedora-dev "$live" 2>/dev/null; then
+            ( cd "$live" \
+              && git config --local user.email "claudebox@fedora-dev.local" \
+              && git config --local user.name  "claudebox" )
+            rm -rf "$bak"
+            echo "[live-spec] self-heal OK (seed backed up then removed; clone is authoritative)"
+        else
+            rm -rf "$live" 2>/dev/null || true
+            mv "$bak" "$live" 2>/dev/null || true
+            echo "[live-spec] self-heal failed; restored the seed, staying seeded-no-git"
+        fi
+    else
+        echo "[live-spec] seeded-no-git; GitHub still unreachable — staying seeded (self-heals next reachable boot)"
+    fi
 else
     cloned=0
     for attempt in 1 2 3 4 5; do
@@ -246,6 +301,21 @@ while true; do
 done
 ' &
 tick_pid=$!
+
+# ---- supervised: GitHub App token refresh (gh CLI hosts.yml) ---------------
+# App installation tokens expire in <=1h. The git credential helper mints fresh per
+# op (nothing to refresh there), but the box's `gh` CLI reads a static hosts.yml — so
+# re-mint it every 40 min. No-op unless an App credential is configured. Best-effort
+# (not in the watchdog): a miss only staleness-expires the gh token until next boot;
+# git keeps working on demand.
+if [ -n "${GH_APP_ID:-}" ] && { [ -n "${GH_APP_PRIVATE_KEY:-}" ] || [ -r "${GH_APP_PRIVATE_KEY_FILE:-/run/secrets/gh_app_key}" ]; }; then
+    runuser -u core -- env HOME=/home/core \
+        GH_APP_ID="${GH_APP_ID}" \
+        GH_APP_INSTALLATION_ID="${GH_APP_INSTALLATION_ID:-}" \
+        GH_APP_PRIVATE_KEY="${GH_APP_PRIVATE_KEY:-}" \
+        GH_APP_PRIVATE_KEY_FILE="${GH_APP_PRIVATE_KEY_FILE:-/run/secrets/gh_app_key}" \
+        bash -c 'while sleep 2400; do bash /usr/local/bin/gh-app-auth.sh install >/dev/null 2>&1 || true; done' &
+fi
 
 # ---- eager first-boot claudebox assemble (one-shot, background) -----------
 # Doesn't block sshd — you can connect immediately; `claude` will tail this if
