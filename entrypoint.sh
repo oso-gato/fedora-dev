@@ -146,7 +146,7 @@ elif [ -n "${GH_TOKEN:-}" ]; then
         && echo "[gh-auth] provisioned from static GH_TOKEN" \
         || echo "[gh-auth] GH_TOKEN provisioning failed — continuing unauthenticated"
 else
-    echo "[gh-auth] no credential supplied; running unauthenticated (propose-and-commit needs one)"
+    echo "[gh-auth] no standing credential supplied — running unauthenticated (fail-safe). A persisted gh login on the home volume (if any) is used as-is; otherwise run 'gh auth login' once inside the box — it persists across rebuilds and is used automatically. The App path is OPTIONAL."
 fi
 
 # ---- live-spec bootstrap (first boot only) ---------------------------------
