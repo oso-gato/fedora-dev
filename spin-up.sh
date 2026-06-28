@@ -15,7 +15,7 @@
 #                       `podman logs -f fedora-dev` (one-time per state volume).
 set -euo pipefail
 cd "$(dirname "$0")"
-[ -x ./run.sh ] || { echo "spin-up: ./run.sh not found/executable in $(pwd)" >&2; exit 1; }
+[ "${COLLECT_ONLY:-0}" = 1 ] || [ -x ./run.sh ] || { echo "spin-up: ./run.sh not found/executable in $(pwd)" >&2; exit 1; }
 
 # --- prompt helper (prompt -> stderr so $() captures only the value) ---
 ask() {  # ask "<prompt>" ["<default>"]
@@ -29,6 +29,29 @@ echo "=== fedora-dev spin-up ===" >&2
 TS_AUTHKEY="${TS_AUTHKEY:-$(ask 'Tailscale auth key (tskey-…; blank = interactive web-login join)' '')}"
 IMAGE="${IMAGE:-$(ask 'Image ref (host deploy = ghcr.io; localhost/ = in-box self-validation only)' 'ghcr.io/oso-gato/fedora-dev:latest')}"
 
+# --- optional STANDING GitHub App credential (paste -> podman secret; never a file) ---
+# Same model as TS_AUTHKEY: the key is pasted at the prompt and streams straight into
+# podman's secret store. The container mints a <=1h installation token from it
+# (bin/gh-app-auth.sh) so the in-box dev loop never stops for auth. Honors an env-supplied
+# GH_APP_ID (scripted / collect-mode) and skips the prompt then.
+. ./bin/gh-app-provision.sh
+GH_APP_SECRET="${GH_APP_SECRET:-}"
+if [ -z "${GH_APP_ID:-}" ] && [ "$(ask 'Provision a standing GitHub App credential now? — paste the key (y/n)' n)" = y ]; then
+  prompt_github_app gh_app_key || { echo "spin-up: GitHub App provisioning failed" >&2; exit 1; }
+  GH_APP_SECRET=gh_app_key
+fi
+
+# COLLECT-ONLY: a host orchestrator (day0.sh) drives this wizard to gather fedora-dev's OWN
+# answers + create its podman secret (as the invoking rootless user) WITHOUT launching — so
+# day0 never duplicates fedora-dev's questions. Emit the resolved env as `export` lines for
+# the caller to capture (eval), then stop.
+if [ "${COLLECT_ONLY:-0}" = 1 ]; then
+  printf 'export TS_AUTHKEY=%q IMAGE=%q GH_APP_ID=%q GH_APP_INSTALLATION_ID=%q GH_APP_SECRET=%q\n' \
+    "${TS_AUTHKEY:-}" "$IMAGE" "${GH_APP_ID:-}" "${GH_APP_INSTALLATION_ID:-}" "${GH_APP_SECRET:-}"
+  echo "spin-up: collect-only — answers gathered, secret '${GH_APP_SECRET:-<none>}' ready; NOT launching." >&2
+  exit 0
+fi
+
 if [ -n "$TS_AUTHKEY" ]; then
   echo "  -> UNATTENDED tailnet join (TS_AUTHKEY supplied)." >&2
 else
@@ -37,5 +60,5 @@ else
 fi
 [ "$(ask 'Spin up fedora-dev now? (y/n)' y)" = y ] || { echo "aborted (nothing launched)" >&2; exit 0; }
 
-export TS_AUTHKEY IMAGE
+export TS_AUTHKEY IMAGE GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_SECRET
 exec ./run.sh
