@@ -247,4 +247,14 @@ logpath = /var/log/secure
 EOF
 
 dnf clean all
-rm -rf /var/cache/dnf /var/cache/libdnf5
+rm -rf /var/cache/dnf
+# /var/cache/libdnf5 is bind-mounted as the PERSISTENT dnf package cache during
+# cache-backed builds (the host live-gate's build-candidate.sh + in-box
+# bin/build-throwaway.sh both pass -v $HOME/.cache/fd-dnf:/var/cache/libdnf5). Unlinking
+# that mountpoint fails with "Device or resource busy" — the RED that blocked EVERY
+# fedora-dev live-gate build — and wiping its contents would destroy the persistent
+# cache. So only remove it on a PLAIN build (e.g. the --no-cache CI base build) where it
+# is genuine image-layer bloat; skip it when it is a bind-mount (its content never enters
+# the image layer anyway). Detected via /proc/self/mounts — no extra deps, verified to
+# work under both default and --isolation=chroot builds.
+grep -q ' /var/cache/libdnf5 ' /proc/self/mounts || rm -rf /var/cache/libdnf5
