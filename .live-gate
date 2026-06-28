@@ -1,35 +1,31 @@
-# fedora-dev .live-gate — the workload-shipped, self-describing host live-gate (Gate B) contract.
+# fedora-dev .live-gate — host live-gate (Gate B) contract. PARSED, never sourced (printf -v per line).
 # ============================================================================
-# PARSED — NEVER SOURCED — by the host's live-gate (live-gate-run.sh's lg_load reads this file
-# line by line and assigns each KEY=VALUE with `printf -v`; it NEVER `.`/`source`s it, since this
-# file travels in the UNTRUSTED PR head). Declare INERT KEY=VALUE pairs ONLY (one assignment per
-# line, schema keys only, no cross-variable $OTHER refs). Single-quote HEALTH/PROBE so their inner
-# $()/pipes run later INSIDE the fenced candidate (via --health-cmd / `podman exec`), never on the host.
+# THIS BRANCH (test/live-gate-update-cycle) carries a HEAVY probe that proves the claudebox
+# build SUSTAINS AN UPDATE CYCLE — not just initial spin-up. The reported pain: "claudebox build
+# only works on initial container spin up and does not sustain an update cycle." #50 proved only
+# the spin-up half (eager first-boot assemble + lockout). This probe adds the missing half:
+# spin up → verify → run a REAL box-rebuild (rm + re-assemble, the path that historically failed)
+# → re-verify the box came back AND the #45 lockout still holds. It runs on a DISPOSABLE host
+# candidate (torn down) — the throwaway principle at the faithful tier (a fedora-dev candidate runs
+# its OWN nested rootless-podman/distrobox, which can't run faithfully in the already-nested in-box
+# engine). This heavy probe is a ONE-TIME update-cycle proof; the permanent gate (main) stays the
+# light deploy-only #50 probe so routine PR gates stay fast.
 #
-# WHY THIS EXISTS: fedora-dev shipped no in-repo .live-gate, so the host fell back to a preset that
-# only probed the SSH banner on :22 — proving the image builds + sshd serves, but NEVER that the
-# claude-code self-update LOCKOUT (PR #45) actually holds after a real assemble. This contract closes
-# that gap: it gives the eager first-boot claudebox assemble time to complete on the host, then proves
-# the lockout is LIVE — `claude update` is disabled, and no native-build shadow sits on the home volume.
-#
-# Single default target. FENCE = run.sh's contract MINUS the public `-p` and MINUS real secrets/volumes
-# (the nested-rootless-podman caps + devices + label-disable only). HEALTH mirrors run.sh's --health-cmd.
-
+# FENCE = run.sh's contract MINUS the public -p MINUS real secrets/volumes (nested-podman caps/devices).
 CAND_FENCE='--cap-add NET_ADMIN --cap-add SYS_ADMIN --device /dev/net/tun --device /dev/fuse --security-opt label=disable'
 HEALTH='pgrep -x sshd && pgrep -x tailscaled && test -S /run/user/1000/podman/podman.sock'
 
-# Access-path probe (run INSIDE the candidate via `podman exec`): wait for the eager first-boot
-# claudebox assemble, then assert PR #45's lockout LIVE —
-#   (1) the box assembled (.assembled marker);
-#   (2) NO native-build launcher shadow on the home volume (~/.local/bin/claude absent / self-healed);
-#   (3) inside the assembled box, `claude update` is DISABLED — a LOCKED box prints
-#       "...disabled by your administrator" (matches `grep -qi disabled`); an UNLOCKED RPM would
-#       instead print "...managed by a package manager", which does NOT match → RED.
-CAND_PROBE='for i in $(seq 1 72); do [ -e /home/core/.local/state/claudebox/.assembled ] && break; sleep 5; done; [ -e /home/core/.local/state/claudebox/.assembled ] && [ ! -e /home/core/.local/bin/claude ] && runuser -u core -- env XDG_RUNTIME_DIR=/run/user/1000 podman exec claudebox bash -lc "claude update 2>&1 | grep -qi disabled"'
+# PROBE (run INSIDE the candidate via `podman exec`, as root):
+#   PHASE 1 — DEPLOY: wait for the eager first-boot claudebox assemble; assert the box assembled,
+#     no native-build shadow on the home volume, and `claude update` is DISABLED (lockout live).
+#   PHASE 2 — UPDATE CYCLE: clear the .assembled marker, then run the REAL box-rebuild.sh as core
+#     (distrobox rm claudebox + re-assemble + reinstall claude-code from the latest channel + re-stamp
+#     bridges/policy) — the exact "update cycle" that was failing.
+#   PHASE 3 — SUSTAINS: assert the box RE-assembled, still no shadow, claude-code present, and the
+#     lockout STILL holds after the rebuild. Any failure → set -e → RED.
+CAND_PROBE='set -e; A=/home/core/.local/state/claudebox/.assembled; S=/home/core/.local/bin/claude; R(){ runuser -u core -- env XDG_RUNTIME_DIR=/run/user/1000 "$@"; }; for i in $(seq 1 72); do [ -e "$A" ] && break; sleep 5; done; [ -e "$A" ]; [ ! -e "$S" ]; R podman exec claudebox bash -lc "claude update 2>&1 | grep -qi disabled"; echo PHASE1_DEPLOY_OK; rm -f "$A"; R bash /home/core/.local/share/fedora-dev/box-rebuild.sh; [ -e "$A" ]; [ ! -e "$S" ]; R podman exec claudebox bash -lc "claude --version >/dev/null && claude update 2>&1 | grep -qi disabled"; echo PHASE3_UPDATE_CYCLE_OK'
 
-# Gate-imposed headroom + first-boot budget for the nested assemble (toolbox pull + dnf install
-# claude-code ~244 MB) — more than a bare-sshd box; the probe itself also waits up to ~6 min for
-# the .assembled marker.
+# Headroom + budget for TWO assembles (first-boot + the rebuild) on the host throwaway.
 CAND_MEMORY=4g
 CAND_PIDS=2048
 CAND_HEALTH_START=120s
