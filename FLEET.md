@@ -245,8 +245,10 @@ it into a branch + PR, re-entering the loop at step 2.
 
 **Box-to-box handoffs (who picks up what):**
 - **propose → open PR** — any box, on a repo it owns.
-- **STOP at the PR** — `fedora-bootstrap` and `fedora-desktop` are PR-only; their `gate-push.sh`
-  unconditionally denies any push/merge to `main`.
+- **STOP at the PR** — `fedora-bootstrap` and `fedora-desktop` are PR-only; their refspec-aware
+  `gate-push.sh` lets feature-branch pushes run autonomously but **denies** any main-touching push or
+  merge verb (these boxes never merge — there is nothing to approve, so the gate denies rather than
+  asks; only `fedora-dev`'s gate asks, because it is the box that merges).
 - **live-validate → host verdict** — label any repo's PR; `fedora-bootstrap` discovers it org-wide,
   builds disposably per the in-repo `.live-gate` (parsed, never executed), and comments GREEN/RED; the
   owning box iterates on RED (push a fix, or supersede the branch). Human-out until the merge click.
