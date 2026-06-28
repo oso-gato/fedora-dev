@@ -1,9 +1,7 @@
 #!/bin/bash
 # fedora-dev PID 1 (root). Starts:
-#   * rsyslog (collects sshd auth events to /var/log/secure for fail2ban)
-#   * sshd (key-only; mosh rides on it; tailscale --ssh is the keyless tailnet door)
+#   * sshd (key-only + fingerprint-allowlisted; mosh rides on it; tailscale --ssh is the keyless tailnet door)
 #   * tailscaled (+ tailscale up, unattended via TS_AUTHKEY or interactive banner)
-#   * fail2ban (watches /var/log/secure, bans brute-force IPs on public :4444)
 #   * core's rootless podman API socket (CONTAINER_HOST target for the box)
 #   * inotify watcher for in-box claudebox-rebuild flag
 #   * daily-tick loop -> claudebox-daily.sh (rebuild if idle, else defer)
@@ -70,18 +68,10 @@ mkdir -p /run/sshd
 # whatever the cached authorized_keys already permits).
 runuser -u core -- bash /usr/local/bin/sync-authorized-keys.sh || true
 
-# ---- rsyslog: collect sshd auth events to /var/log/secure (fail2ban reads from there)
-/usr/sbin/rsyslogd -n &
-rsyslog_pid=$!
-
 # ---- sshd: reachable on container :22 (host publishes public :4444 via Quadlet) ----
+# Key-only + fingerprint-allowlisted (see sync-authorized-keys.sh above). No fail2ban /
+# rsyslog: there is no password to brute-force on this door, so a jail bought nothing.
 /usr/sbin/sshd
-
-# ---- fail2ban: brute-force protection on the public :4444 path ----
-# Starts after sshd so the log target exists. fail2ban tolerates a missing
-# log file at startup (begins watching once it appears).
-fail2ban-server -xf start &
-fail2ban_pid=$!
 
 # ---- tailscaled --------------------------------------------------------------
 /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state \
@@ -336,8 +326,6 @@ echo "fedora-dev up: ssh :22 (tailnet) + ssh :4444 (public, key-only) + mosh UDP
 while sleep 30; do
     pgrep -x tailscaled         >/dev/null 2>&1 || { echo "tailscaled died";       exit 1; }
     pgrep -x sshd               >/dev/null 2>&1 || { echo "sshd died";             exit 1; }
-    kill -0 "$rsyslog_pid"      2>/dev/null     || { echo "rsyslogd died";         exit 1; }
-    kill -0 "$fail2ban_pid"     2>/dev/null     || { echo "fail2ban-server died";  exit 1; }
     kill -0 "$podman_sock_pid"  2>/dev/null     || { echo "podman socket died";    exit 1; }
     kill -0 "$watcher_pid"      2>/dev/null     || { echo "rebuild watcher died";  exit 1; }
     kill -0 "$tick_pid"         2>/dev/null     || { echo "daily tick died";       exit 1; }
