@@ -12,8 +12,7 @@ FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION}
 COPY install.sh /tmp/install.sh
 RUN bash /tmp/install.sh && rm /tmp/install.sh
 
-# entrypoint (PID 1) + the public-door key allowlist gate it invokes at boot.
-COPY --chmod=755 entrypoint.sh sync-authorized-keys.sh /usr/local/bin/
+COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Box assembly seed — used by entrypoint on FIRST BOOT to seed the live git
 # clone at /home/core/.local/share/fedora-dev/ if GitHub is unreachable. Once

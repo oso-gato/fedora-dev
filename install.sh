@@ -209,20 +209,15 @@ PermitEmptyPasswords no
 MaxAuthTries 3
 PermitRootLogin no
 AllowUsers core
-# Honor ONLY the LOGIN_KEY env directive that sync-authorized-keys.sh stamps on
-# each allowlisted key (environment="LOGIN_KEY=<device>"), so a login is
-# attributable to the key/device that authenticated. Scoped to LOGIN_KEY — not a
-# blanket PermitUserEnvironment. Mirrors the host's sshd_config.d/20-login-key.conf.
-PermitUserEnvironment LOGIN_KEY
 HostKey /var/lib/tailscale/hostkeys/ssh_host_ed25519_key
 EOF
 rm -f /etc/ssh/ssh_host_*_key*   # never ship host keys in a published image
 
 # NOTE: no fail2ban / rsyslog. The public ssh door is KEY-ONLY (PasswordAuthentication
-# no) and fingerprint-ALLOWLISTED (sync-authorized-keys.sh) — there is no password to
-# brute-force, so a fail2ban jail bought nothing here. It also never actually ran: this
-# container has no systemd-journald, and the stock rsyslog reads the journal (not /dev/log),
-# so /var/log/secure stayed empty and the jail saw zero events. Dropped both rather than
+# no; authorized keys = github.com/oso-gato.keys) — there is no password to brute-force,
+# so a fail2ban jail bought nothing here. It also never actually ran: this container has
+# no systemd-journald, and the stock rsyslog reads the journal (not /dev/log), so
+# /var/log/secure stayed empty and the jail saw zero events. Dropped both rather than
 # repair a control with no purpose on a key-only door (decision: keys are the access control).
 
 dnf clean all

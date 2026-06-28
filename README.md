@@ -52,7 +52,7 @@ An image that lives only inside this container is unfinished work. If a task wan
 
 A persistent headless workshop with three access paths and no passwords anywhere:
 
-- **`ssh -p 4444 core@<public-ip>`** → public ssh on host port 4444 → container :22, key-only. Authorized keys are **allowlisted**: at every container start `sync-authorized-keys.sh` pulls `github.com/oso-gato.keys` and authorizes only keys whose SHA256 fingerprint matches the in-image allowlist (any other key on the account is ignored) — the same fingerprint-allowlist gate the host uses.
+- **`ssh -p 4444 core@<public-ip>`** → public ssh on host port 4444 → container :22, key-only. At every container start the entrypoint pulls **all** keys from `github.com/oso-gato.keys` and authorizes them — the GitHub account is the single trust root; manage who can log in by managing the account's keys.
 - **`ssh core@<vps>.<tailnet>.ts.net`** → keyless via Tailscale SSH (tailnet identity, gated by your Tailscale ACL).
 - **`mosh -p 61001:62000 --ssh="ssh -p 4444" core@<public-ip>`** (or via tailnet) → roaming-resilient shell; UDP 61001-62000 published. The non-default UDP range avoids colliding with the bootstrap host's own public mosh-server (which uses the default 60000-61000) — the two services share the same kernel UDP namespace.
 
@@ -82,7 +82,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now fedora-dev.service
 ```
 
-No env files, no secret population. The container's sshd is key-only; **allowlisted** keys come from `github.com/oso-gato.keys` (filtered by the in-image fingerprint allowlist) synced by the entrypoint at every start.
+No env files, no secret population. The container's sshd is key-only; keys come from `github.com/oso-gato.keys` (all of them — the GitHub account is the trust root) synced by the entrypoint at every start.
 
 For unattended tailnet join (optional), create a podman secret first:
 
@@ -123,11 +123,11 @@ The env-driven deploy contract `spin-up.sh` wraps — use it directly when the e
 
 ### First boot
 
-Takes ~2-5 minutes. The entrypoint clones the live spec from this repo, syncs the allowlisted ssh keys from `github.com/oso-gato.keys`, starts sshd + tailscaled, then eagerly assembles claudebox in the background (dnf-installs claude-code + tools inside the box). Subsequent boots are instant. The first `claude` invocation will tail the assemble log if it's still in progress.
+Takes ~2-5 minutes. The entrypoint clones the live spec from this repo, syncs the ssh keys from `github.com/oso-gato.keys`, starts sshd + tailscaled, then eagerly assembles claudebox in the background (dnf-installs claude-code + tools inside the box). Subsequent boots are instant. The first `claude` invocation will tail the assemble log if it's still in progress.
 
 If TS_AUTHKEY isn't set, the tailnet join is interactive — `podman logs -f fedora-dev` to find the login.tailscale.com URL, click it once.
 
-**Public ssh access:** as long as `github.com/oso-gato.keys` is reachable on first boot, public ssh on port 4444 works immediately with any **allowlisted** key (a key whose fingerprint matches the in-image allowlist; other keys on the account are ignored). If GitHub was unreachable on first boot, public ssh stays closed until the entrypoint successfully syncs (every container restart re-tries); Tailscale SSH is unaffected.
+**Public ssh access:** as long as `github.com/oso-gato.keys` is reachable on first boot, public ssh on port 4444 works immediately with any key published on the account. If GitHub was unreachable on first boot, public ssh stays closed until the entrypoint successfully syncs (every container restart re-tries); Tailscale SSH is unaffected.
 
 ## Operating fedora-dev (day-to-day)
 
@@ -209,7 +209,7 @@ fedora-dev is non-systemd: `entrypoint.sh` (PID 1) supervises sshd, tailscaled, 
 ## Notes
 
 - **Nested rootless podman on Debian-family hosts**: if `kernel.unprivileged_userns_apparmor_policy = 1`, nested rootless podman fails with `newuidmap: ... Operation not permitted`. Relax the sysctl, add a scoped AppArmor profile granting `userns,`, or run on a Fedora-family host. (See the SELinux note below for the Fedora confinement trade-off.)
-- **SELinux posture** — the container runs **SELinux-unconfined**: `run.sh` and the Quadlet set `--security-opt label=disable` / `SecurityLabelDisable=true`. This is **intentional and required** — nested rootless podman + fuse-overlayfs on the home volume + the passed `/dev/fuse` and `/dev/net/tun` cannot run under `container_t` confinement. The trade-off: an in-container compromise or escape is bounded only by **rootless + the user namespace** (uid 1000, subuid 10000-64999) and DAC, **not** by SELinux type-enforcement. The **host** stays SELinux-enforcing regardless. Because the container **publishes public ssh:4444 + mosh by default** (the doors are open to the internet, not tailnet-only) and holds credentials, the compensating controls are **key-only sshd gated by a fingerprint allowlist** (only allowlisted keys are authorized) plus **cosign image-signature verification**. For a tighter posture, an operator can drop the public `PublishPort`s from `run.sh` / the Quadlet so ssh/mosh are reachable **only over the tailnet**. Do **not** "fix" the label-disable — it breaks nested builds.
+- **SELinux posture** — the container runs **SELinux-unconfined**: `run.sh` and the Quadlet set `--security-opt label=disable` / `SecurityLabelDisable=true`. This is **intentional and required** — nested rootless podman + fuse-overlayfs on the home volume + the passed `/dev/fuse` and `/dev/net/tun` cannot run under `container_t` confinement. The trade-off: an in-container compromise or escape is bounded only by **rootless + the user namespace** (uid 1000, subuid 10000-64999) and DAC, **not** by SELinux type-enforcement. The **host** stays SELinux-enforcing regardless. Because the container **publishes public ssh:4444 + mosh by default** (the doors are open to the internet, not tailnet-only) and holds credentials, the compensating controls are **key-only sshd** (authorized keys = `github.com/oso-gato.keys`, so the GitHub account's key hygiene is the access policy) plus **cosign image-signature verification**. For a tighter posture, an operator can drop the public `PublishPort`s from `run.sh` / the Quadlet so ssh/mosh are reachable **only over the tailnet**. Do **not** "fix" the label-disable — it breaks nested builds.
 - **Distrobox 2.0 (Go rewrite)** is in RC: same manifest/CLI interface promised. Re-verify on Fedora's first 2.0 ship.
 - **Fedora base bump** (44 → 45 etc.): `ARG FEDORA_VERSION` in Containerfile is the single source of truth. The box's `image=quay.io/fedora/fedora-toolbox:N` line in distrobox.ini must bump in lockstep. Fedora releases EOL ~13 months — plan for twice a year.
 
