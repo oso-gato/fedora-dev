@@ -16,6 +16,16 @@
 set -eu
 IMAGE="${IMAGE:-localhost/fedora-dev:latest}"
 
+# Optional STANDING GitHub credential (so the in-box dev loop never stops for auth):
+#   GH_APP_ID + GH_APP_INSTALLATION_ID + GH_APP_KEY_FILE=<path to the App private-key PEM>.
+# The key is mounted read-only into tmpfs at /run/secrets/gh_app_key (never persisted to
+# the image or the home volume). A static GH_TOKEN is also honored if exported instead.
+gh_args=()
+[ -n "${GH_APP_ID:-}" ]              && gh_args+=( -e "GH_APP_ID=${GH_APP_ID}" )
+[ -n "${GH_APP_INSTALLATION_ID:-}" ] && gh_args+=( -e "GH_APP_INSTALLATION_ID=${GH_APP_INSTALLATION_ID}" )
+[ -n "${GH_TOKEN:-}" ]               && gh_args+=( -e "GH_TOKEN=${GH_TOKEN}" )
+[ -n "${GH_APP_KEY_FILE:-}" ]        && gh_args+=( -v "${GH_APP_KEY_FILE}:/run/secrets/gh_app_key:ro" )
+
 podman run -d --name fedora-dev \
     --hostname fedora-dev \
     --restart=always \
@@ -25,6 +35,7 @@ podman run -d --name fedora-dev \
     --device /dev/fuse \
     --security-opt label=disable \
     -e TS_AUTHKEY="${TS_AUTHKEY:-}" \
+    "${gh_args[@]}" \
     -v fedora-dev-home:/home/core \
     -v fedora-dev-state:/var/lib/tailscale \
     -p 4444:22 \
