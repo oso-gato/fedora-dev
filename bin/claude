@@ -61,9 +61,30 @@ fi
 # (always the latest Opus, currently 4.8) restores the pre-downgrade default
 # and is immune to future client default-model changes. Still overridable
 # mid-session via /model.
-flock -s "$state/session.lock" \
-    distrobox enter claudebox -- bash -lc 'exec /usr/bin/claude --model opus --settings "{\"ultracode\":true}" "$@"' bash "$@"
-rc=$?
+#
+# Retry the transient post-rebuild OCI/PTY race: right after a box rebuild the freshly (re)started
+# container's /dev/pts can need a moment before an interactive `podman exec` can allocate a
+# pseudo-terminal, so the FIRST `distrobox enter` can fail with
+#     Error: OCI runtime error: crun: ptsname: Inappropriate ioctl for device
+# distrobox-enter ends in `exec "$@"` (it execs into `podman exec`), so podman's exit code reaches us
+# verbatim through flock. 125/126 are podman/OCI exec-SETUP failures: a session that actually started
+# returns its OWN code (claude is a Node app that exits 0/1/130, not these), so they uniquely mark
+# "couldn't enter yet" and are the only codes safe to retry. Bounded to 6 retries, short escalating
+# backoff capped at 4s (~18s total — comfortably past the observed ~15s warmup window). Every other
+# outcome breaks out at once and is surfaced unchanged: success, Ctrl-C=130, a genuine nonzero — and
+# the start-phase path (a box that is NOT already running enters via distrobox's start block, which
+# returns 1, not 125/126; that path boots PID 1 with no interactive pty, so /dev/pts has settled
+# before the exec and the ptsname race does not arise there — it is intentionally not retried).
+attempt=0
+while :; do
+    flock -s "$state/session.lock" \
+        distrobox enter claudebox -- bash -lc 'exec /usr/bin/claude --model opus --settings "{\"ultracode\":true}" "$@"' bash "$@"
+    rc=$?
+    { [ "$rc" -eq 125 ] || [ "$rc" -eq 126 ]; } && [ "$attempt" -lt 6 ] || break
+    attempt=$((attempt + 1))
+    printf >&2 '>> claudebox is still warming up after the rebuild — retrying entry (%d/6)…\n' "$attempt"
+    sleep "$(( attempt < 4 ? attempt : 4 ))"
+done
 
 # Post-session: follow a Claude-triggered rebuild, or fire a deferred daily one.
 if rebuild_in_progress; then
