@@ -210,6 +210,11 @@ PermitEmptyPasswords no
 MaxAuthTries 3
 PermitRootLogin no
 AllowUsers core
+# Honor ONLY the LOGIN_KEY env directive that sync-authorized-keys.sh stamps on
+# each allowlisted key (environment="LOGIN_KEY=<device>"), so a login is
+# attributable to the key/device that authenticated. Scoped to LOGIN_KEY — not a
+# blanket PermitUserEnvironment. Mirrors the host's sshd_config.d/20-login-key.conf.
+PermitUserEnvironment LOGIN_KEY
 HostKey /var/lib/tailscale/hostkeys/ssh_host_ed25519_key
 # AUTHPRIV so rsyslog captures auth events to /var/log/secure for fail2ban.
 SyslogFacility AUTHPRIV
