@@ -100,6 +100,19 @@ podman secret create fedora-dev-ts-authkey -    # paste your tskey-... and Ctrl-
 
 The fleet-consistent entry point (mirrors `fedora-desktop/spin-up.sh`): it **ASKS for a Tailscale auth key** (`tskey-…`) and the image ref, then hands off to `run.sh`. Give a key for an **unattended** tailnet join; leave it **blank** to fall back to the one-time `login.tailscale.com` **web-login** (URL in `podman logs -f fedora-dev`). Never hand-roll `podman run`.
 
+### Credentials: the Tailscale auth key + an optional standing GitHub App
+
+`spin-up.sh` asks two credential questions; both are **optional + fail-safe**.
+
+**Tailscale auth key** (`tskey-…`) — generate it in the Tailscale admin console → **Settings → Keys → Generate auth key** (optionally *Reusable* / *Ephemeral* / *Pre-approved*). Paste it for an **unattended** join; leave blank for the one-time `login.tailscale.com` web-login.
+
+**Standing GitHub App credential** (optional) — so the in-box dev loop's `git push` / `gh pr` / label steps authenticate with **no human and no expiring token**. Decline it and the box uses your `gh auth login` (which persists on the home volume) instead.
+
+1. **Create the App once** — github.com → your avatar → **Settings → Developer settings → GitHub Apps → New GitHub App** (owned by `oso-gato`): uncheck **Webhook → Active**; **Repository permissions** = Contents **R/W**, Pull requests **R/W**, Workflows **R/W**; **Create** → copy the **App ID**; **Generate a private key** (downloads a `.pem`); **Install** the App on your repos → copy the **Installation ID** (it's in the install URL).
+2. **Provide it at spin-up** — answer `y` to the App prompt, then paste the **App ID**, the **Installation ID**, and the **private-key PEM** (end the paste with a line `END`). The PEM streams straight into a **podman secret** (mounted read-only at `/run/secrets/gh_app_key`) — **never written to a file**; the box mints a fresh ≤1h installation token from it on each boot. App ID / Installation ID are public; only the PEM is secret.
+
+*(Scripted path: pre-set `GH_APP_ID` + `GH_APP_INSTALLATION_ID`, create the `gh_app_key` podman secret yourself, and set `GH_APP_SECRET=gh_app_key` for `run.sh`.)*
+
 ### run.sh (non-interactive / scripted / non-systemd hosts)
 
 ```sh
