@@ -208,7 +208,7 @@ scan_text() {
 # — at least one EXPLICIT refspec after the remote, every DESTINATION an explicit
 # non-main, non-HEAD, non-tag branch. FAIL CLOSED: any ambiguity → false (→ ASK).
 is_safe_push() {
-    local raw="$1" text after remote tok dst
+    local raw="$1" text after remote tok dst ndst
 
     # whole-repo pushes are never "feature-safe" (normalize strips these flags,
     # so test the RAW text).
@@ -253,9 +253,16 @@ is_safe_push() {
         esac
         [ -n "$dst" ] || return 1            # empty destination → ambiguous
         case "$dst" in
-            main|refs/heads/main) return 1;; # would land on main
             HEAD|HEAD*)           return 1;; # HEAD or HEAD-relative (ambiguous)
             refs/tags/*)          return 1;; # a tag destination
+        esac
+        # git resolves an unqualified push destination (`main`, `heads/main`) to
+        # refs/heads/main, so strip the optional refs/ + heads/ qualifiers before
+        # the main test — otherwise `git push origin x:heads/main` would slip past
+        # as a "feature branch" and land on main with no gate.
+        ndst="${dst#refs/}"; ndst="${ndst#heads/}"
+        case "$ndst" in
+            main) return 1;;                 # any spelling that resolves to main
         esac
     done
     return 0
