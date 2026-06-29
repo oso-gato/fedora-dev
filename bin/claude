@@ -53,8 +53,16 @@ if [ ! -e "$state/.assembled" ]; then
 fi
 
 # Hold the SHARED session lock for the session's lifetime.
+# --model opus: ultracode (injected via --settings below) requires an
+# xhigh-capable model. claude-code 2.1.195 changed the DEFAULT model to
+# Sonnet 4.6, which has no ultracode mode — so after a rebuild to that client
+# the box silently booted at a downgraded model and ultracode vanished, even
+# though the --settings injection was unchanged. Pinning the `opus` alias
+# (always the latest Opus, currently 4.8) restores the pre-downgrade default
+# and is immune to future client default-model changes. Still overridable
+# mid-session via /model.
 flock -s "$state/session.lock" \
-    distrobox enter claudebox -- bash -lc 'exec /usr/bin/claude --settings "{\"ultracode\":true}" "$@"' bash "$@"
+    distrobox enter claudebox -- bash -lc 'exec /usr/bin/claude --model opus --settings "{\"ultracode\":true}" "$@"' bash "$@"
 rc=$?
 
 # Post-session: follow a Claude-triggered rebuild, or fire a deferred daily one.
