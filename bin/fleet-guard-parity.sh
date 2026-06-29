@@ -85,6 +85,19 @@ for r in "${parts[@]}"; do
   [ "$p" = "$cprov" ] && ok "$r provenance matches $canon" || bad "$r provenance DIFFERS from $canon ($p)"
 done
 
+# CHECK 4 — policy/CLAUDE.md THE FLEET block byte-identical fleet-wide. This block is asserted
+# IDENTICAL in its heading ("identical block in fedora-dev / fedora-bootstrap / fedora-desktop").
+# Drift here means one box is operating under a different merge model or gate description than the
+# others — exactly the kind of silent divergence this script exists to catch.
+hr "CHECK 4: policy/CLAUDE.md THE FLEET block parity (canonical: $canon)"
+extract_fleet(){ awk 'p && /^## /{ exit } /^## THE FLEET/{ p=1 } p'; }
+cfleet="$(fetch "$canon" policy/CLAUDE.md | extract_fleet | sha256sum | cut -d' ' -f1)"
+for r in "${parts[@]}"; do
+  s="$(fetch "$r" policy/CLAUDE.md | extract_fleet | sha256sum | cut -d' ' -f1)"
+  [ "$s" = "$cfleet" ] && ok "$r THE FLEET block matches $canon" \
+                       || bad "$r THE FLEET block DIFFERS from $canon"
+done
+
 hr "VERDICT"
 if [ "$fail" = 0 ]; then
   echo "GREEN — shared claude-code guard payload is consistent across: ${parts[*]}"
