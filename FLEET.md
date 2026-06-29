@@ -31,8 +31,10 @@ Mechanically enforced by the **refspec-aware** `gate-push.sh` PreToolUse hook (r
 pushes run autonomously; only a push that could touch `main` plus the merge verbs route to an
 in-session clickable `ask` only Arthur can answer — there is no approval-marker mechanism) +
 `managed-settings.json`: the in-session `gate-push.sh` clickable gate (Arthur's click) is the sole
-backstop — `main` is intentionally not branch-protected and there is no CI label-gate (single-operator
-fleet: the click already gates every merge).
+backstop. A loop-neutral **`require-PR` ruleset** on `main` (no required reviews or status checks)
+is active on all three repos — it forces every change through a PR, closing the headless `claude -p`
+bypass; `main` has no required-review branch protection and no CI label-gate beyond this thin floor
+(the click already gates every merge).
 
 ## The three boxes
 
@@ -307,8 +309,10 @@ it into a branch + PR, re-entering the loop at step 2.
   builds disposably per the in-repo `.live-gate` (parsed, never executed), and comments GREEN/RED; the
   owning box iterates on RED (push a fix, or supersede the branch). Human-out until the merge click.
 - **APPROVE → merge** — Arthur clicks; `fedora-dev` merges (sole authority, control-plane included);
-  the in-session `gate-push.sh` clickable gate (Arthur's click) is the sole backstop — `main` is
-  intentionally not branch-protected and there is no CI label-gate (single-operator fleet: the click
+  the in-session `gate-push.sh` clickable gate (Arthur's click) is the sole backstop. A
+  loop-neutral **`require-PR` ruleset** on `main` (no required reviews or status checks) is active
+  fleet-wide — it forces every change through a PR, closing the headless `claude -p` bypass; `main`
+  has no required-review branch protection and no CI label-gate beyond this thin floor (the click
   already gates every merge).
 - **merged → deploy** — `fedora-bootstrap` pulls + redeploys via `workload-refresh@<name>`.
 - **wrong box** — a box asked to do another box's step STOP-AND-SURFACEs for the human to re-route.
