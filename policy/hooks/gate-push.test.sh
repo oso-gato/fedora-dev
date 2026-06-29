@@ -93,6 +93,8 @@ check ASK 'git push origin refs/tags/v1'
 check ASK 'gh pr merge 5'
 check ASK 'gh pr create --squash'
 check ASK 'gh api repos/o/r/merges -f base=main'
+check ASK 'gh api -X PATCH repos/oso-gato/fedora-dev/git/refs/heads/main -f sha=abc123'
+check ASK 'gh api repos/oso-gato/fedora-dev/git/refs -f ref=refs/heads/main -f sha=abc123'
 
 echo "== ASK (adversarial: chained / quoted / escaped / variable evasions to main) =="
 check ASK 'git push origin main && git push origin feat/x'

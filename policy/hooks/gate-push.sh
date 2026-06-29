@@ -191,6 +191,12 @@ scan_merge_verbs() {
     # (mergePullRequest / mergeBranch). Broad on purpose; fail closed.
     printf '%s' "$text" | grep -Eq '(^|[^[:alnum:]_./-])gh[[:space:]]+api([[:space:]]|$)' \
         && printf '%s' "$raw" | grep -Eqi 'merge' && return 0
+    # gh api … refs/heads/main — REST ref-update (PATCH) and ref-creation (POST).
+    # `gh api -X PATCH …/git/refs/heads/main` carries no merge substring and no
+    # `git push`, so the two checks above both miss it. Catch it here: any `gh api`
+    # call whose arguments contain the canonical main-ref path shape is gated.
+    printf '%s' "$text" | grep -Eq '(^|[^[:alnum:]_./-])gh[[:space:]]+api([[:space:]]|$)' \
+        && printf '%s' "$raw" | grep -Eq 'refs/heads/main|git/refs/heads/main' && return 0
     return 1
 }
 
