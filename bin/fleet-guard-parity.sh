@@ -85,17 +85,22 @@ for r in "${parts[@]}"; do
   [ "$p" = "$cprov" ] && ok "$r provenance matches $canon" || bad "$r provenance DIFFERS from $canon ($p)"
 done
 
-# CHECK 4 — policy/CLAUDE.md THE FLEET block byte-identical fleet-wide. This block is asserted
-# IDENTICAL in its heading ("identical block in fedora-dev / fedora-bootstrap / fedora-desktop").
-# Drift here means one box is operating under a different merge model or gate description than the
-# others — exactly the kind of silent divergence this script exists to catch.
-hr "CHECK 4: policy/CLAUDE.md THE FLEET block parity (canonical: $canon)"
-extract_fleet(){ awk 'p && /^## /{ exit } /^## THE FLEET/{ p=1 } p'; }
-cfleet="$(fetch "$canon" policy/CLAUDE.md | extract_fleet | sha256sum | cut -d' ' -f1)"
+# CHECK 4 — B-mode assembly in effect fleet-wide: fleet-core.md present in $canon (the master);
+# per-box policy/CLAUDE.md deltas carry the <!--FLEET-CORE--> marker and NO stale THE FLEET
+# section heading. A repo missing the marker or still carrying the section is drifted back to
+# the old vendored-identical model (A), which means its stamp will not assemble correctly.
+hr "CHECK 4: fleet-core.md in $canon; per-box deltas carry marker + no stale THE FLEET section"
+fc="$(fetch "$canon" policy/fleet-core.md)"
+[ -n "$fc" ] && ok "$canon policy/fleet-core.md present ($(printf '%s' "$fc" | wc -c) bytes)" \
+             || bad "$canon policy/fleet-core.md MISSING or empty — fleet-core.md must live in $canon"
 for r in "${parts[@]}"; do
-  s="$(fetch "$r" policy/CLAUDE.md | extract_fleet | sha256sum | cut -d' ' -f1)"
-  [ "$s" = "$cfleet" ] && ok "$r THE FLEET block matches $canon" \
-                       || bad "$r THE FLEET block DIFFERS from $canon"
+  delta="$(fetch "$r" policy/CLAUDE.md)"
+  printf '%s\n' "$delta" | grep -q '<!--FLEET-CORE-->' \
+      && ok  "$r policy/CLAUDE.md has <!--FLEET-CORE--> marker" \
+      || bad "$r policy/CLAUDE.md MISSING <!--FLEET-CORE--> marker"
+  printf '%s\n' "$delta" | grep -q '^## THE FLEET' \
+      && bad "$r policy/CLAUDE.md still has THE FLEET section heading (should be in fleet-core.md only)" \
+      || ok  "$r policy/CLAUDE.md delta: no stale THE FLEET section"
 done
 
 hr "VERDICT"

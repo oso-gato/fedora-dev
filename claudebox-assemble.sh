@@ -120,8 +120,15 @@ podman exec claudebox bash "/run/host$LIVE/claudebox-init.sh" "$(id -u)"
 
 echo "==== post-assemble: stamp enterprise policy into the box ===="
 podman exec claudebox mkdir -p /etc/claude-code
-podman exec claudebox cp \
-    "/run/host$LIVE/policy/CLAUDE.md" /etc/claude-code/CLAUDE.md
+# Assemble the law: per-box header + <!--FLEET-CORE--> marker replaced by fleet-core.md
+# (fleet-core.md = THE FLEET + THE SELF-SUSTAINING APPARATUS, mastered in fedora-dev).
+# Both files are in the SAME live clone ($LIVE), so no network fetch is needed here.
+_law=$(mktemp /tmp/assembled-law-XXXXXX)
+sed -e "/<!--FLEET-CORE-->/r ${LIVE}/policy/fleet-core.md" \
+    -e "/<!--FLEET-CORE-->/d" \
+    "${LIVE}/policy/CLAUDE.md" > "$_law"
+podman exec claudebox cp "/run/host${_law}" /etc/claude-code/CLAUDE.md
+rm -f "$_law"
 podman exec claudebox cp \
     "/run/host$LIVE/policy/managed-settings.json" /etc/claude-code/managed-settings.json
 
