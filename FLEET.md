@@ -129,42 +129,9 @@ One loop, the same shape for every repo — only the tail differs (image repos p
 as a branch, carried as a **PR**, proven on the host, merged by one authority, then deployed. No box
 skips a step; a box asked to do another box's step **STOP-AND-SURFACE**s.
 
-### The autonomy mandate — the apparatus keeps the human out of the loop
+### The autonomy mandate, two-tier validation, and DoD
 
-`fedora-dev` + `fedora-bootstrap` are ONE **self-sustaining development apparatus** whose primary
-purpose is to keep the human OUT of the loop until genuinely needed. The owning box does MOST of the
-work + thinking: when there are options it **BUILDS 2–3, tests them** (a throwaway candidate — built
-and validated IN-BOX by default; see *Two-tier validation* below), **DISCARDS** the ones that don't
-fit, and **LANDS the answer ITSELF** — it recommends AND self-tests rather than shopping options; it
-**TEARS DOWN and REBUILDS to a ZERO-BASE** rather than defending a first draft. Presenting an
-options-decision is RARE.
-
-**Two-tier validation — the throwaway is validated at the right tier (NOT every change to the host).**
-**Tier 1 — IN-BOX (the DEFAULT):** the owning box's `podman build` IS the throwaway — it develops,
-validates, and iterates in its OWN nested engine (build → validate → fix → rebuild, rinse/repeat) for
-everything it CAN build+validate itself; NO host involvement; this is where the bulk of the loop runs.
-**Tier 2 — HOST (ONLY two scenarios, engaged via the `live-validate` label):** (1) the box **cannot**
-build/validate the throwaway itself (e.g. the systemd-PID-1 GRD lineage can't boot in the nested
-engine; any instance the nested engine can't fully build+run) → the host runs the throwaway
-build+validate (Gate B); (2) **final pre-production shipment** — after ALL in-box iterations are done,
-ticket the host to build a throwaway, prove it works LIVE on a real host, then tear it down → THEN
-present merge-to-main. In-box iteration does NOT touch the host.
-
-**Throwaway tree & churn (build discipline).** Disposable throwaway — never the live tree. Persistent dnf package cache (bind-mounted plain dir, NOT a layer; survives every `rmi`). EXIT-trap teardown, orphan sweeper, bounded cache GC. **Never `--no-cache`/prune during churn.** Full mechanics: this repo's `CLAUDE.md` Principle 10.
-
-**Engage the human for EXACTLY TWO reasons** (no others): (1) **MATERIALLY COMPLETE** → the clickable
-APPROVE to merge; (2) **MATERIALLY BLOCKED** → a genuine-roadblock decision (not a merge).
-Status-confirmation, option-shopping, and "which should I do" are NOT reasons to engage.
-
-**Definition of done** — a change goes to the human only when ALL hold: the FULL objective is
-materially achieved (the whole objective, not a ~5% slice); it is validated through the loop at the
-right tier (Tier-1 in-box build + assembly GREEN for what the box can validate itself, and the host
-live-gate GREEN only where Tier 2 applies — proven, not merely built); it adheres to the
-build/source principles; and a TLDR is written and **critically self-examined** (options
-considered+discarded, reasoning, fit to both the design and the task objective, genuine gaps) —
-dry-run AS IF the human against the total objective, returning to the loop if it fails its own
-scrutiny. The **PR is the agent's proof of work**; the self-checked TLDR is the final step before the
-human. (Full law: each repo's `policy/CLAUDE.md`.)
+Full law: `policy/CLAUDE.md` (THE SELF-SUSTAINING APPARATUS section); always in context for the active box. Loop mechanics — steps 1–9 below.
 
 1. **Intake & route.** A request lands on the box that *owns* the affected repo — the box that can
    both develop **and** operate/diagnose it. `fedora-dev` owns image-source development for every image

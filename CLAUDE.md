@@ -82,13 +82,17 @@ likewise headless — a *virtual* display rendered by software GL (llvmpipe), re
 network (ssh / RDP / VNC / web). A change that makes any part depend on a real display, GPU, or
 physical seat is a **defect**, not an option.
 
+
+## DOC ARCHITECTURE — DRY rule (binding)
+
+One authoritative home per concept; every other mention is a one-line pointer or deleted. Evidence and benchmarks live only in the principle they prove. Fleet-wide identical blocks are enforced by CI (`bin/fleet-guard-parity.sh`).
+
+**Layer roles.** `policy/CLAUDE.md` = binding law (stamped at every box rebuild; always in context) — owns autonomy mandate, two-tier validation, DoD, merge gate, and control-plane class. `CLAUDE.md` (this file) = per-repo build rules (BUILD PRINCIPLES table) + per-file purpose map. `FLEET.md` = cross-box map (human + agent-accessible); shared sections fleet-wide. `README.md` = human-only; not an authoritative source for any agent rule.
+
 ## BUILD PRINCIPLES (binding for every code change)
 
-**Principle 0 — the self-sustaining apparatus (primary purpose, precedes all others).** `fedora-dev` + `fedora-bootstrap` are ONE self-sustaining development apparatus whose primary purpose is to keep the human OUT of the loop until genuinely needed. The agent does MOST of the work + thinking: when there are options it **BUILDS 2–3, tests them** (throwaway build — IN-BOX by default; host live-gate only where Tier 2 applies, see *TWO-TIER VALIDATION* below), **DISCARDS** the wrong ones, and **LANDS the answer ITSELF** — it recommends AND self-tests rather than option-shopping; it **TEARS DOWN and REBUILDS to a ZERO-BASE** rather than defending a first draft; presenting an options-decision is RARE. Engage the human for **EXACTLY TWO reasons**: (1) MATERIALLY COMPLETE → the clickable APPROVE to merge, or (2) MATERIALLY BLOCKED → a genuine-roadblock decision (not a merge). Status-confirmation / option-shopping / "which should I do" are NOT reasons to engage. The **PR is the agent's PROOF OF WORK.** Full text: the *THE SELF-SUSTAINING APPARATUS — AUTONOMY MANDATE & DEFINITION OF DONE* section of `policy/CLAUDE.md`.
+**Principle 0 — the self-sustaining apparatus.** Autonomy mandate, two-tier validation, and Definition of Done live in `policy/CLAUDE.md` (THE SELF-SUSTAINING APPARATUS section); that law is always in context. BUILD PRINCIPLES 1–11 below are this repo's per-build rules.
 
-**DEFINITION OF DONE (every change — gates presenting to the human).** Done only when ALL hold: (1) the **FULL objective** is materially achieved (the whole objective, not a ~5% rabbit-hole slice); (2) **validated through the loop at the RIGHT tier** — Tier-1 in-box build + assembly GREEN for everything the dev box can validate itself, and the host live-gate verdict GREEN only where Tier 2 applies (the dev box can't validate it, OR the final pre-production shipment); (3) adheres to the BUILD PRINCIPLES below; (4) a **TLDR** is written and the agent has **CRITICALLY SELF-EXAMINED** it (options considered+discarded, reasoning, fit to BOTH the design AND the task objective, genuine gaps/forks/concessions), dry-running it AS IF the human against the total objective — if the TLDR fails its own scrutiny the agent returns to the loop and does NOT present. The TLDR is the final step before the human.
-
-**TWO-TIER VALIDATION (the throwaway is validated at the RIGHT tier — corrects "every change goes to the host live-gate").** **Tier 1 — IN-BOX (the DEFAULT):** the dev box's `podman build` IS the throwaway — `fedora-dev` develops, validates, and iterates IN its own nested engine (build → validate → fix → rebuild, rinse/repeat) for EVERYTHING it CAN build+validate itself; NO host involvement; the overwhelming majority of the loop runs here. **Tier 2 — HOST (ONLY two scenarios, via the `live-validate` label):** (1) the dev box **cannot** build/validate the throwaway (e.g. the systemd-PID-1 GRD lineage can't boot in the nested engine; any instance the nested engine can't fully build+run) → the host does the throwaway build+validate; (2) **FINAL pre-production shipment** — after ALL in-box iterations are done, ticket the host to build a throwaway, prove it works LIVE on a real host, then tear it down → THEN present merge-to-main. In-box iteration does NOT touch the host. Full text: `policy/CLAUDE.md`.
 
 | # | Principle | Rule |
 |---|---|---|
