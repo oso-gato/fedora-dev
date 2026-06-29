@@ -27,20 +27,16 @@ Everyone opens PRs; **only `fedora-dev` merges** — any PR (its own + control-p
 
 ### How the box works with you — the autonomy contract
 
-The box (together with the host box) is **one self-sustaining apparatus** built to keep you OUT of the loop until you're genuinely needed. It does **most of the work and the thinking**: when there are options it **builds two or three, tests them itself** (a throwaway candidate it builds and checks inside its own engine), throws away the ones that don't fit, and **lands the right answer on its own** — it won't ask you which to pick, and it'll tear down and rebuild its own first draft to get there. The **PR is its proof of work.**
+The box (together with the host box) is **one self-sustaining apparatus** that keeps you OUT of the loop until genuinely needed. It builds options, tests them in its own engine, discards the ones that don't fit, and lands the right answer on its own — the **PR is its proof of work**. It comes to you for **exactly two reasons**: (1) to approve a finished, validated change (your one click), or (2) a genuine roadblock it can't resolve. Status updates and option-shopping aren't among them.
 
-**Where it tests — two tiers.** Most of the time the box validates the throwaway **itself, in its own nested engine** — build, check, fix, rebuild, over and over, with no host involved. It only hands a throwaway to the **host** for two reasons: when it **can't** run the test itself (some images — like the full systemd desktop — can't boot inside the box), or for the **final pre-production check**, where the host builds it, proves it works live on a real machine, tears it down, and only then is it presented for merge. Either way the test build is a **throwaway**: it never touches the immutable live system, it's built on the box's own writable storage, it still verifies every download's signature, and it's deleted afterwards — while the caches are kept, so iterating fifty times doesn't re-download fifty times.
-
-**Why iterating costs almost nothing — the package cache is kept, everything else is thrown away.** The one thing the box keeps between attempts is a **package cache** — the actual downloaded RPMs, sitting in plain storage on the box's own writable disk, **not inside any image**, so it survives every candidate (and its build layers) being deleted. It isn't tied to a particular PR or commit; it's shared across every iteration. Even when a change *does* alter what gets installed (say, adding a tool), the install step re-runs but the packages come straight from that cache instead of being fetched again — measured: a forced re-run downloaded **nothing at all (0 bytes, versus 9.4 MiB the cold first time) and ran about 3.7× faster**; only a genuinely new package is fetched, once, and then it too joins the cache. The box deliberately does **not** try to keep each candidate's half-finished build layers around: throwing the candidate away takes its layers with it, and that's a feature — (a) the disk **never quietly fills up** with stale build layers (nothing extra to garbage-collect), and (b) every fresh attempt is **rebuilt from the package cache against the current versions**, so a frozen old layer can never go stale on you — all for the price of a few seconds of local CPU (about 3.6 s when warm), never another download. (When a candidate is still around — back-to-back tweaks, or one kept on purpose — its finished layers are reused too and even that work is skipped; it's simply never depended on once the candidate is gone.) Each test build is also kept separate from every other — its own temp tree, its own uniquely-named candidate image and run container — so parallel or back-to-back builds never step on each other, and because the cache is keyed by content it can never hand back the wrong version. And because the VPS has limited disk, three safety nets keep storage in check: the candidate cleans itself up whether the test passes, fails, or crashes; a sweeper reaps anything a hard crash leaves behind; and a cap keeps the package cache from ever growing without bound — dropping anything older than **45 days** first, then trimming oldest-first to stay under **15 GB** (both adjustable).
-
-It comes to you for **exactly two reasons**: (1) to **approve a finished, materially-complete change** for merge (your one click), or (2) to **resolve a genuine roadblock** it can't get past on its own. Status updates and "which should I do?" aren't among them. A change is **done** only when it's been validated at the right tier **and** the box has written a short TLDR and critically checked it against the whole objective — so what reaches you is proven work with a self-checked summary, not a first draft.
+Full law (autonomy mandate, two-tier validation, DoD): [`policy/CLAUDE.md`](policy/CLAUDE.md) — THE SELF-SUSTAINING APPARATUS section, always in context for the agent.
 
 ## Purpose
 
 `fedora-dev` is a **build environment**. One half of a strict two-agent pipeline:
 
 - **`fedora-dev` (this image)** — Claude Code DEVELOPS and VALIDATION-BUILDS container images here. Output is *pushed git commits* in downstream image repositories. **Never** deploys, **never** manages running containers.
-- **the host's claudebox** (in [`oso-gato/fedora-bootstrap`](https://github.com/oso-gato/fedora-bootstrap)) — Claude Code DEPLOYS and OPERATES those images on the Fedora VPS. **Never** builds.
+- **the host's claudebox** (in [`oso-gato/fedora-bootstrap`](https://github.com/oso-gato/fedora-bootstrap)) — Claude Code DEPLOYS, OPERATES, and LIVE-GATES (disposable candidate builds for pre-merge validation) those images on the Fedora VPS. Production images are built by CI.
 
 ```
 develop HERE → push to GitHub → CI builds → ghcr.io/oso-gato/<name>:latest → host claudebox pulls + recreates
@@ -142,12 +138,7 @@ Detach with `Ctrl-b d`; reattach by logging in again. The tmux session, the clau
 
 #### Multi-device sessions (tmux geometry)
 
-Every ssh/mosh login joins one shared `main` tmux session group, so you can reach the same work from several devices at once (a macOS terminal, an iPad, …). Because a tmux **window has exactly one size** shared by every client viewing it, the session is configured **`window-size latest`**: the **device you most recently typed on wins**, and the whole session rescales to that device's geometry.
-
-- **Switching devices is automatic.** Type on the Mac → the session is Mac-sized; pick up the iPad and type → it rescales to the iPad. A **fresh** login wins **on connect** (no keystroke needed); an **already-connected** device (e.g. a backgrounded mosh session) wins on its **next keystroke** — any key (even an arrow or `Esc`), no command required.
-- **The idle device never garbles.** A larger idle device shows the active (smaller) view top-left with a **blank** letterbox around it (`fill-character ' '`); a smaller idle device shows a clean **crop** that pans to the cursor. When the active device disconnects, the session falls back to whichever device remains.
-- **Inherent limit:** two **different-sized** devices viewing the **same** tab can't both be full-size at once — impossible in tmux (one window = one size). The active one is always full; the other degrades cleanly (never garbled). Devices on **different tabs** are each full-size.
-- **Switch the policy live:** `prefix + g` cycles `latest → smallest → largest`. `smallest` = every device sees the whole session sized to the smallest connected device (good for watching on a phone while working on a desktop); `largest` = the biggest screen always wins.
+All logins join one shared `main` tmux session (`window-size latest` — the last-active device wins and rescales; idle devices crop/letterbox cleanly). `prefix+g` cycles the policy. Full details: [FLEET.md](FLEET.md) — Shared invariants.
 
 Inside the box, the agent uses `podman` to build/test downstream images:
 
@@ -175,27 +166,11 @@ Your Claude login + transcripts survive every rebuild (they live in `~/.claude` 
 
 > **Box rebuild vs. whole-container refresh — what "quitting" triggers.** The three paths above rebuild the *claudebox* (Claude Code + tools) and a deferred one fires the moment you **exit** your session. The separate **monthly whole-container refresh** (the base image, host-driven by fedora-bootstrap) *also* defers while a session is live — but it resumes on an **hourly retry timer once the box goes idle, NOT on session exit**. So: quitting accelerates the daily box rebuild; it does **not** advance a deferred monthly container refresh (that waits up to ~1h for the next retry tick).
 
-### Validation discipline (Principle 9)
+### Validation discipline (Principle 9) and in-box governance
 
-Before declaring any built image "done":
+**Build validation:** build → deploy via `run.sh` → confirm `(healthy)` → functional-probe each access path. Final proof = CI green + host-side live-gate. **Changes to fedora-dev itself:** edit the live clone at `~/.local/share/fedora-dev/`, `gh pr create`, and wait for merge — ad-hoc edits vanish on the next rebuild.
 
-1. **Build** with `podman build -f Containerfile .`
-2. **Deploy locally** via the image's `run.sh` (never hand-roll `podman run` — run.sh carries the `--health-cmd` and the right devices/volumes/restart policy)
-3. **Confirm `(healthy)`** in `podman ps`
-4. **Functional-probe each access path** documented in the image's README
-
-Final proof = CI green on GitHub + a host-side deploy from claudebox-on-the-host. Passing local validation that isn't pushed is unfinished work.
-
-### Propose-and-commit (governance for the in-box agent)
-
-Durable changes to fedora-dev itself — the distrobox.ini spec, scripts, policy — flow through git, not ad-hoc edits:
-
-1. Edit the LIVE clone at `~/.local/share/fedora-dev/` (persists across rebuilds)
-2. `gh pr create` from the clone
-3. Human reviews + merges
-4. Next claudebox rebuild applies the merged change (CI rebuilds the base image too, eventually)
-
-Ad-hoc `dnf install` inside the running box works during the session but vanishes on the next rebuild — by design.
+Full procedure: [`policy/CLAUDE.md`](policy/CLAUDE.md) — PIPELINE + HOW DO I sections, always in context for the agent.
 
 ## Troubleshooting & break-glass
 

@@ -27,14 +27,17 @@ APPROVE** (a free-text "yes" is not approval).
 **Handoff:** propose → open PR → `fedora-dev` lists + presents the PRs → you APPROVE → `fedora-dev`
 merges → CI builds + cosign-signs → GHCR → `fedora-bootstrap` pulls + redeploys. Build is always CI;
 operate/deploy is always `fedora-bootstrap`; merge is always `fedora-dev` (or Arthur on the web).
-Mechanically enforced by the **refspec-aware** `gate-push.sh` PreToolUse hook (routine feature-branch
-pushes run autonomously; only a push that could touch `main` plus the merge verbs route to an
-in-session clickable `ask` only Arthur can answer — there is no approval-marker mechanism) +
-`managed-settings.json`: the in-session `gate-push.sh` clickable gate (Arthur's click) is the sole
-backstop. A loop-neutral **`require-PR` ruleset** on `main` (no required reviews or status checks)
-is active on all three repos — it forces every change through a PR, closing the headless `claude -p`
-bypass; `main` has no required-review branch protection and no CI label-gate beyond this thin floor
-(the click already gates every merge).
+
+**The promotion gate is REFSPEC-AWARE and fail-closed:** routine feature-branch pushes (an explicit
+non-`main`, non-`HEAD`, non-tag destination refspec) run AUTONOMOUSLY with no prompt; only a push
+that could touch `main` (a bare `git push`, a `main`/`HEAD`/`refs/tags/*` destination,
+`--all`/`--mirror`/`--tags`, or any unparseable / quoted / chained target) PLUS the merge verbs
+(`gh pr merge`, `gh pr create --merge|--squash|--rebase|--auto`, `gh api …/merge|/merges`) route to
+an in-session clickable `ask` only Arthur can answer. There is NO approval-marker mechanism (the
+shipped hook uses native `ask`/`deny`). A loop-neutral **`require-PR` ruleset** on `main`
+(no required reviews or status checks) is active on all three repos — it forces every change
+through a PR, closing the headless `claude -p` bypass; `main` has no required-review branch
+protection and no CI label-gate beyond this thin floor (the click already gates every merge).
 
 ## The three boxes
 
@@ -243,12 +246,11 @@ it into a branch + PR, re-entering the loop at step 2.
 - **live-validate → host verdict** — label any repo's PR; `fedora-bootstrap` discovers it org-wide,
   builds disposably per the in-repo `.live-gate` (parsed, never executed), and comments GREEN/RED; the
   owning box iterates on RED (push a fix, or supersede the branch). Human-out until the merge click.
-- **APPROVE → merge** — Arthur clicks; `fedora-dev` merges (sole authority, control-plane included);
-  the in-session `gate-push.sh` clickable gate (Arthur's click) is the sole backstop. A
+- **APPROVE → merge** — Arthur clicks; `fedora-dev` merges (sole authority, control-plane included).
+  The in-session `gate-push.sh` clickable gate (Arthur's click) gates merge verbs in-session; a
   loop-neutral **`require-PR` ruleset** on `main` (no required reviews or status checks) is active
-  fleet-wide — it forces every change through a PR, closing the headless `claude -p` bypass; `main`
-  has no required-review branch protection and no CI label-gate beyond this thin floor (the click
-  already gates every merge).
+  fleet-wide, closing the headless direct-push bypass server-side. `main` has no required-review
+  branch protection and no CI label-gate beyond this thin floor (the click already gates every merge).
 - **merged → deploy** — `fedora-bootstrap` pulls + redeploys via `workload-refresh@<name>`.
 - **wrong box** — a box asked to do another box's step STOP-AND-SURFACEs for the human to re-route.
 
