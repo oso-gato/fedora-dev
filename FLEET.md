@@ -150,39 +150,7 @@ build+validate (Gate B); (2) **final pre-production shipment** — after ALL in-
 ticket the host to build a throwaway, prove it works LIVE on a real host, then tear it down → THEN
 present merge-to-main. In-box iteration does NOT touch the host.
 
-**Throwaway tree & churn (build discipline).** Use the LIVE tree where possible; for anything that must
-DIFFER, bolt on a SEPARATE, TEMPORARY throwaway tree that NEVER mutates the IMMUTABLE live tree (host +
-dev-container base are immutable — the throwaway tree + all build caches live on the WRITABLE home
-volume), STILL obeys provenance (class a/b/c, signature/checksum-verified — no loosening for a
-throwaway), and is THROWN AWAY after the build (disposable `localhost/disposable/<name>:val-<sha>`,
-never pushed, `--rm`/`rmi`'d; temp tree removed on teardown). **Churn balance:** persist the ONE
-durable input — the dnf package cache (a plain bind dir on the home volume, NOT an image layer, so it
-survives `rmi` and every disposal) — and let everything else (candidate image, its layers, temp tree,
-run container) be ephemeral by design. Structure Containerfiles HEAVY/STABLE-EARLY (base, dnf install,
-artifact fetch+verify) and CHURN-LATE (COPY'd scripts/config); NEVER `--no-cache`/prune during churn
-(that's the monthly clean rebuild). **Churn re-downloads NOTHING across N PRs/iterations (proven
-in-box):** the per-PR/per-SHA disposal removes the disposable image + temp tree — and, when it was the
-sole referrer, its intermediate layers too — but NEVER the dnf package cache (not keyed to PR/SHA;
-SHARED across every iteration). One persistent thing, everything else ephemeral by design: (1) the
-persistent dnf **package cache — the ROBUST mechanism**, bind-mounted into the build
-(`-v <home>/.cache/fd-dnf:/var/cache/libdnf5:rw`); a plain dir, NOT an image layer, so it survives
-`rmi` and every disposal. When a PR changes the dnf install line the layer re-runs but the RPMs are
-served from cache, not re-downloaded — proven: a forced dnf re-run downloaded 0 B (vs 9.4 MiB cold),
-3.7× faster; only a genuinely-new package downloads once. (`--mount=type=cache` does NOT work under
-the required `--isolation=chroot` — the bind `-v` package cache is the mechanism.) (2) **ephemeral
-layers — ephemeral by design, and that's the advantage:** a throwaway's layers are pruned with its
-sole candidate's `rmi`, so (a) layer storage self-bounds on the limited VPS (no accumulation, no
-separate layer cache to GC), (b) each throwaway rebuilds fresh from the package cache → current
-package versions, no stale-frozen-layer risk (freshness for free), (c) the only cost is a few local
-CPU-seconds (~3.6 s warm), never bandwidth. While a candidate image still lives (late-layer churn, or
-a kept image) its layer cache also lets the rebuild skip the dnf RUN → zero work — a free accelerator
-— but nothing depends on layers surviving disposal. Each build is isolated — its own throwaway tree +
-unique disposable tag (`val-<sha>`) + unique run container (`vcand-$$`) — so nothing cross-contaminates,
-and the content-addressed dnf package cache (and any live layer cache) can't serve a wrong version.
-Storage stays bounded on the limited VPS by a trio: the candidate self-destructs via a `trap … EXIT`
-(fires on green/red/error), an orphan sweeper reaps anything a crash leaks, and a bounded cache-GC
-caps the dnf package cache age-then-size (RPMs older than 45 days first, then LRU size-prune to ≤15 GB;
-both overridable) — layers self-bound via `rmi`. (Full law: each repo's `policy/CLAUDE.md`.)
+**Throwaway tree & churn (build discipline).** Disposable throwaway — never the live tree. Persistent dnf package cache (bind-mounted plain dir, NOT a layer; survives every `rmi`). EXIT-trap teardown, orphan sweeper, bounded cache GC. **Never `--no-cache`/prune during churn.** Full mechanics: this repo's `CLAUDE.md` Principle 10.
 
 **Engage the human for EXACTLY TWO reasons** (no others): (1) **MATERIALLY COMPLETE** → the clickable
 APPROVE to merge; (2) **MATERIALLY BLOCKED** → a genuine-roadblock decision (not a merge).
