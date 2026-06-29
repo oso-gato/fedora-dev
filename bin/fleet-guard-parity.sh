@@ -103,6 +103,40 @@ for r in "${parts[@]}"; do
       || ok  "$r policy/CLAUDE.md delta: no stale THE FLEET section"
 done
 
+# CHECK 5 — gate-push.sh terminal-verb invariant for PR-only boxes.
+# fedora-dev's gate routes main-touching pushes to `ask` (Arthur's click); the PR-only boxes
+# (fedora-bootstrap, fedora-desktop) must route them to `deny` — they never merge, so `ask`
+# has nothing to approve and would produce confusing prompts Arthur can't safely action.
+# A PR that silently promotes a PR-only box's deny() to ask() passes managed-settings.json
+# parity (CHECK 1) and all other checks — this catch makes that promotion LOUD.
+hr "CHECK 5: gate-push.sh terminal verb — PR-only boxes must deny, not ask"
+pr_only_repos=()
+for r in "${parts[@]}"; do
+  [ "$r" = "fedora-dev" ] && continue
+  pr_only_repos+=("$r")
+done
+if [ "${#pr_only_repos[@]}" -eq 0 ]; then
+  ok "no PR-only boxes in participating set — skip"
+else
+  for r in "${pr_only_repos[@]}"; do
+    gate="$(fetch "$r" policy/hooks/gate-push.sh)"
+    if [ -z "$gate" ]; then
+      bad "$r policy/hooks/gate-push.sh: fetch failed or empty"
+      continue
+    fi
+    has_deny=0; has_ask=0
+    printf '%s\n' "$gate" | grep -q 'permissionDecision.*deny' && has_deny=1
+    printf '%s\n' "$gate" | grep -q 'permissionDecision.*ask'  && has_ask=1
+    if [ "$has_deny" -eq 1 ] && [ "$has_ask" -eq 0 ]; then
+      ok "$r gate-push.sh: deny present, ask absent (correct for a PR-only box)"
+    elif [ "$has_deny" -eq 0 ]; then
+      bad "$r gate-push.sh: deny MISSING — a PR-only box must use deny() not ask()"
+    else
+      bad "$r gate-push.sh: ask present — a PR-only box must use deny(), not ask(); a PR may have silently promoted the terminal verb"
+    fi
+  done
+fi
+
 hr "VERDICT"
 if [ "$fail" = 0 ]; then
   echo "GREEN — shared claude-code guard payload is consistent across: ${parts[*]}"

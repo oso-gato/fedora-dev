@@ -71,9 +71,13 @@
 #   PreToolUse hooks do NOT fire under `claude -p` (headless) — anthropics/claude-code
 #   #40506 — so a maliciously-injected agent that spawns `claude -p` bypasses THIS hook.
 #   Hard containment of a HOSTILE in-box agent is Arthur's in-session click + managed-settings
-#   (allowManagedHooksOnly + allowManagedPermissionRulesOnly + disableBypassPermissionsMode);
-#   server-side branch protection is intentionally NOT enabled for this single-operator fleet.
-#   This gate stops the realistic case: the agent merging to `main` without Arthur's explicit
+#   (allowManagedHooksOnly + allowManagedPermissionRulesOnly + disableBypassPermissionsMode) +
+#   a `require-PR` ruleset on main (active, 0 bypass actors): the ruleset blocks any direct-push
+#   to main even from headless (headless cannot push main directly), but it does NOT block a
+#   headless `gh pr merge` — creating a PR and merging it satisfies the PR requirement. So the
+#   server-side layer closes the direct-push headless path; this hook closes the in-session path;
+#   the APPROVE click closes the merge-verb path. Together they gate every realistic scenario.
+#   This gate stops the primary case: the agent merging to `main` without Arthur's explicit
 #   in-session click, while keeping feature-branch pushes autonomous.
 # ============================================================================
 set -uo pipefail
@@ -191,6 +195,12 @@ scan_merge_verbs() {
     # (mergePullRequest / mergeBranch). Broad on purpose; fail closed.
     printf '%s' "$text" | grep -Eq '(^|[^[:alnum:]_./-])gh[[:space:]]+api([[:space:]]|$)' \
         && printf '%s' "$raw" | grep -Eqi 'merge' && return 0
+    # gh api … refs/heads/main — REST ref-update (PATCH) and ref-creation (POST).
+    # `gh api -X PATCH …/git/refs/heads/main` carries no merge substring and no
+    # `git push`, so the two checks above both miss it. Catch it here: any `gh api`
+    # call whose arguments contain the canonical main-ref path shape is gated.
+    printf '%s' "$text" | grep -Eq '(^|[^[:alnum:]_./-])gh[[:space:]]+api([[:space:]]|$)' \
+        && printf '%s' "$raw" | grep -Eq 'refs/heads/main|git/refs/heads/main' && return 0
     return 1
 }
 
