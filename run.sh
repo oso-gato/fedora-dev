@@ -9,9 +9,8 @@
 #                                               blank = web-login join, then runs this)
 #
 # v1.1.9: sshd is key-only (keys synced from github.com/oso-gato.keys at
-# every container start). NO CORE_PASSWORD required; honored if set, but
-# the new sshd config (PasswordAuthentication=no) makes it inert. Public
-# ssh on host:4444 → container:22 (key auth); mosh public on UDP 61001-62000.
+# every container start). No CORE_PASSWORD; sshd sets PasswordAuthentication=no.
+# Public ssh on host:4444 → container:22 (key auth); mosh public on UDP 61001-62000.
 # Tailscale SSH (tailnet, keyless) remains the primary path.
 set -eu
 IMAGE="${IMAGE:-localhost/fedora-dev:latest}"

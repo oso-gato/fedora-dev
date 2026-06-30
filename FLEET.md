@@ -219,11 +219,10 @@ merges except through the clickable-APPROVE gate.
 |-------|---------|-----------|
 | `live-validate` | Enroll an open PR (in **any repo in the org**) for the host pre-merge live-gate. `live-gate-watch.sh` discovers labelled PRs ORG-WIDE by the label (no per-repo list), applies a structural guard (builds only a candidate carrying a `Containerfile`/`.live-gate`, else skips), and gates each new head SHA once (`<WL>-<sha>.done`). Omit it → the host never builds or comments. | the developing box / PR author (in practice `fedora-dev`) |
 
-There is **no CI label-gate** for control-plane changes (no waiver label, no CI guard
-job): a control-plane PR (`policy/**`, `.github/workflows/**`, `managed-settings.json`, `*.container`,
-`run.sh*`, `gate-push.sh`, box-rebuild/assemble, key-sync, `*sudoers*`) is kept **standalone, never
-bundled**, and **flagged in the merge TLDR** so Arthur scrutinises it — gated, like every merge, by his
-in-session click.
+There is **no CI label-gate** for control-plane changes (no waiver label, no CI guard job): a
+control-plane PR (see *Shared invariants → Control-plane class*) is kept **standalone, never bundled**
+and **flagged in the merge TLDR** so Arthur scrutinises it — gated, like every merge, by his in-session
+click.
 
 **Verdict carrier.** The host's `gh pr comment` (`VERDICT GREEN|RED` + last log lines) is the
 machine-readable handoff that tells `fedora-dev` whether a PR is ready to present. GREEN = presentable;
@@ -247,10 +246,7 @@ it into a branch + PR, re-entering the loop at step 2.
   builds disposably per the in-repo `.live-gate` (parsed, never executed), and comments GREEN/RED; the
   owning box iterates on RED (push a fix, or supersede the branch). Human-out until the merge click.
 - **APPROVE → merge** — Arthur clicks; `fedora-dev` merges (sole authority, control-plane included).
-  The in-session `gate-push.sh` clickable gate (Arthur's click) gates merge verbs in-session; a
-  loop-neutral **`require-PR` ruleset** on `main` (no required reviews or status checks) is active
-  fleet-wide, closing the headless direct-push bypass server-side. `main` has no required-review
-  branch protection and no CI label-gate beyond this thin floor (the click already gates every merge).
+  Gate + `require-PR` mechanics: see **The merge spine** above.
 - **merged → deploy** — `fedora-bootstrap` pulls + redeploys via `workload-refresh@<name>`.
 - **wrong box** — a box asked to do another box's step STOP-AND-SURFACEs for the human to re-route.
 
@@ -259,8 +255,9 @@ it into a branch + PR, re-entering the loop at step 2.
 - **Spin-up:** the wizard **asks for `TS_AUTHKEY`** (blank → `login.tailscale.com` web-login);
   `IMAGE=ghcr.io/oso-gato/<name>:latest` for a host deploy; **never hand-roll `podman`.**
 - **Control-plane class** (`policy/**`, `managed-settings.json`, `gate-push.sh`,
-  `.github/workflows/**`, `*.container`, `run.sh*` security flags, key-sync, `*sudoers*`): standalone,
-  never bundled; flagged in the merge TLDR and gated by Arthur's click (no CI label-gate).
+  `.github/workflows/**`, `*.container`, `run.sh*` security flags + publish set, the
+  box-rebuild/assemble machinery, key-sync, `*sudoers*`): standalone, never bundled; flagged in the
+  merge TLDR and gated by Arthur's click (no CI label-gate).
 - **Claude-code guard payload** (the `managed-settings.json` deny-list + self-update lockout, the
   `claudebox-init.sh` lockout + native-shadow self-heal, the claude-code provenance): **byte-identical
   in all three, CI-enforced** by `bin/fleet-guard-parity.sh` (push/PR + daily). This is the *invariant*

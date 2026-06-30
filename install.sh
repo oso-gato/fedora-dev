@@ -15,7 +15,7 @@ curl -fsSL https://pkgs.tailscale.com/stable/fedora/tailscale.repo \
     -o /etc/yum.repos.d/tailscale.repo
 
 # ---- base packages ----------------------------------------------------------
-# Tier breakdown (justified in README.md "Base Packages" table):
+# Tier breakdown (justified in CLAUDE.md "BASE PACKAGES" table):
 #   Engine + storage:  podman, shadow-utils, fuse-overlayfs, passt, nftables
 #   Login + observe:   openssh-server, mosh, tmux, tailscale
 #   Box bootstrap:     distrobox, inotify-tools
@@ -205,8 +205,6 @@ EOF
 cat > /etc/ssh/sshd_config.d/99-fedora-dev.conf <<'EOF'
 PasswordAuthentication no
 PubkeyAuthentication yes
-PermitEmptyPasswords no
-MaxAuthTries 3
 PermitRootLogin no
 AllowUsers core
 HostKey /var/lib/tailscale/hostkeys/ssh_host_ed25519_key
