@@ -184,28 +184,23 @@ mkdir -p "$(dirname "$live")"
 if [ -d "$live/.git" ]; then
     echo "[live-spec] git clone already present at $live"
 elif [ -f "$live/.seeded-no-git" ]; then
-    # Self-heal: if GitHub is reachable now (and we may now hold a credential),
-    # CONVERT the seed to a real clone instead of parking for a human. This removes
-    # the dead-end an offline first boot used to leave (propose-and-commit was blocked
-    # until the agent ran CONVERT-TO-GIT.md by hand). A later reachable boot heals it.
+    # Self-heal: if GitHub is reachable now, CONVERT the seed to a real clone instead of
+    # parking for a human (propose-and-commit is blocked while seeded). Clone into a SIDECAR
+    # first and swap only on success, so the working seed is NEVER moved until a proven-good
+    # clone exists — no backup/restore dance, and no window where $live is absent. A later
+    # reachable boot heals a still-seeded box.
     if timeout 20 git ls-remote https://github.com/oso-gato/fedora-dev HEAD >/dev/null 2>&1; then
         echo "[live-spec] seeded-no-git + GitHub reachable -> self-healing to a real clone"
-        bak="${live}.heal-bak.$(date +%s)"
-        if mv "$live" "$bak" \
-           && timeout 120 git clone --depth 1 https://github.com/oso-gato/fedora-dev "$live" 2>/dev/null; then
+        rm -rf "$live.heal" 2>/dev/null || true   # reap any sidecar orphaned by a prior killed heal
+        if timeout 120 git clone --depth 1 https://github.com/oso-gato/fedora-dev "$live.heal" 2>/dev/null; then
+            rm -rf "$live" && mv "$live.heal" "$live"
             ( cd "$live" \
               && git config --local user.email "claudebox@fedora-dev.local" \
               && git config --local user.name  "claudebox" )
-            rm -rf "$bak"
-            echo "[live-spec] self-heal OK (seed backed up then removed; clone is authoritative)"
-        elif [ -e "$bak" ]; then
-            # the seed was moved aside (mv ok, clone failed) -> restore it
-            rm -rf "$live" 2>/dev/null || true
-            mv "$bak" "$live" 2>/dev/null || true
-            echo "[live-spec] self-heal failed; restored the seed, staying seeded-no-git"
+            echo "[live-spec] self-heal OK (clone is authoritative; seed replaced)"
         else
-            # mv itself failed -> $live is still the untouched seed, leave it
-            echo "[live-spec] self-heal failed before backup; seed untouched, staying seeded-no-git"
+            rm -rf "$live.heal" 2>/dev/null || true
+            echo "[live-spec] self-heal clone failed; seed untouched, staying seeded-no-git"
         fi
     else
         echo "[live-spec] seeded-no-git; GitHub still unreachable — staying seeded (self-heals next reachable boot)"
