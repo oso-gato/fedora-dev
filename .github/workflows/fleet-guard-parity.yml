@@ -27,4 +27,10 @@ jobs:
       - name: Checkout (for bin/fleet-guard-parity.sh)
         uses: actions/checkout@v4
       - name: Fleet guard-parity check
+        # On pull_request the checkout is the PR head — set PARITY_SELF so THIS repo's payload is read
+        # from the PR head (local) and compared against the other repos' main, catching the PR's OWN
+        # drift PRE-merge. On push/schedule PARITY_SELF is empty => pure raw@main (post-merge alarm).
+        env:
+          PARITY_SELF: ${{ github.event_name == 'pull_request' && github.event.repository.name || '' }}
+          PARITY_SELF_DIR: .
         run: bash bin/fleet-guard-parity.sh

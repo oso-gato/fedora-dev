@@ -8,6 +8,9 @@
 #                        VENDORED lg_load + sanity checks) — catches contract bugs at Tier-1 BEFORE the
 #                        host round-trip (unexpanded $_GD_* cross-ref / non-absolute SECRET_MOUNT / a
 #                        publish flag in the fence / an lg_load-rejected contract). No-op if no .live-gate.
+#   T0b build-parity(gate): bin/check-build-parity.sh — assert T1's build carries the SAME dnf-cache
+#                        bind + BUILD_ARGS as the host Tier-2 build, so an in-box GREEN predicts a host
+#                        GREEN (bug #53). Now GATED, not a manual afterthought.
 #   T1 build (gate)    : podman build --isolation=chroot + the persistent dnf-cache bind  [+ $BUILD_ARGS]
 #                        (same -v …/fd-dnf:/var/cache/libdnf5 build-throwaway.sh + the host gate use,
 #                         so T1 reproduces the REAL build env — catches bind-mount-only failures)
@@ -28,6 +31,18 @@ LINT="$(dirname "$(readlink -f "$0")")/lint-live-gate.sh"
 if [ -f "$LINT" ]; then
   if bash "$LINT" "$REPO" >"$OUT/livegate.log" 2>&1; then g live-gate PASS; else g live-gate FAIL; sed 's/^/    /' "$OUT/livegate.log"; fi
 else i live-gate "skipped (lint-live-gate.sh not adjacent)"; fi
+
+echo "== T0b build-parity (gate) =="
+# WIRE-IN: the build-parity contract (Tier-1 build invocations carry the same dnf-cache bind +
+# BUILD_ARGS as the Tier-2 host build) is now GATED here, not left to an agent remembering to run
+# bin/check-build-parity.sh by hand. It bit us once (#53: an in-box GREEN that RED'd at the host on a
+# bind-mount-only failure). check-build-parity.sh exits non-zero on real drift and skips gracefully
+# when the host reference clone is absent (still checking the two in-box builds against each other), so
+# it is safe to gate on unconditionally.
+CBP="$(dirname "$(readlink -f "$0")")/check-build-parity.sh"
+if [ -f "$CBP" ]; then
+  if bash "$CBP" >"$OUT/parity.log" 2>&1; then g build-parity PASS; else g build-parity FAIL; sed 's/^/    /' "$OUT/parity.log"; fi
+else i build-parity "skipped (check-build-parity.sh not adjacent)"; fi
 
 echo "== T1 build (gate) =="
 if [ "$DOBUILD" = build ]; then
@@ -68,5 +83,5 @@ else
 fi
 
 [ "${DISCARD:-0}" = 1 ] && { podman rmi -f "$TAG" >/dev/null 2>&1; i discard "image tree removed (host-immutable)"; }
-echo; echo "VERDICT: $([ $fail = 0 ] && echo GREEN || echo RED)   (gated T0-T3; logs: $OUT)"
+echo; echo "VERDICT: $([ $fail = 0 ] && echo GREEN || echo RED)   (gated T0/T0b/T1-T3; logs: $OUT)"
 exit $fail
