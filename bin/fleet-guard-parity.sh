@@ -27,11 +27,21 @@ set -uo pipefail
 REPOS=(fedora-dev fedora-bootstrap fedora-desktop)
 RAW="https://raw.githubusercontent.com/oso-gato"
 REF="${PARITY_REF:-main}"
+# PRE-MERGE self-overlay: on `pull_request` the CI checks out the PR HEAD, but every repo (including
+# the one being changed) was fetched from raw@main — so a PR that DRIFTS its OWN guard payload was
+# compared main-vs-main and passed, catching drift only AFTER merge (post-merge alarm, not a gate).
+# Set PARITY_SELF=<repo> (+ optional PARITY_SELF_DIR, default .) to read THAT repo's payload from the
+# local checkout (the PR head) instead of raw@main, so the PR's own drift fails the check pre-merge.
+# Unset (push / schedule) => pure raw@main across all repos, unchanged.
+SELF="${PARITY_SELF:-}"; SELF_DIR="${PARITY_SELF_DIR:-.}"
 fail=0
 hr(){ printf '\n== %s ==\n' "$*"; }
 bad(){ printf '  \342\234\227 %s\n' "$*"; fail=1; }
 ok(){  printf '  \342\234\223 %s\n' "$*"; }
-fetch(){ curl -fsSL "$RAW/$1/$REF/$2" 2>/dev/null; }
+fetch(){
+  if [ -n "$SELF" ] && [ "$1" = "$SELF" ]; then cat "$SELF_DIR/$2" 2>/dev/null   # PR head, local
+  else curl -fsSL "$RAW/$1/$REF/$2" 2>/dev/null; fi                              # others, raw@REF
+}
 
 # Participation: a repo is in scope iff it actually ships the claudebox guard payload.
 parts=()
@@ -42,7 +52,7 @@ for r in "${REPOS[@]}"; do
     printf 'skip %s — no claudebox payload (no claudebox-init.sh / managed-settings.json)\n' "$r"
   fi
 done
-printf 'participating claudebox repos @ %s: %s\n' "$REF" "${parts[*]}"
+printf 'participating claudebox repos @ %s%s: %s\n' "$REF" "${SELF:+ (self=$SELF from PR head)}" "${parts[*]}"
 [ "${#parts[@]}" -ge 2 ] || { echo "fewer than 2 claudebox repos — nothing to compare"; exit 0; }
 canon="${parts[0]}"
 
