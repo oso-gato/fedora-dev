@@ -31,8 +31,10 @@ catching rabbit-holes after the fact.
 2. **No waste.** Caches / package trees / layers persist within **bounded** time+size limits, so N
    iterations never re-download N times, and churn can never exhaust the disk.
 3. **Human out of the per-iteration loop.** develop → build → validate → verdict → redevelop iterates
-   autonomously; only the outcomes in §4–5 reach the maintainer. (The supervised poller, §6a, closes the
-   last gap where a live session had to be the heartbeat.)
+   autonomously; only the outcomes in §4–5 reach the maintainer. **Open gap (today):** the loop only
+   turns while a live agent session polls for the verdict — so the maintainer is still a *heartbeat*.
+   The supervised poller (§6a) is the approved fix that WOULD close this, but it is **not yet built**;
+   until it is, this principle is an intent, not yet fully realized.
 4. **Proportionate controls, not maximal.** A control that blocks the maintainer's *own* legitimate work
    for a threat that doesn't exist for a solo operator is **overzealous → trim it**. A control that
    defends genuinely untrusted input (un-merged PR code) is **warranted → keep it**. Corollary
@@ -95,6 +97,17 @@ routes `main`-touching actions to `ask` rather than `deny`. The maintainer's rem
 
 ## 5. The governance workflow (how this feeds the loop)
 
+> **BUILD STATUS — read this before assuming the machine does the below.** This section is the TARGET
+> workflow and the binding *rule*. The **automation that runs it unattended is largely NOT built yet.**
+> During this apparatus's construction the stages were performed **manually** (a human orchestrated the
+> independent review agents and the tier routing by hand). What EXISTS today: the independent-review
+> *practice* (spawn a different-context agent — done repeatedly, caught real defects), the merge gate
+> (`gate-push.sh` — real), and the tier *definitions*. What is **NOT built**: an automated Stage-0
+> intent check, an automated fitness-review harness, automated tier routing + Tier-B/C auto-merge +
+> digest, and the §6a poller. So merging this doc makes it the **law**; it does not by itself make the
+> machine *enforce* the law — that enforcement is the next body of work. Until then, an agent (or the
+> maintainer) follows this by discipline, exactly as was done to build it.
+
 Two requirement levels: **this constitution (standing)** and a **per-request spec (per request)**.
 
 **Stage 0 — Design & front-end intent check.** On a request, the agent drafts a per-request spec +
@@ -117,21 +130,25 @@ change against both the per-request spec and this constitution — **the three q
 **break** it (the security-review pattern); it can RETURN, and repeats until it converges clean, before
 the maintainer's click. (This is what the fence fix went through — multiple rounds, real bugs caught.)
 
-## 6. Resolved decisions (formerly parked)
+## 6. Resolved decisions (each states DECISION vs current STATUS explicitly)
 
-**(a) Supervised poller — BUILD IT.** The loop only turns while a live agent session polls; a small
-always-on in-box service watches for the host verdict and re-wakes the agent to iterate — **no merge
-authority** (the click stays the only boundary control). This is what makes the loop autonomous rather
-than "autonomous while a human babysits a session." *(To build.)*
+**(a) Supervised poller.**
+- **DECISION:** BUILD IT (approved). A small always-on in-box service watches for the host verdict and
+  re-wakes the agent to iterate — **no merge authority** (the click stays the only boundary control).
+  This is what makes the loop autonomous rather than "autonomous while a human babysits a session."
+- **STATUS: NOT YET BUILT.** No code exists yet — the decision is made, the work is not started. Until
+  it is built, the loop still needs a live agent session to be the heartbeat (principle 3's open gap).
 
-**(b) Host-validation isolation — a real VM is provider-blocked; gVisor is the provisional path.**
-Hostinger disables nested virtualization (verified), so a throwaway KVM/Firecracker VM is impossible on
-this VPS. The feasible stronger boundary is **gVisor (`runsc`)** — a user-space kernel over the fence —
-which is now installed as a **provisional, proven-opt-in** apparatus (default = plain fence; a lineage
-runs under gVisor only after the host feasibility test proves it). Its concern — it may only *partially*
-run the fleet (a systemd-PID-1 lineage like grd may not boot under it) — is being tested empirically as
-the loop's first end-to-end exercise. Outcome decides: full gVisor / gVisor-for-most + plain-fence-for-
-grd / drop gVisor and keep the hardened fence.
+**(b) Host-validation isolation — gVisor.**
+- **DECISION:** a real VM is provider-blocked (Hostinger disables nested virtualization, verified), so a
+  throwaway KVM/Firecracker VM is impossible on this VPS. The feasible stronger boundary is **gVisor
+  (`runsc`)** — a user-space kernel over the fence — adopted **provisionally**, proven-opt-in per lineage.
+- **STATUS: apparatus BUILT + merged; the feasibility test is PENDING.** The install + opt-in wiring is
+  merged (default = plain fence — it changes nothing until a lineage is proven). The empirical test —
+  whether gVisor runs the fleet fully or only partially (a systemd-PID-1 lineage like grd may not boot
+  under it) — **has not run yet**; it fires as the loop's first end-to-end exercise when the host boots.
+  Outcome then decides: full gVisor / gVisor-for-most + plain-fence-for-grd / drop gVisor + keep the fence.
+  **gVisor is therefore NOT yet decided to stay** — the test decides.
 
 ---
 
