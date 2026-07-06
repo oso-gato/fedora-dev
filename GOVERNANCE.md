@@ -119,7 +119,7 @@ Clearly within it → proceed autonomously.
 change against both the per-request spec and this constitution — **the three questions:**
 1. **Did the maintainer ask for this?** Maps to a specific requirement, or it's scope-creep.
 2. **Does it contradict another requirement?** Satisfies A by breaking B → RETURN.
-3. **Fit for purpose?** Advances the whole objective, or locally-correct-but-globally-useless / hampering?
+3. **Fit for purpose?** Advances the whole objective (not locally-correct-but-globally-useless / hampering) **and honors the PROBLEM-SOLVING DOCTRINE** (`fleet-core.md`, top): solution-oriented · iterated-on-facts (validated, not asserted) · zero-based · objective-held & pivoted (not patched) · no rabbit-hole. Q3 grades the change against those six as a checklist — violating one FAILS Q3.
 
 **Stage 2 — three outcomes, only one reaches the maintainer:**
 - **PASS** (all three positive) → route by tier (§4): Tier A → his click; Tier B/C → auto-merge + digest.
@@ -152,5 +152,24 @@ the maintainer's click. (This is what the fence fix went through — multiple ro
 
 ---
 
-*Editing this file is a Tier A / control-plane change — so the constitution can only change on the
-maintainer's click, which is correct.*
+## 7. Keeping the doctrine alive (self-check + self-propose)
+
+The PROBLEM-SOLVING DOCTRINE (`fleet-core.md`, top) is not a plaque — it is enforced and audited:
+- **Always in context** — stamped FIRST into every box's `/etc/claude-code/CLAUDE.md` (managed policy,
+  overrides all). Un-droppable by construction.
+- **Self-checked, per change** — the fitness gate's **Q3 grades every change against the six mandates**
+  as a checklist; a violation FAILS Q3 → RETURN. The doctrine is the rubric, exercised on every PR.
+- **Drift-guarded, daily** — `fleet-guard-parity` **CHECK 6** asserts the `<!--DOCTRINE-->` block is
+  present, delimited, carries all six mandates, and stays lean (≤40 lines — brevity is the
+  anti-dilution property). Runs on push/PR **and the daily 04:30 UTC cron**. A silent deletion or
+  bloating fails CI.
+- **Self-proposing, on cadence** — a periodic **doctrine audit** (reusing the independent fitness
+  harness, §5, pointed at the doctrine itself) asks: *(1) still fit for the objective? (2) are recent
+  merges actually honoring it, or routing around it? (3) drifted?* Where it finds a gap it opens a
+  **Tier-A amendment PR → the maintainer's click**. The doctrine notices when it is stale or violated,
+  but **never self-amends** — only the maintainer ratifies a change.
+
+---
+
+*Editing this file (or the doctrine) is a Tier A / control-plane change — so the constitution can only
+change on the maintainer's click, which is correct.*
