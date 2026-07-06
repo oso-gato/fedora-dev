@@ -152,6 +152,15 @@ runtime such as `runsc`) registered with the engine. Each (c) artifact gets a **
 in the Packages table (pinned canonical URL + version + **grade c1/c2/c3** + shape); the table's
 **enumeration line lists every (c) artifact in use**.
 
+**ANTI-THEATER (doctrine — do not rebuild the sieve).** A static SCRIPT-SCAN for "bad" fetch/install
+patterns is **NOT** a valid 2(c) backstop — it is the exact pattern the fleet already de-theatered
+(v1.2.48 dropped the inert `--cap-add` denylist; `managed-settings.json`'s deny-list "is best-effort
+only… not the boundary"). Detecting bad patterns in arbitrary shell is a sieve — a seventh evasion
+always exists — and a guard that implies coverage it can't deliver is **worse than none**. For a
+fetched binary the boundary is the **installer's OWN fail-closed verification** (sha/GPG; exit non-zero
++ install nothing on any mismatch/missing) **+ the disclosure row + the click** — never a scan.
+(A host static fetch-guard was built and closed for exactly this reason.)
+
 **Class-(c) artifacts in use: none.** This repo ships no upstream binary artifact today; the rule
 is carried for fleet parity so any future need inherits the identical bounded definition. (The
 only repo with class-(c) artifacts is fedora-desktop: `guacamole.war` + Obsidian.)
