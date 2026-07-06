@@ -113,6 +113,27 @@ for r in "${parts[@]}"; do
       || ok  "$r policy/CLAUDE.md delta: no stale THE FLEET section"
 done
 
+# CHECK 6 — the PROBLEM-SOLVING DOCTRINE is present, delimited, and un-diluted in the canon fleet-core.md
+# (the single source every box fetches + stamps FIRST into /etc/claude-code/CLAUDE.md). Because
+# fleet-core.md is single-source, there is no per-box copy to drift — but a silent deletion / dilution
+# of the doctrine block itself is exactly what this catches. Assert: the <!--DOCTRINE-->…<!--/DOCTRINE-->
+# block exists, is closed, carries the heading + all SIX numbered mandates, and stays SHORT (brevity is
+# the anti-dilution property — the doctrine is a creed, not an essay; padding it out is dilution).
+hr "CHECK 6: PROBLEM-SOLVING DOCTRINE present + delimited + all 6 mandates + not bloated (canon: $canon)"
+open_n="$(printf '%s\n' "$fc" | grep -c '<!--DOCTRINE-->')"
+close_n="$(printf '%s\n' "$fc" | grep -c '<!--/DOCTRINE-->')"
+if [ "$open_n" = 1 ] && [ "$close_n" = 1 ]; then ok "doctrine block delimited (one <!--DOCTRINE-->/<!--/DOCTRINE--> pair)"
+else bad "doctrine block markers wrong (open=$open_n close=$close_n) — must be exactly one delimited block"; fi
+block="$(printf '%s\n' "$fc" | awk '/<!--DOCTRINE-->/{f=1} f{print} /<!--\/DOCTRINE-->/{f=0}')"
+printf '%s\n' "$block" | grep -q 'PROBLEM-SOLVING DOCTRINE' \
+  && ok "doctrine heading present" || bad "doctrine heading MISSING"
+mand_n="$(printf '%s\n' "$block" | grep -cE '^[0-9]+\. ')"
+[ "$mand_n" -ge 6 ] && ok "doctrine carries $mand_n mandates (>=6)" \
+                    || bad "doctrine has only $mand_n mandates — the six mandates must all be present (dilution/deletion?)"
+blk_lines="$(printf '%s\n' "$block" | wc -l | tr -d ' ')"
+[ "$blk_lines" -le 40 ] && ok "doctrine is lean ($blk_lines lines <= 40 — stays salient)" \
+                        || bad "doctrine bloated to $blk_lines lines (>40) — brevity is the anti-dilution rule; tighten it"
+
 # CHECK 5 — gate-push.sh terminal-verb invariant for PR-only boxes.
 # fedora-dev's gate routes main-touching pushes to `ask` (Arthur's click); the PR-only boxes
 # (fedora-bootstrap, fedora-desktop) must route them to `deny` — they never merge, so `ask`
