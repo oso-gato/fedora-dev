@@ -45,20 +45,34 @@ is_tier_a_path(){
     CLAUDE.md|*/CLAUDE.md) return 0;;                                 # binding Build Principles + provenance (class-c) law
     fleet-core.md|*/fleet-core.md) return 0;;                         # stamped in-box law (also under policy/, belt+braces)
     *gh-app-auth.sh|*gh-app-provision.sh) return 0;;                  # standing-credential minter (identity)
-    run.sh|*/run.sh) return 0;;                                       # deploy contract (security flags + port set)
+    run.sh*|*/run.sh*) return 0;;                                     # deploy contract (+ .grd lineage twins)
+    # --- FAIL-CLOSED CATCH-ALL (the key inversion): auto-merge is EARNED, not the default. Anything
+    # EXECUTABLE or DEPLOYABLE is Tier A unless a human proved it safe — because a filename allowlist
+    # misses every NEW control-plane file (a hijacked agent naming a host script `refresh-helper.sh`
+    # would otherwise auto-merge). Covers systemd units, all shell scripts, Quadlets, image defs,
+    # installers, provisioners — the classes the review found slipping to B.
+    *.service|*.timer|*.mount|*.socket|*.path|*.target) return 0;;    # systemd units run as root (= host-apply)
+    *.sh|*/bin/*) return 0;;                                          # ANY shell script / anything under a bin/ dir
+    Containerfile|Containerfile.*|*/Containerfile|*/Containerfile.*) return 0;;  # image definition (base/pkgs/USER)
+    *.container) return 0;;                                           # (already above; explicit)
     *) return 1;;
   esac
 }
+# Auto-mergeable ONLY if provably inert: docs/comments + a tight set of non-executable config. Anything
+# not here AND not Tier-A is still Tier B, but the fail-closed catch-all above means executables never
+# reach that branch — so B is genuinely low-risk (inert config), C is docs.
 is_doc_path(){ case "$1" in *.md|*/LICENSE|LICENSE|*.txt) return 0;; *) return 1;; esac; }
 
 # ---- gather the file list -------------------------------------------------------------------------
+# Portable read (no `mapfile` — that is bash 4+; a bash-3.2 host must not silently mis-gather).
 files=()
 if [ "${1:-}" = "--pr" ]; then
   repo="${2:?--pr needs <repo> <pr>}"; pr="${3:?--pr needs <repo> <pr>}"
-  mapfile -t files < <(gh pr view "$pr" --repo "oso-gato/$repo" --json files -q '.files[].path' 2>/dev/null)
+  while IFS= read -r line; do files+=( "$line" ); done \
+    < <(gh pr view "$pr" --repo "oso-gato/$repo" --json files -q '.files[].path' 2>/dev/null)
   [ "${#files[@]}" -gt 0 ] || { echo "tier-classify: could not read PR files (gh)" >&2; exit 2; }
 elif [ "${1:-}" = "--stdin" ]; then
-  mapfile -t files
+  while IFS= read -r line; do files+=( "$line" ); done
 else
   files=( "$@" )
 fi
@@ -67,6 +81,7 @@ fi
 # ---- classify -------------------------------------------------------------------------------------
 a_hit=""; all_docs=1
 for f in "${files[@]}"; do
+  f="${f%$'\r'}"; f="${f#./}"                    # strip CRLF + leading ./ so neither dodges a pattern
   [ -n "$f" ] || continue
   if is_tier_a_path "$f"; then a_hit="$f"; break; fi
   is_doc_path "$f" || all_docs=0
