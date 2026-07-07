@@ -17,10 +17,22 @@ set -euo pipefail
 cd "$(dirname "$0")"
 [ "${COLLECT_ONLY:-0}" = 1 ] || [ -x ./run.sh ] || { echo "spin-up: ./run.sh not found/executable in $(pwd)" >&2; exit 1; }
 
-# --- prompt helper (prompt -> stderr so $() captures only the value) ---
-ask() {  # ask "<prompt>" ["<default>"]
-  local p="$1" d="${2:-}" v
-  read -r -p "$p${d:+ [$d]}: " v </dev/tty
+# --- prompt helper (prompt -> the TERMINAL so $() captures only the value) ---
+# TERMINAL: /dev/tty by default; SPINUP_TTY overrides it. day0's root layer su's into the
+# operating user with stdin=/dev/null, and util-linux `su` then DETACHES the controlling
+# terminal (TIOCSTI hardening) — /dev/tty is ENXIO in that layer (verified live 2026-07-07:
+# every day0 question silently ate its default, then FATAL'd once the flow went fail-loud).
+# The root layer therefore ferries the real tty DEVICE down as SPINUP_TTY (ACL-granted for
+# the setup duration); reading the device directly needs no controlling terminal.
+SPINUP_TTY="${SPINUP_TTY:-/dev/tty}"
+ask() {  # ask "<prompt>" ["<default>"]  — no terminal => LOUDLY take the default
+  local p="$1" d="${2:-}" v=""
+  if { : <"$SPINUP_TTY"; } 2>/dev/null; then
+    printf '%s%s: ' "$p" "${d:+ [$d]}" >"$SPINUP_TTY"
+    IFS= read -r v <"$SPINUP_TTY" || v=""
+  else
+    echo "spin-up: no terminal ($SPINUP_TTY) — taking default '${d:-<blank>}' for: $p" >&2
+  fi
   printf '%s' "${v:-$d}"
 }
 
@@ -35,8 +47,11 @@ IMAGE="${IMAGE:-$(ask 'Image ref (host deploy = ghcr.io; localhost/ = in-box sel
 # (bin/gh-app-auth.sh) so the in-box dev loop never stops for auth. Honors an env-supplied
 # GH_APP_ID (scripted / collect-mode) and skips the prompt then.
 . ./bin/gh-app-provision.sh
+GHA_TTY="$SPINUP_TTY"; GHA_IN="$SPINUP_TTY"   # provision lib prompts on the same terminal
 GH_APP_SECRET="${GH_APP_SECRET:-}"
 if [ -z "${GH_APP_ID:-}" ] && [ "$(ask 'Provision a standing GitHub App credential now (paste the key)? — DEFAULT y: the autonomous loop needs a standing identity; "n" = fall back to your existing/later gh auth login (y/n)' y)" = y ]; then
+  # The paste NEEDS a terminal — fail with the remedy, not a cryptic read error.
+  { : <"$SPINUP_TTY"; } 2>/dev/null || { echo "spin-up: FATAL — App provisioning needs a terminal ($SPINUP_TTY unreadable). Run interactively, or supply GH_APP_ID/GH_APP_INSTALLATION_ID/GH_APP_SECRET via env (scripted path)." >&2; exit 1; }
   prompt_github_app gh_app_key || { echo "spin-up: GitHub App provisioning failed" >&2; exit 1; }
   GH_APP_SECRET=gh_app_key
 fi
