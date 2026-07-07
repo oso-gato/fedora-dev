@@ -58,11 +58,18 @@ if [ -z "${BOX_HOSTNAME:-}" ]; then
       echo "Box hostname — host '$_host' not a known pairing; select:" >&2
       echo "  1) nox — VPS host (erebus) pairing" >&2
       echo "  2) nyx — Homelab host (strix) pairing" >&2
-      _sel="$(ask 'Select by number (1/2)' 1)"
+      echo "  3) other — enter a hostname" >&2
+      _sel="$(ask 'Select by number (1/2/3)' 1)"
       case "$_sel" in
         1|nox) BOX_HOSTNAME=nox ;;
         2|nyx) BOX_HOSTNAME=nyx ;;
-        *) echo "spin-up: FATAL — invalid hostname selection '$_sel' (enter 1 or 2)" >&2; exit 1 ;;
+        3|other)
+          BOX_HOSTNAME="$(ask 'Hostname (RFC-1123: lowercase a-z 0-9 and hyphen, no leading/trailing hyphen, <=63 chars)' '')"
+          case "$BOX_HOSTNAME" in
+            ''|-*|*-|*[!a-z0-9-]*) echo "spin-up: FATAL — invalid hostname '$BOX_HOSTNAME'" >&2; exit 1 ;;
+          esac
+          [ "${#BOX_HOSTNAME}" -le 63 ] || { echo "spin-up: FATAL — hostname '$BOX_HOSTNAME' exceeds 63 characters" >&2; exit 1; } ;;
+        *) echo "spin-up: FATAL — invalid hostname selection '$_sel' (enter 1, 2, or 3)" >&2; exit 1 ;;
       esac
       echo "  -> box hostname: $BOX_HOSTNAME" >&2 ;;
   esac
