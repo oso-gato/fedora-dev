@@ -55,22 +55,14 @@ if [ -z "${BOX_HOSTNAME:-}" ]; then
     erebus) BOX_HOSTNAME=nox; echo "  -> host '$_host' -> box hostname 'nox' (VPS pairing, auto)" >&2 ;;
     strix)  BOX_HOSTNAME=nyx; echo "  -> host '$_host' -> box hostname 'nyx' (homelab pairing, auto)" >&2 ;;
     *)
-      echo "Box hostname — host '$_host' not a known pairing; select:" >&2
-      echo "  1) nox — VPS host (erebus) pairing" >&2
-      echo "  2) nyx — Homelab host (strix) pairing" >&2
-      echo "  3) other — enter a hostname" >&2
-      _sel="$(ask 'Select by number (1/2/3)' 1)"
-      case "$_sel" in
-        1|nox) BOX_HOSTNAME=nox ;;
-        2|nyx) BOX_HOSTNAME=nyx ;;
-        3|other)
-          BOX_HOSTNAME="$(ask 'Hostname (RFC-1123: lowercase a-z 0-9 and hyphen, no leading/trailing hyphen, <=63 chars)' '')"
-          case "$BOX_HOSTNAME" in
-            ''|-*|*-|*[!a-z0-9-]*) echo "spin-up: FATAL — invalid hostname '$BOX_HOSTNAME'" >&2; exit 1 ;;
-          esac
-          [ "${#BOX_HOSTNAME}" -le 63 ] || { echo "spin-up: FATAL — hostname '$BOX_HOSTNAME' exceeds 63 characters" >&2; exit 1; } ;;
-        *) echo "spin-up: FATAL — invalid hostname selection '$_sel' (enter 1, 2, or 3)" >&2; exit 1 ;;
+      echo "NOTICE: host '$_host' is not a known pairing (erebus->nox, strix->nyx auto-select" >&2
+      echo "        elsewhere) — enter this box's hostname (becomes the container hostname AND" >&2
+      echo "        the tailnet node name)." >&2
+      BOX_HOSTNAME="$(ask 'Hostname (RFC-1123: lowercase a-z 0-9 and hyphen, no leading/trailing hyphen, <=63 chars)' '')"
+      case "$BOX_HOSTNAME" in
+        ''|-*|*-|*[!a-z0-9-]*) echo "spin-up: FATAL — invalid hostname '$BOX_HOSTNAME'" >&2; exit 1 ;;
       esac
+      [ "${#BOX_HOSTNAME}" -le 63 ] || { echo "spin-up: FATAL — hostname '$BOX_HOSTNAME' exceeds 63 characters" >&2; exit 1; }
       echo "  -> box hostname: $BOX_HOSTNAME" >&2 ;;
   esac
 fi
