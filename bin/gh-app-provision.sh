@@ -45,13 +45,17 @@ _gha_ask() {  # _gha_ask "<prompt>"  -> echoes the entered value
 # the PEM's own final line, or EOF. The PEM is never buffered whole — each line is
 # emitted as it is read.
 _gha_stream_pem() {
-  printf '>> Paste the GitHub App private-key PEM, then a line "END" (or Ctrl-D):\n' >"$GHA_TTY"
+  printf '>> Paste the GitHub App private-key PEM (press Enter after the paste — it ends itself):\n' >"$GHA_TTY"
   local line
   while IFS= read -r line; do
     case "$line" in
-      END|__END__)                     break ;;
-      '-----END '*'PRIVATE KEY-----')  printf '%s\n' "$line"; break ;;
-      *)                               printf '%s\n' "$line" ;;
+      END|__END__)                       break ;;
+      # A line CONTAINING the PEM footer ends the paste — covers both the normal multi-line
+      # form (footer on its own line) AND a console-FLATTENED paste (whole PEM on ONE line,
+      # footer at the end — verified live: Hostinger). So paste + Enter just works; the
+      # "END" sentinel / Ctrl-D remain as fallbacks for a footer-less garble.
+      *'-----END '*'KEY-----'*)          printf '%s\n' "$line"; break ;;
+      *)                                 printf '%s\n' "$line" ;;
     esac
   done <"$GHA_IN"
 }
@@ -95,7 +99,10 @@ read_pem_to_secret() {  # read_pem_to_secret <podman-secret-name>
   local name="${1:?secret name required}" _pem
   command -v podman >/dev/null 2>&1 || { echo "gha: podman not found" >&2; return 1; }
   _pem="$(_gha_read_valid_pem)" || return 1
-  printf '%s\n' "$_pem" | podman secret create --replace "$name" - \
+  # >/dev/null: podman prints the new secret's ID to STDOUT — in a wizard's COLLECT mode
+  # stdout is the eval'd answer channel, and the leaked ID crashed setup-user live
+  # ("6a58c25f…: command not found"). The ID is noise; the success line below suffices.
+  printf '%s\n' "$_pem" | podman secret create --replace "$name" - >/dev/null \
     || { echo "gha: 'podman secret create $name' failed" >&2; return 1; }
 }
 
@@ -107,7 +114,7 @@ read_pem_to_var() {  # read_pem_to_var <varname>   (root->core ferry; PEM transi
 make_secret_from_var() {  # make_secret_from_var <secret-name> <varname>   (core side)
   local name="${1:?secret name required}" var="${2:?varname required}"
   command -v podman >/dev/null 2>&1 || { echo "gha: podman not found" >&2; return 1; }
-  printf '%s' "${!var}" | podman secret create --replace "$name" - \
+  printf '%s' "${!var}" | podman secret create --replace "$name" - >/dev/null \
     || { echo "gha: 'podman secret create $name' failed" >&2; return 1; }
 }
 
