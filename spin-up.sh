@@ -36,7 +36,7 @@ IMAGE="${IMAGE:-$(ask 'Image ref (host deploy = ghcr.io; localhost/ = in-box sel
 # GH_APP_ID (scripted / collect-mode) and skips the prompt then.
 . ./bin/gh-app-provision.sh
 GH_APP_SECRET="${GH_APP_SECRET:-}"
-if [ -z "${GH_APP_ID:-}" ] && [ "$(ask 'Provision a standing GitHub App credential now (paste the key)? — "n" = OPTIONAL; the box uses your existing/later gh auth login instead (y/n)' n)" = y ]; then
+if [ -z "${GH_APP_ID:-}" ] && [ "$(ask 'Provision a standing GitHub App credential now (paste the key)? — DEFAULT y: the autonomous loop needs a standing identity; "n" = fall back to your existing/later gh auth login (y/n)' y)" = y ]; then
   prompt_github_app gh_app_key || { echo "spin-up: GitHub App provisioning failed" >&2; exit 1; }
   GH_APP_SECRET=gh_app_key
 fi
