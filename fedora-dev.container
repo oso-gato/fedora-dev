@@ -82,6 +82,12 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # Secret=gh_app_key,type=mount,target=gh_app_key
 # Environment=GH_APP_ID=000000 GH_APP_INSTALLATION_ID=00000000
 
+# Optional TS_AUTHKEY for an UNATTENDED tailnet join — a podman secret injected as an ENV
+# VAR (type=env; the entrypoint honors $TS_AUTHKEY, else falls back to web-login).
+# fedora-bootstrap's setup-user creates the secret from the spin-up answer and uncomments:
+#   podman secret create fedora-dev-ts-authkey -
+# Secret=fedora-dev-ts-authkey,type=env,target=TS_AUTHKEY
+
 # Public ports:
 #   4444/tcp -> container :22 (sshd, key-only; keys synced from github.com/oso-gato.keys)
 #   61001-62000/udp -> mosh (bootstraps over the same key-auth ssh)
