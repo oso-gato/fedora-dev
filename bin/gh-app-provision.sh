@@ -34,7 +34,11 @@ GHA_TTY="${GHA_TTY:-/dev/tty}"   # where prompts are written
 GHA_IN="${GHA_IN:-/dev/tty}"     # where pasted lines are read
 
 _gha_ask() {  # _gha_ask "<prompt>"  -> echoes the entered value
-  local v; printf '>> %s: ' "$1" >"$GHA_TTY"; IFS= read -r v <"$GHA_IN" || true; printf '%s' "$v"
+  # v pre-initialized: under a caller's `set -u`, a failed read (no terminal — e.g. a
+  # detached-tty su layer) left v UNSET and the printf died "v: unbound variable".
+  local v=""
+  { : <"$GHA_IN"; } 2>/dev/null || { echo "gha: input device $GHA_IN is not readable (no terminal?)" >&2; return 1; }
+  printf '>> %s: ' "$1" >"$GHA_TTY"; IFS= read -r v <"$GHA_IN" || true; printf '%s' "${v:-}"
 }
 
 # Stream a pasted PEM line-by-line to stdout; stop at a sentinel ("END"/"__END__"),
