@@ -102,10 +102,43 @@ The fleet-consistent entry point (mirrors `fedora-desktop/spin-up.sh`): it **ASK
 
 **Tailscale auth key** (`tskey-…`) — generate it in the Tailscale admin console → **Settings → Keys → Generate auth key** (optionally *Reusable* / *Ephemeral* / *Pre-approved*). Paste it for an **unattended** join; leave blank for the one-time `login.tailscale.com` web-login.
 
-**Standing GitHub App credential** (optional) — so the in-box dev loop's `git push` / `gh pr` / label steps authenticate with **no human and no expiring token**. Decline it and the box uses your `gh auth login` (which persists on the home volume) instead.
+**Standing GitHub App credential** (the prompt defaults **y** — the autonomous loop needs it) — so the
+in-box dev loop's `git push` / `gh pr` / label steps authenticate with **no human and no expiring
+token**. Decline (`n`) and the box falls back to your `gh auth login` (persists on the home volume) —
+fine attended, but the unattended loop will stall on auth.
 
-1. **Create the App once** — github.com → your avatar → **Settings → Developer settings → GitHub Apps → New GitHub App** (owned by `oso-gato`): uncheck **Webhook → Active**; **Repository permissions** = Contents **R/W**, Pull requests **R/W**, Workflows **R/W**; **Create** → copy the **App ID**; **Generate a private key** (downloads a `.pem`); **Install** the App on your repos → copy the **Installation ID** (it's in the install URL).
-2. **Provide it at spin-up** — answer `y` to the App prompt, then paste the **App ID**, the **Installation ID**, and the **private-key PEM** (end the paste with a line `END`). The PEM streams straight into a **podman secret** (mounted read-only at `/run/secrets/gh_app_key`) — **never written to a file**; the box mints a fresh ≤1h installation token from it on each boot. App ID / Installation ID are public; only the PEM is secret.
+**The fleet uses TWO distinct GitHub Apps** — this box's App (authors PRs) and the HOST's App
+(`fedora-bootstrap` posts the live-gate GREEN/RED verdicts). They MUST differ: the deterministic
+auto-merge refuses any verdict authored by the PR author, so one shared App would fail-closed every
+gate forever.
+
+1. **Create (×2)** — github.com → avatar → **Settings → Developer settings → GitHub Apps → New GitHub
+   App** (owned by `oso-gato`): readable names (they become the `[bot]` names on PRs, e.g.
+   `oso-gato-devbox` / `oso-gato-host-gate`); uncheck **Webhook → Active**; installable **Only on this
+   account**.
+2. **Permissions** — set only these; leave everything else (incl. **Packages**, all Organization and
+   all Account permissions) at *No access*:
+
+   | Repository permissions | Dev App (`devbox`, THIS box) | Host App (`host-gate`) | Why |
+   |---|---|---|---|
+   | Actions | Read-only | Read-only | watch CI run results |
+   | Contents | **Read and write** | **Read-only** | dev pushes feature branches; host only clones PR heads to gate them |
+   | Issues | Read and write | Read and write | the `live-validate` label + PR comments ride the issues API |
+   | Metadata | Read-only *(mandatory)* | Read-only *(mandatory)* | forced by GitHub |
+   | Pull requests | Read and write | Read and write | dev opens PRs; host posts verdict comments |
+   | Workflows | **Read and write** | **No access** | only this box edits `.github/workflows/**` |
+
+3. **Install (×2)** — App page → **Install App** → `oso-gato` → **All repositories** (recommended —
+   repos enroll dynamically) → Install.
+4. **Provide it at spin-up** — 3 values per App: the **App ID** (top of the App's settings page), the
+   **Installation ID** (Settings → **Applications** → Installed GitHub Apps → Configure — the number
+   ending the URL `github.com/settings/installations/123456`), and the **private-key PEM** (App page →
+   **Private keys → Generate a private key**; the `.pem` downloads **once** — GitHub only re-shows its
+   SHA-256 fingerprint afterwards; if lost, generate anew and Delete the orphaned fingerprint). Answer
+   `y`, enter the two ids, paste the whole PEM, end with a line `END`. The PEM streams straight into a
+   **podman secret** (mounted read-only at `/run/secrets/gh_app_key`) — **never written to a file**;
+   the box mints fresh ≤1h installation tokens from it on every boot/tick. The ids are public
+   integers; only the PEM is secret — keep the `.pem` files in a password manager.
 
 *(Scripted path: pre-set `GH_APP_ID` + `GH_APP_INSTALLATION_ID`, create the `gh_app_key` podman secret yourself, and set `GH_APP_SECRET=gh_app_key` for `run.sh`.)*
 
