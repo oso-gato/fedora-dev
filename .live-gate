@@ -29,20 +29,26 @@
 CAND_FENCE='--cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID --cap-add KILL --cap-add NET_BIND_SERVICE --cap-add SETFCAP --cap-add SETGID --cap-add SETPCAP --cap-add SETUID --cap-add SYS_CHROOT --cap-add NET_ADMIN --cap-add SYS_ADMIN --device /dev/net/tun --device /dev/fuse --security-opt label=disable'
 HEALTH='pgrep -x sshd && pgrep -x tailscaled && test -S /run/user/1000/podman/podman.sock'
 
-# Access-path probe (run INSIDE the candidate via `podman exec`): wait for the eager first-boot
-# claudebox assemble, then assert PR #45's lockout LIVE —
-#   (1) the box assembled (.assembled marker);
-#   (2) NO native-build launcher shadow on the home volume (~/.local/bin/claude absent / self-healed);
-#   (3) inside the assembled box, `claude update` is DISABLED — a LOCKED box prints
-#       "...disabled by your administrator" (matches `grep -qi disabled`); an UNLOCKED RPM would
-#       instead print "...managed by a package manager", which does NOT match → RED.
-CAND_PROBE='for i in $(seq 1 72); do [ -e /home/core/.local/state/claudebox/.assembled ] && break; sleep 5; done; [ -e /home/core/.local/state/claudebox/.assembled ] && [ ! -e /home/core/.local/bin/claude ] && runuser -u core -- env XDG_RUNTIME_DIR=/run/user/1000 podman exec claudebox bash -lc "claude update 2>&1 | grep -qi disabled"'
+# Access-path probe (run INSIDE the candidate via `podman exec`) — NETWORK-INDEPENDENT by design.
+# The gate fence is loopback-only (the validator imposes a --network=none floor; un-merged PR code gets
+# NO egress, and only `network none|lo` is even allowlisted). The PRIOR probe waited for a full
+# claudebox assemble (toolbox pull + dnf install claude-code) and then ran `claude update` inside it —
+# but that assemble REQUIRES egress, so under the containment fence it can NEVER complete: proven when
+# fedora-dev#108 @ 9988aa5 reached `healthy PASS` for the first time and this probe then FAILED with
+# `GitHub unreachable … assemble FAILED`. A pre-merge gate under containment proves STRUCTURE + the
+# door; the LIVE lockout is verified POST-MERGE on the host (container-refresh health-gate), where the
+# box actually assembles WITH egress. So the probe now asserts only what a networkless gate CAN:
+#   (1) the ssh door SERVES — a real SSH banner on :22 (the load-bearing "does it actually run" check);
+#   (2) the #45 self-update LOCKOUT config SHIPS in the baked seed — the policy-tier env lockout
+#       (DISABLE_UPDATES + DISABLE_AUTOUPDATER) is present in the image's managed-settings.json (its
+#       SOURCE is in the image; that it is then STAMPED live at assemble is the post-merge/host concern).
+CAND_PROBE='timeout 6 bash -c "exec 3<>/dev/tcp/127.0.0.1/22; read -t 5 -u 3 b; case \"\$b\" in SSH-*) exit 0;; *) exit 1;; esac" && grep -q DISABLE_UPDATES /usr/local/share/fedora-dev/policy/managed-settings.json && grep -q DISABLE_AUTOUPDATER /usr/local/share/fedora-dev/policy/managed-settings.json'
 
-# Gate-imposed headroom + first-boot budget for the nested assemble (toolbox pull + dnf install
-# claude-code ~244 MB) — more than a bare-sshd box; the probe itself also waits up to ~6 min for
-# the .assembled marker.
+# Gate-imposed headroom + first-boot budget. No longer sized for a full nested assemble (the probe no
+# longer waits for one) — just enough for sshd + tailscaled + the podman socket to come up. MEMORY/PIDS
+# kept at the fleet candidate cap (the host gate's concurrency admission budgets 4g per candidate).
 CAND_MEMORY=4g
 CAND_PIDS=2048
-CAND_HEALTH_START=120s
-CAND_HEALTH_TRIES=24
+CAND_HEALTH_START=30s
+CAND_HEALTH_TRIES=18
 CAND_HEALTH_SLEEP=6
