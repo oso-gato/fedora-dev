@@ -14,8 +14,19 @@
 #
 # Single default target. FENCE = run.sh's contract MINUS the public `-p` and MINUS real secrets/volumes
 # (the nested-rootless-podman caps + devices + label-disable only). HEALTH mirrors run.sh's --health-cmd.
-
-CAND_FENCE='--cap-add NET_ADMIN --cap-add SYS_ADMIN --device /dev/net/tun --device /dev/fuse --security-opt label=disable'
+#
+# NAMED DEFAULT-CAP CLOSURE (required): the host gate launches with a --cap-drop=ALL FLOOR and only
+# adds back the caps this fence NAMES — but production `run.sh` runs under podman's IMPLICIT default
+# cap set. So naming ONLY NET_ADMIN/SYS_ADMIN under-caps the candidate vs its own run-contract, and
+# PID-1 dies at its first act: `cp -rT /etc/skel /home/core` + `chown -R core:core /home/core` need
+# CHOWN/DAC_OVERRIDE/FOWNER; `runuser -u core` + sshd privsep need SETUID/SETGID/SETPCAP/SYS_CHROOT;
+# the boot setcap restore needs SETFCAP; sshd:22 needs NET_BIND_SERVICE; the TERM-trap/watchdog needs
+# KILL. PROVEN empirically (2026-07-07, in-box A/B): drop-ALL + the old 2 caps => candidate exits <1s
+# at `cp: … Permission denied`; + this named default closure => boots, keys sync, assemble proceeds.
+# This list = podman's default cap set, NAMED (a deliberate fence declaration, per the host validator's
+# default-deny allowlist) + the run-contract's NET_ADMIN/SYS_ADMIN. (The host preset fedora-dev.env
+# carries the same fix as the fallback, but this in-tree contract is authoritative and overrides it.)
+CAND_FENCE='--cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID --cap-add KILL --cap-add NET_BIND_SERVICE --cap-add SETFCAP --cap-add SETGID --cap-add SETPCAP --cap-add SETUID --cap-add SYS_CHROOT --cap-add NET_ADMIN --cap-add SYS_ADMIN --device /dev/net/tun --device /dev/fuse --security-opt label=disable'
 HEALTH='pgrep -x sshd && pgrep -x tailscaled && test -S /run/user/1000/podman/podman.sock'
 
 # Access-path probe (run INSIDE the candidate via `podman exec`): wait for the eager first-boot
