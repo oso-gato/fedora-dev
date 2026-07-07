@@ -16,11 +16,6 @@ set -eu
 # rather than getting SIGKILLed after the 10-second podman-stop timeout.
 trap 'kill -TERM 0 2>/dev/null; exit 0' TERM INT
 
-# CORE_PASSWORD is no longer required (sshd is key-only as of v1.1.9; ssh
-# keys synced from github.com/oso-gato.keys below). Ignore the env var if
-# set, for backward compatibility with pre-v1.1.9 run.sh callers.
-unset CORE_PASSWORD 2>/dev/null || true
-
 # ---- home volume may be empty on first run ----------------------------------
 if [ ! -e /home/core/.bashrc ]; then
     cp -rT /etc/skel /home/core
