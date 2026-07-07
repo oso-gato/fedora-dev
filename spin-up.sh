@@ -37,11 +37,10 @@ ask() {  # ask "<prompt>" ["<default>"]  — no terminal => LOUDLY take the defa
 }
 
 echo "=== fedora-dev spin-up ===" >&2
-# Honor an env-supplied TS_AUTHKEY (scripted deploy); otherwise ASK. Blank = web-login fallback.
-TS_AUTHKEY="${TS_AUTHKEY:-$(ask 'Tailscale auth key (tskey-…; blank = interactive web-login join)' '')}"
-IMAGE="${IMAGE:-$(ask 'Image ref (host deploy = ghcr.io; localhost/ = in-box self-validation only)' 'ghcr.io/oso-gato/fedora-dev:latest')}"
 
 # --- box identity: which HOST this dev box pairs with -------------------------------
+# Resolved FIRST so every prompt below can NAME the box it provisions (operator ask —
+# same treatment as the GitHub App banners).
 # One fedora-dev image, two possible homes. The name becomes BOTH the container hostname
 # and the tailnet node name (run.sh --hostname + the entrypoint's tailscale --hostname).
 # AUTO-SELECTED from the HOST's hostname (day0's host phase 1/7 sets it — hostnamectl,
@@ -66,6 +65,13 @@ if [ -z "${BOX_HOSTNAME:-}" ]; then
       echo "  -> box hostname: $BOX_HOSTNAME" >&2 ;;
   esac
 fi
+
+# Honor an env-supplied TS_AUTHKEY (scripted deploy); otherwise ASK. Blank = web-login fallback.
+echo "── Tailscale key for THE DEV BOX '$BOX_HOSTNAME' (fedora-dev) ───────────────────────" >&2
+echo "   Joins the tailnet as node '$BOX_HOSTNAME'. NOT the host's join (that happened in the" >&2
+echo "   host phase); a REUSABLE key may be the same one — a one-off key needs a fresh one." >&2
+TS_AUTHKEY="${TS_AUTHKEY:-$(ask "Tailscale auth key for '$BOX_HOSTNAME' (tskey-…; blank = interactive web-login join)" '')}"
+IMAGE="${IMAGE:-$(ask 'Image ref (host deploy = ghcr.io; localhost/ = in-box self-validation only)' 'ghcr.io/oso-gato/fedora-dev:latest')}"
 
 # --- optional STANDING GitHub App credential (paste -> podman secret; never a file) ---
 # Same model as TS_AUTHKEY: the key is pasted at the prompt and streams straight into
