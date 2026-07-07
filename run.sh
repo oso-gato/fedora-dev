@@ -31,7 +31,7 @@ gh_args=()
 [ -n "${GH_APP_SECRET:-}" ]          && gh_args+=( --secret "${GH_APP_SECRET},type=mount,target=gh_app_key,mode=0400" )
 
 podman run -d --name fedora-dev \
-    --hostname fedora-dev \
+    --hostname "${BOX_HOSTNAME:-fedora-dev}" \
     --restart=always \
     --cap-add NET_ADMIN \
     --cap-add SYS_ADMIN \

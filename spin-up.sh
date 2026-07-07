@@ -41,6 +41,33 @@ echo "=== fedora-dev spin-up ===" >&2
 TS_AUTHKEY="${TS_AUTHKEY:-$(ask 'Tailscale auth key (tskey-…; blank = interactive web-login join)' '')}"
 IMAGE="${IMAGE:-$(ask 'Image ref (host deploy = ghcr.io; localhost/ = in-box self-validation only)' 'ghcr.io/oso-gato/fedora-dev:latest')}"
 
+# --- box identity: which HOST this dev box pairs with -------------------------------
+# One fedora-dev image, two possible homes. The name becomes BOTH the container hostname
+# and the tailnet node name (run.sh --hostname + the entrypoint's tailscale --hostname).
+# AUTO-SELECTED from the HOST's hostname (day0's host phase 1/7 sets it — hostnamectl,
+# cloud-init reversion disabled — before this user-layer wizard ever runs):
+#   erebus (VPS)      -> nox
+#   strix  (homelab)  -> nyx
+# Env-supplied BOX_HOSTNAME (scripted) wins; an UNRECOGNIZED host falls back to the ask.
+if [ -z "${BOX_HOSTNAME:-}" ]; then
+  _host="$(hostname -s 2>/dev/null || echo unknown)"
+  case "$_host" in
+    erebus) BOX_HOSTNAME=nox; echo "  -> host '$_host' -> box hostname 'nox' (VPS pairing, auto)" >&2 ;;
+    strix)  BOX_HOSTNAME=nyx; echo "  -> host '$_host' -> box hostname 'nyx' (homelab pairing, auto)" >&2 ;;
+    *)
+      echo "Box hostname — host '$_host' not a known pairing; select:" >&2
+      echo "  1) nox — VPS host (erebus) pairing" >&2
+      echo "  2) nyx — Homelab host (strix) pairing" >&2
+      _sel="$(ask 'Select by number (1/2)' 1)"
+      case "$_sel" in
+        1|nox) BOX_HOSTNAME=nox ;;
+        2|nyx) BOX_HOSTNAME=nyx ;;
+        *) echo "spin-up: FATAL — invalid hostname selection '$_sel' (enter 1 or 2)" >&2; exit 1 ;;
+      esac
+      echo "  -> box hostname: $BOX_HOSTNAME" >&2 ;;
+  esac
+fi
+
 # --- optional STANDING GitHub App credential (paste -> podman secret; never a file) ---
 # Same model as TS_AUTHKEY: the key is pasted at the prompt and streams straight into
 # podman's secret store. The container mints a <=1h installation token from it
@@ -61,8 +88,8 @@ fi
 # day0 never duplicates fedora-dev's questions. Emit the resolved env as `export` lines for
 # the caller to capture (eval), then stop.
 if [ "${COLLECT_ONLY:-0}" = 1 ]; then
-  printf 'export TS_AUTHKEY=%q IMAGE=%q GH_APP_ID=%q GH_APP_INSTALLATION_ID=%q GH_APP_SECRET=%q\n' \
-    "${TS_AUTHKEY:-}" "$IMAGE" "${GH_APP_ID:-}" "${GH_APP_INSTALLATION_ID:-}" "${GH_APP_SECRET:-}"
+  printf 'export TS_AUTHKEY=%q IMAGE=%q BOX_HOSTNAME=%q GH_APP_ID=%q GH_APP_INSTALLATION_ID=%q GH_APP_SECRET=%q\n' \
+    "${TS_AUTHKEY:-}" "$IMAGE" "$BOX_HOSTNAME" "${GH_APP_ID:-}" "${GH_APP_INSTALLATION_ID:-}" "${GH_APP_SECRET:-}"
   echo "spin-up: collect-only — answers gathered, secret '${GH_APP_SECRET:-<none>}' ready; NOT launching." >&2
   exit 0
 fi
@@ -75,5 +102,5 @@ else
 fi
 [ "$(ask 'Spin up fedora-dev now? (y/n)' y)" = y ] || { echo "aborted (nothing launched)" >&2; exit 0; }
 
-export TS_AUTHKEY IMAGE GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_SECRET
+export TS_AUTHKEY IMAGE BOX_HOSTNAME GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_SECRET
 exec ./run.sh
