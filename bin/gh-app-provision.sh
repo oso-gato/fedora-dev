@@ -56,15 +56,51 @@ _gha_stream_pem() {
   done <"$GHA_IN"
 }
 
+# Re-flow a paste-mangled PEM. Browser consoles (verified live: Hostinger, 2026-07-08)
+# flatten a multi-line paste into ONE line, turning the newlines into spaces. That is
+# DETERMINISTICALLY reversible: extract header/footer + base64 body, strip whitespace,
+# re-fold the body to 64 columns. Idempotent on a well-formed PEM. Emits nothing (rc 1)
+# when the markers can't be found.
+_gha_reflow_pem() {  # stdin: pasted text -> stdout: normalized PEM
+  local flat hdr ftr body
+  flat="$(tr '\n' ' ')"
+  hdr="$(printf '%s' "$flat" | grep -oE -- '-----BEGIN [A-Z ]+KEY-----' | head -1)"
+  ftr="$(printf '%s' "$flat" | grep -oE -- '-----END [A-Z ]+KEY-----'   | head -1)"
+  body="$(printf '%s' "$flat" | sed -n 's/.*KEY-----\(.*\)-----END.*/\1/p' | tr -d '[:space:]')"
+  [ -n "$hdr" ] && [ -n "$ftr" ] && [ -n "$body" ] || return 1
+  printf '%s\n' "$hdr"
+  printf '%s\n' "$body" | fold -w 64
+  printf '%s\n' "$ftr"
+}
+
+# Validate a PEM actually parses as a private key (openssl, stdin only — never a file).
+_gha_pem_valid() { printf '%s\n' "$1" | openssl pkey -noout 2>/dev/null; }
+
+# Read + reflow + VALIDATE a pasted PEM, re-prompting on a mangled paste (up to 3 tries).
+# Validation runs BEFORE any secret is created — a truncated console paste (bytes silently
+# dropped mid-paste) fails HERE with the cause named, not later at JWT signing.
+_gha_read_valid_pem() {  # -> echoes the validated PEM; rc 1 after 3 failed attempts
+  local attempt pem
+  for attempt in 1 2 3; do
+    pem="$(_gha_stream_pem | _gha_reflow_pem)" || pem=""
+    if [ -n "$pem" ] && _gha_pem_valid "$pem"; then printf '%s' "$pem"; return 0; fi
+    printf '>> That paste is NOT a valid private key (%s chars received) — likely truncated/garbled\n' "${#pem}" >"$GHA_TTY"
+    printf '>> by the console (browser consoles mangle long pastes). Attempt %s of 3 — paste again\n' "$attempt" >"$GHA_TTY"
+    printf '>> (or Ctrl-C and run Day-0 over plain ssh, the reliable channel for pastes):\n' >"$GHA_TTY"
+  done
+  echo "gha: no valid PEM after 3 attempts" >&2; return 1
+}
+
 read_pem_to_secret() {  # read_pem_to_secret <podman-secret-name>
-  local name="${1:?secret name required}"
+  local name="${1:?secret name required}" _pem
   command -v podman >/dev/null 2>&1 || { echo "gha: podman not found" >&2; return 1; }
-  _gha_stream_pem | podman secret create --replace "$name" - \
+  _pem="$(_gha_read_valid_pem)" || return 1
+  printf '%s\n' "$_pem" | podman secret create --replace "$name" - \
     || { echo "gha: 'podman secret create $name' failed" >&2; return 1; }
 }
 
 read_pem_to_var() {  # read_pem_to_var <varname>   (root->core ferry; PEM transiently in a var)
-  local _v="${1:?varname required}" _pem; _pem="$(_gha_stream_pem)"
+  local _v="${1:?varname required}" _pem; _pem="$(_gha_read_valid_pem)" || return 1
   printf -v "$_v" '%s' "$_pem"
 }
 
