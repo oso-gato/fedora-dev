@@ -41,6 +41,32 @@ echo "=== fedora-dev spin-up ===" >&2
 TS_AUTHKEY="${TS_AUTHKEY:-$(ask 'Tailscale auth key (tskey-…; blank = interactive web-login join)' '')}"
 IMAGE="${IMAGE:-$(ask 'Image ref (host deploy = ghcr.io; localhost/ = in-box self-validation only)' 'ghcr.io/oso-gato/fedora-dev:latest')}"
 
+# --- box identity: which HOST this dev box pairs with -------------------------------
+# One fedora-dev image, two possible homes. The name becomes BOTH the container hostname
+# and the tailnet node name (run.sh --hostname + the entrypoint's tailscale --hostname).
+# AUTO-SELECTED from the HOST's hostname (day0's host phase 1/7 sets it — hostnamectl,
+# cloud-init reversion disabled — before this user-layer wizard ever runs):
+#   erebus (VPS)      -> nox
+#   strix  (homelab)  -> nyx
+# Env-supplied BOX_HOSTNAME (scripted) wins; an UNRECOGNIZED host falls back to the ask.
+if [ -z "${BOX_HOSTNAME:-}" ]; then
+  _host="$(hostname -s 2>/dev/null || echo unknown)"
+  case "$_host" in
+    erebus) BOX_HOSTNAME=nox; echo "  -> host '$_host' -> box hostname 'nox' (VPS pairing, auto)" >&2 ;;
+    strix)  BOX_HOSTNAME=nyx; echo "  -> host '$_host' -> box hostname 'nyx' (homelab pairing, auto)" >&2 ;;
+    *)
+      echo "NOTICE: host '$_host' is not a known pairing (erebus->nox, strix->nyx auto-select" >&2
+      echo "        elsewhere) — enter this box's hostname (becomes the container hostname AND" >&2
+      echo "        the tailnet node name)." >&2
+      BOX_HOSTNAME="$(ask 'Hostname (RFC-1123: lowercase a-z 0-9 and hyphen, no leading/trailing hyphen, <=63 chars)' '')"
+      case "$BOX_HOSTNAME" in
+        ''|-*|*-|*[!a-z0-9-]*) echo "spin-up: FATAL — invalid hostname '$BOX_HOSTNAME'" >&2; exit 1 ;;
+      esac
+      [ "${#BOX_HOSTNAME}" -le 63 ] || { echo "spin-up: FATAL — hostname '$BOX_HOSTNAME' exceeds 63 characters" >&2; exit 1; }
+      echo "  -> box hostname: $BOX_HOSTNAME" >&2 ;;
+  esac
+fi
+
 # --- optional STANDING GitHub App credential (paste -> podman secret; never a file) ---
 # Same model as TS_AUTHKEY: the key is pasted at the prompt and streams straight into
 # podman's secret store. The container mints a <=1h installation token from it
@@ -61,8 +87,8 @@ fi
 # day0 never duplicates fedora-dev's questions. Emit the resolved env as `export` lines for
 # the caller to capture (eval), then stop.
 if [ "${COLLECT_ONLY:-0}" = 1 ]; then
-  printf 'export TS_AUTHKEY=%q IMAGE=%q GH_APP_ID=%q GH_APP_INSTALLATION_ID=%q GH_APP_SECRET=%q\n' \
-    "${TS_AUTHKEY:-}" "$IMAGE" "${GH_APP_ID:-}" "${GH_APP_INSTALLATION_ID:-}" "${GH_APP_SECRET:-}"
+  printf 'export TS_AUTHKEY=%q IMAGE=%q BOX_HOSTNAME=%q GH_APP_ID=%q GH_APP_INSTALLATION_ID=%q GH_APP_SECRET=%q\n' \
+    "${TS_AUTHKEY:-}" "$IMAGE" "$BOX_HOSTNAME" "${GH_APP_ID:-}" "${GH_APP_INSTALLATION_ID:-}" "${GH_APP_SECRET:-}"
   echo "spin-up: collect-only — answers gathered, secret '${GH_APP_SECRET:-<none>}' ready; NOT launching." >&2
   exit 0
 fi
@@ -75,5 +101,5 @@ else
 fi
 [ "$(ask 'Spin up fedora-dev now? (y/n)' y)" = y ] || { echo "aborted (nothing launched)" >&2; exit 0; }
 
-export TS_AUTHKEY IMAGE GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_SECRET
+export TS_AUTHKEY IMAGE BOX_HOSTNAME GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_SECRET
 exec ./run.sh

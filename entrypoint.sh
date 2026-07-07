@@ -91,13 +91,15 @@ for _ in $(seq 1 30); do
 done
 
 if [ -n "${TS_AUTHKEY:-}" ]; then
-    until tailscale up --ssh --auth-key="${TS_AUTHKEY}" --hostname=fedora-dev; do
+    # Tailnet node name = the container hostname (run.sh --hostname / Quadlet HostName —
+    # the BOX_HOSTNAME pairing choice: nox = VPS/erebus, nyx = homelab/strix).
+    until tailscale up --ssh --auth-key="${TS_AUTHKEY}" --hostname="$(hostname)"; do
         echo "[tailscale] up failed, retrying in 5s"; sleep 5
     done
     echo "==== TAILNET JOINED ===="
 else
     (
-        until tailscale up --ssh --hostname=fedora-dev 2>&1 | sed 's/^/[tailscale] /'; do
+        until tailscale up --ssh --hostname="$(hostname)" 2>&1 | sed 's/^/[tailscale] /'; do
             sleep 5
         done
         echo "==== TAILNET JOINED ===="
