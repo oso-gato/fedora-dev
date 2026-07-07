@@ -75,7 +75,10 @@ fi
 . ./bin/gh-app-provision.sh
 GHA_TTY="$SPINUP_TTY"; GHA_IN="$SPINUP_TTY"   # provision lib prompts on the same terminal
 GH_APP_SECRET="${GH_APP_SECRET:-}"
-if [ -z "${GH_APP_ID:-}" ] && [ "$(ask 'Provision a standing GitHub App credential now (paste the key)? — DEFAULT y: the autonomous loop needs a standing identity; "n" = fall back to your existing/later gh auth login (y/n)' y)" = y ]; then
+echo "── GitHub App credential for THE DEV BOX '$BOX_HOSTNAME' (fedora-dev) ──────────────" >&2
+echo "   This is the box's PR-AUTHORING identity (the 'devbox' App — Contents+Workflows R/W)." >&2
+echo "   NOT the host's App: the host (live-gate verdicts) uses its own, DIFFERENT App." >&2
+if [ -z "${GH_APP_ID:-}" ] && [ "$(ask "Provision the DEV BOX ('$BOX_HOSTNAME') App credential now (paste the key)? — DEFAULT y: the autonomous loop needs it; \"n\" = fall back to gh auth login (y/n)" y)" = y ]; then
   # The paste NEEDS a terminal — fail with the remedy, not a cryptic read error.
   { : <"$SPINUP_TTY"; } 2>/dev/null || { echo "spin-up: FATAL — App provisioning needs a terminal ($SPINUP_TTY unreadable). Run interactively, or supply GH_APP_ID/GH_APP_INSTALLATION_ID/GH_APP_SECRET via env (scripted path)." >&2; exit 1; }
   prompt_github_app gh_app_key || { echo "spin-up: GitHub App provisioning failed" >&2; exit 1; }
