@@ -37,7 +37,7 @@ gh_args=()
 #     GH_APP_FITNESS_KEY_FILE_HOST=<path to the fitness App private-key PEM>  (bind a file).
 # The key lands read-only in tmpfs at /run/secrets/gh_app_key_fitness; the entrypoint mints a
 # <=1h token from it and ferries ONLY the token to the home volume (the key never enters the
-# box). FITNESS_LOGIN overrides the fleet default bot login (oso-gato-fitness).
+# box). FITNESS_LOGIN overrides the fleet default bot login (oso-gato-fitness-claudebox).
 [ -n "${GH_APP_FITNESS_ID:-}" ]              && gh_args+=( -e "GH_APP_FITNESS_ID=${GH_APP_FITNESS_ID}" )
 [ -n "${GH_APP_FITNESS_INSTALLATION_ID:-}" ] && gh_args+=( -e "GH_APP_FITNESS_INSTALLATION_ID=${GH_APP_FITNESS_INSTALLATION_ID}" )
 [ -n "${FITNESS_LOGIN:-}" ]                  && gh_args+=( -e "FITNESS_LOGIN=${FITNESS_LOGIN}" )

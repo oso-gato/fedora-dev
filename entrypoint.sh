@@ -185,7 +185,7 @@ fitness_ferry() {
         || { echo "[fitness-auth] fitness token mint FAILED — ferry skipped (fail-closed: no fitness verdicts)"; return 1; }
     install -d -m 0700 -o core -g core /home/core/.config/fitness
     ( umask 077; printf 'FITNESS_LOGIN=%s\nFITNESS_GH_TOKEN=%s\n' \
-        "${FITNESS_LOGIN:-oso-gato-fitness}" "$tok" > /home/core/.config/fitness/env )
+        "${FITNESS_LOGIN:-oso-gato-fitness-claudebox}" "$tok" > /home/core/.config/fitness/env )
     chown core:core /home/core/.config/fitness/env
     echo "[fitness-auth] fitness token ferried to ~core/.config/fitness/env (<=1h; refreshed on the 40-min tick)"
 }
