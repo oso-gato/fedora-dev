@@ -365,7 +365,12 @@ fi
 # Doesn't block sshd — you can connect immediately; `claude` will tail this if
 # you try to enter the box before assemble completes.
 runuser -u core -- bash -c '
-    if [ ! -e /home/core/.local/state/claudebox/.assembled ]; then
+    # Assemble when not yet assembled OR when a prior assemble FAILED (#115): the
+    # .assemble-failed marker (written by claudebox-assemble.sh on a non-zero exit)
+    # overrides a STALE .assembled from a previous good run, so a box broken by a
+    # failed rebuild recovers on the next boot instead of staying stuck UNHEALTHY.
+    if [ ! -e /home/core/.local/state/claudebox/.assembled ] \
+       || [ -e /home/core/.local/state/claudebox/.assemble-failed ]; then
         echo "[first-boot] assembling claudebox in the background..."
         bash /home/core/.local/share/fedora-dev/claudebox-assemble.sh \
             > /home/core/.local/state/claudebox/first-assemble.log 2>&1 < /dev/null \

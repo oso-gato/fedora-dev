@@ -36,8 +36,10 @@ if rebuild_in_progress; then
 fi
 
 # If first-boot assemble hasn't happened yet (eager assemble still running, or it
-# crashed), wait for it or report.
-if [ ! -e "$state/.assembled" ]; then
+# crashed), wait for it or report. Also recover a box left broken by a FAILED
+# assemble (#115): .assemble-failed present overrides a stale .assembled so entering
+# the box re-assembles instead of dropping into a half-assembled shell.
+if [ ! -e "$state/.assembled" ] || [ -e "$state/.assemble-failed" ]; then
     if pgrep -f "fedora-dev/claudebox-assemble.sh" >/dev/null 2>&1; then
         echo ">> first-boot claudebox assemble is still running — tailing it…"
         echo "   ($(date)) Once complete this command will continue."
