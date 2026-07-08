@@ -89,8 +89,9 @@ if [ -z "${FITNESS_GH_TOKEN:-}" ] && [ -r "${FITNESS_ENV_FILE:-$HOME/.config/fit
   [ -n "$_fl_pre" ] && FITNESS_LOGIN="$_fl_pre"   # explicit login wins over the ferried one
 fi
 # Fleet default: the org-wide independent fitness App (verdicts valid on ANY oso-gato repo as
-# long as it differs from the PR author — enforced fail-closed below either way).
-FITNESS_LOGIN="${FITNESS_LOGIN:-oso-gato-fitness}"
+# long as it differs from the PR author — enforced fail-closed below either way). The login is the
+# App SLUG (= its name, already slug-form): the host-App precedent proves name == comment login.
+FITNESS_LOGIN="${FITNESS_LOGIN:-oso-gato-fitness-claudebox}"
 # NOTE: the login form MUST match what `gh pr view --json comments` (GraphQL) returns for the bot —
 # that is the NON-`[bot]` form (REST's .user.login adds `[bot]`; GraphQL's .author.login does NOT).
 # auto-merge.sh reads via the same GraphQL surface, so both must use the non-`[bot]` login. Use `-`
@@ -107,7 +108,7 @@ pr_author="$(gh pr view "$PR" --repo "$SLUG" --json author -q .author.login 2>/d
 # NORMALIZE: `--json author` prefixes an App-authored PR's login with `app/` (e.g.
 # `app/oso-gato-nox-claudebox`) while comment authors carry the bare form — PROVEN empirically
 # (dry-run vs fedora-dev#110). Without stripping it, the self-review comparison below could NEVER
-# match an App-authored PR (`oso-gato-fitness` != `app/oso-gato-fitness`) — fail-OPEN on the exact
+# match an App-authored PR (`x` != `app/x`) — fail-OPEN on the exact
 # case it guards. Strip the prefix so identities compare in one canonical form.
 pr_author="${pr_author#app/}"
 
