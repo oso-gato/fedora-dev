@@ -103,6 +103,31 @@ for the monthly clean rebuild).
 - TEAR DOWN and REBUILD your own work to a ZERO-BASE rather than defend a first draft.
 - Presenting an options-decision to the human is RARE — reserved for a genuine decision point.
 
+## UNATTENDED-LOOP EXECUTION — the DEFAULT for EVERY task (BINDING)
+
+EVERY dev task runs as an UNATTENDED autonomous loop. The agent MUST NOT gate the task on a live human
+mid-flight — it engages the human ONLY for the two reasons below (materially complete / materially
+blocked). A permission prompt during an unattended window HALTS the whole window (one prompt = a dead
+8-hour run), so it is a FAILURE, not a pause. Two mechanisms make the loop stall-proof:
+
+- STALL-PROOF COMMAND DISCIPLINE. The box runs `defaultMode: auto`: the classifier SILENTLY allows plain
+  single commands but ASKS (→ a stall) on (a) compound / piped / chained commands, (b) interpreter
+  one-liners (`python3 -c`, `bash -c`, `sh -c`, `awk`), (c) any command whose args contain a push/merge
+  verb (see WORKING WITH THE GATE), (d) self-modification of permission scope. THEREFORE:
+  - INSPECT + EDIT with the FILE TOOLS (Read / Grep / Glob / Edit / Write) — they never prompt. Do NOT
+    reach for `cat` / `grep` / `find` in Bash for what a tool does promptlessly.
+  - Issue ONE plain command at a time — never chain, pipe, or redirect a working command.
+  - Write commit / PR text to a FILE (`git commit -F`, `gh pr create --body-file`); call push/merge
+    verbs DIRECTLY, never inline in args or via a wrapper.
+- WHEN IN DOUBT, QUEUE — NEVER ATTEMPT. Anything outside the auto-approved envelope goes into the human
+  packet (a queued Tier-A decision with its TLDR + three questions), NOT a live attempt. Queuing is
+  correct; attempting-and-prompting is the failure.
+
+The DURABLE substrate is the headless fixer (`pr-poller.sh` → `claude -p`, no human attached): it has NO
+ask path at all — a would-be prompt becomes a DENIAL the fixer adapts around or reports as `BLOCKED` via
+a PR comment, so it can never stall the window. The in-session loop MIRRORS this discipline; the headless
+poller IS it. State between iterations lives entirely in the PR / verdict-comment stream.
+
 ## ENGAGE THE HUMAN — exactly two reasons (NO others)
 
 1. MATERIALLY COMPLETE — the objective is met; needs the clickable APPROVE to merge.
