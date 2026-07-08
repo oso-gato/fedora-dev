@@ -108,7 +108,10 @@ SLUG="oso-gato/$POLLER_REPO"
 # login MUST be the GraphQL form (no `[bot]` suffix) — that is what `gh pr view --json comments`
 # returns and what auto-merge.sh matches against. REST's `.user.login` adds `[bot]`; do NOT use it.
 LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
-FITNESS_LOGIN="${FITNESS_LOGIN:-}"
+# Fleet default: the org-wide independent fitness App. The TOKEN is not read here — the poller only
+# EXTRACTS verdicts by author; fitness-review.sh (which posts) sources the ferried token itself from
+# ~/.config/fitness/env (written by the base entrypoint's ferry; the App key never enters the box).
+FITNESS_LOGIN="${FITNESS_LOGIN:-oso-gato-fitness}"
 POLLER_ARMED="${POLLER_ARMED:-0}"
 POLL_INTERVAL="${POLL_INTERVAL:-60}"
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"

@@ -57,6 +57,11 @@ SLUG="oso-gato/$REPO"
 #   FITNESS_LOGIN   — the independent fitness-review App identity that posts the fitness verdict
 LG_HOST_LOGIN="${LG_HOST_LOGIN:-}"; FITNESS_LOGIN="${FITNESS_LOGIN:-}"
 pr_author="$(gh pr view "$PR" --repo "$SLUG" --json author -q .author.login 2>/dev/null)"
+# NORMALIZE: `--json author` prefixes an App-authored PR's login with `app/` (comment authors are
+# bare) — proven empirically vs fedora-dev#110. Unstripped, the anchor != author guards below can
+# NEVER match an App-authored PR (`x` != `app/x`) — fail-OPEN on the exact self-review case they
+# exist to refuse. One canonical (bare) form for every identity comparison.
+pr_author="${pr_author#app/}"
 
 # Gate 1 — TIER from the changed files (fail-closed: no files → treat as A/HUMAN, never auto)
 tier="$(gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null \

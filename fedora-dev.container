@@ -82,6 +82,15 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # Secret=gh_app_key,type=mount,target=gh_app_key
 # Environment=GH_APP_ID=000000 GH_APP_INSTALLATION_ID=00000000
 
+# Optional FITNESS-REVIEW App credential — the fleet-wide INDEPENDENT reviewer identity
+# (oso-gato-fitness; DISTINCT from the dev App — auto-merge.sh rejects self-authored
+# verdicts). Key as a podman secret; the entrypoint mints a <=1h token and ferries ONLY
+# the token to the home volume (the key never enters the claudebox). The IDs below are
+# the fleet constants (public, not secrets); uncomment the two lines to enable:
+#   podman secret create gh_app_key_fitness ./fitness-app-private-key.pem
+# Secret=gh_app_key_fitness,type=mount,target=gh_app_key_fitness
+# Environment=GH_APP_FITNESS_ID=2093471 GH_APP_FITNESS_INSTALLATION_ID=89771254
+
 # Optional TS_AUTHKEY for an UNATTENDED tailnet join — a podman secret injected as an ENV
 # VAR (type=env; the entrypoint honors $TS_AUTHKEY, else falls back to web-login).
 # fedora-bootstrap's setup-user creates the secret from the spin-up answer and uncomments:

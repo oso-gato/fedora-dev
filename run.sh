@@ -30,6 +30,20 @@ gh_args=()
 [ -n "${GH_APP_KEY_FILE:-}" ]        && gh_args+=( -v "${GH_APP_KEY_FILE}:/run/secrets/gh_app_key:ro" )
 [ -n "${GH_APP_SECRET:-}" ]          && gh_args+=( --secret "${GH_APP_SECRET},type=mount,target=gh_app_key,mode=0400" )
 
+# Optional FITNESS-REVIEW App credential (the fleet-wide independent reviewer identity —
+# DISTINCT from the dev App above; auto-merge.sh rejects a self-authored verdict):
+#   GH_APP_FITNESS_ID + GH_APP_FITNESS_INSTALLATION_ID + ONE of:
+#     GH_APP_FITNESS_SECRET=<podman-secret-name>  (preferred; e.g. gh_app_key_fitness), OR
+#     GH_APP_FITNESS_KEY_FILE_HOST=<path to the fitness App private-key PEM>  (bind a file).
+# The key lands read-only in tmpfs at /run/secrets/gh_app_key_fitness; the entrypoint mints a
+# <=1h token from it and ferries ONLY the token to the home volume (the key never enters the
+# box). FITNESS_LOGIN overrides the fleet default bot login (oso-gato-fitness).
+[ -n "${GH_APP_FITNESS_ID:-}" ]              && gh_args+=( -e "GH_APP_FITNESS_ID=${GH_APP_FITNESS_ID}" )
+[ -n "${GH_APP_FITNESS_INSTALLATION_ID:-}" ] && gh_args+=( -e "GH_APP_FITNESS_INSTALLATION_ID=${GH_APP_FITNESS_INSTALLATION_ID}" )
+[ -n "${FITNESS_LOGIN:-}" ]                  && gh_args+=( -e "FITNESS_LOGIN=${FITNESS_LOGIN}" )
+[ -n "${GH_APP_FITNESS_KEY_FILE_HOST:-}" ]   && gh_args+=( -v "${GH_APP_FITNESS_KEY_FILE_HOST}:/run/secrets/gh_app_key_fitness:ro" )
+[ -n "${GH_APP_FITNESS_SECRET:-}" ]          && gh_args+=( --secret "${GH_APP_FITNESS_SECRET},type=mount,target=gh_app_key_fitness,mode=0400" )
+
 podman run -d --name fedora-dev \
     --hostname "${BOX_HOSTNAME:-fedora-dev}" \
     --restart=always \
