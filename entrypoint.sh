@@ -162,6 +162,35 @@ else
     echo "[gh-auth] no standing credential supplied — running unauthenticated (fail-safe). A persisted gh login on the home volume (if any) is used as-is; otherwise run 'gh auth login' once inside the box — it persists across rebuilds and is used automatically. The App path is OPTIONAL."
 fi
 
+# ---- FITNESS-REVIEW token ferry (independent reviewer identity; optional) ----
+# The independent fitness harness (bin/fitness-review.sh, run IN-BOX) must post its
+# verdict AS the fleet-wide fitness App — an identity DISTINCT from this box's dev
+# App, or auto-merge.sh rejects the verdict as self-review. The fitness App PRIVATE
+# KEY stays at the BASE layer (/run/secrets/gh_app_key_fitness, tmpfs — NOT visible
+# in-box, verified empirically); only a <=1h INSTALLATION token is ferried to a
+# 0600 home-volume file the box can read. Same minter as the dev App (gh-app-auth.sh
+# is env-parameterized; `token` mode is read-only — it never touches the dev
+# identity's git/gh wiring). Runs AS ROOT (the secret mount is root-readable); only
+# the short-lived token ever lands in core's home. Best-effort: no key/ID -> no
+# ferry -> fitness-review.sh refuses fail-closed (no PASS => no auto-merge).
+fitness_ferry() {
+    [ -n "${GH_APP_FITNESS_ID:-}" ] || return 0
+    [ -r "${GH_APP_FITNESS_KEY_FILE:-/run/secrets/gh_app_key_fitness}" ] || return 0
+    local tok
+    tok="$(GH_APP_ID="${GH_APP_FITNESS_ID}" \
+           GH_APP_INSTALLATION_ID="${GH_APP_FITNESS_INSTALLATION_ID:-}" \
+           GH_APP_PRIVATE_KEY="" \
+           GH_APP_PRIVATE_KEY_FILE="${GH_APP_FITNESS_KEY_FILE:-/run/secrets/gh_app_key_fitness}" \
+           bash /usr/local/bin/gh-app-auth.sh token)" \
+        || { echo "[fitness-auth] fitness token mint FAILED — ferry skipped (fail-closed: no fitness verdicts)"; return 1; }
+    install -d -m 0700 -o core -g core /home/core/.config/fitness
+    ( umask 077; printf 'FITNESS_LOGIN=%s\nFITNESS_GH_TOKEN=%s\n' \
+        "${FITNESS_LOGIN:-oso-gato-fitness}" "$tok" > /home/core/.config/fitness/env )
+    chown core:core /home/core/.config/fitness/env
+    echo "[fitness-auth] fitness token ferried to ~core/.config/fitness/env (<=1h; refreshed on the 40-min tick)"
+}
+fitness_ferry || true
+
 # ---- live-spec bootstrap (first boot only) ---------------------------------
 # Clone the fedora-dev repo to /home/core/.local/share/fedora-dev/ — this is the
 # LIVE source of truth for distrobox.ini and the box scripts. It persists on the
@@ -322,6 +351,14 @@ if [ -n "${GH_APP_ID:-}" ] && { [ -n "${GH_APP_PRIVATE_KEY:-}" ] || [ -r "${GH_A
         GH_APP_PRIVATE_KEY="${GH_APP_PRIVATE_KEY:-}" \
         GH_APP_PRIVATE_KEY_FILE="${GH_APP_PRIVATE_KEY_FILE:-/run/secrets/gh_app_key}" \
         bash -c 'while sleep 2400; do bash /usr/local/bin/gh-app-auth.sh install >/dev/null 2>&1 || true; done' &
+fi
+
+# ---- supervised: fitness token refresh (same <=1h expiry, same cadence) -----
+# Best-effort like the dev tick (not in the watchdog): a miss only staleness-expires
+# the ferried fitness token until the next tick/boot; fitness-review.sh fails closed
+# on a dead token (no PASS => no auto-merge). The subshell inherits fitness_ferry().
+if [ -n "${GH_APP_FITNESS_ID:-}" ] && [ -r "${GH_APP_FITNESS_KEY_FILE:-/run/secrets/gh_app_key_fitness}" ]; then
+    ( while sleep 2400; do fitness_ferry >/dev/null 2>&1 || true; done ) &
 fi
 
 # ---- eager first-boot claudebox assemble (one-shot, background) -----------

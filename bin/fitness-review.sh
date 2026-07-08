@@ -45,12 +45,16 @@ set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 
 # ---- the PURE verdict extractor (no I/O — testable in isolation) -----------------------------------
-# The reviewer is instructed to end with a line `FITNESS_VERDICT: PASS|RETURN|ESCALATE`. We take the
-# LAST such line (its final judgment) and NOTHING else. No sanctioned token ⇒ empty ⇒ fail-closed.
+# The reviewer is instructed to end with a line `FITNESS_VERDICT: <verdict>`. We take the LAST such
+# line (its final judgment) and NOTHING else. No sanctioned token ⇒ empty ⇒ fail-closed.
+# ANCHORED AT BOTH ENDS: the line must be the verdict token and nothing more. Without the end anchor
+# a reviewer that merely QUOTES the instruction/rubric at line start (e.g. `FITNESS_VERDICT: PASS
+# (or RETURN…)`) yields a spurious PASS with no real judgment — fail-OPEN. Proven empirically: the
+# prompt's own template line was extractable as PASS under the loose form (mock-stub dry-run).
 extract_verdict(){
   # reads model output on stdin; echoes PASS|RETURN|ESCALATE or nothing
-  grep -oE '^[[:space:]]*FITNESS_VERDICT:[[:space:]]*(PASS|RETURN|ESCALATE)\b' \
-    | grep -oE '(PASS|RETURN|ESCALATE)$' | tail -1
+  grep -oE '^[[:space:]]*FITNESS_VERDICT:[[:space:]]*(PASS|RETURN|ESCALATE)[[:space:]]*$' \
+    | grep -oE '(PASS|RETURN|ESCALATE)[[:space:]]*$' | grep -oE '(PASS|RETURN|ESCALATE)' | tail -1
 }
 
 if [ "${1:-}" = "--selftest" ]; then
@@ -64,6 +68,10 @@ if [ "${1:-}" = "--selftest" ]; then
   check "inline not anchored" $'the verdict FITNESS_VERDICT: PASS inline'          ""
   check "garbage"           $'PASSED! LGTM'                                        ""
   check "empty"             ""                                                     ""
+  check "trailing text"     $'FITNESS_VERDICT: PASS because it looks fine'          ""
+  check "quoted rubric line" $'FITNESS_VERDICT: PASS   (or RETURN, or ESCALATE)'    ""
+  check "prompt placeholder" $'FITNESS_VERDICT: <PASS|RETURN|ESCALATE>'             ""
+  check "real after quote"  $'FITNESS_VERDICT: PASS (or RETURN)\nFITNESS_VERDICT: RETURN' RETURN
   [ "$fail" = 0 ] && echo "ALL FITNESS SELFTESTS PASS" || echo "FITNESS SELFTESTS FAILED"
   exit "$fail"
 fi
@@ -71,7 +79,18 @@ fi
 POST=0; [ "${1:-}" = "--post" ] && { POST=1; shift; }
 REPO="${1:?usage: fitness-review.sh [--post] <repo> <pr>}"; PR="${2:?pr required}"
 SLUG="oso-gato/$REPO"
-FITNESS_LOGIN="${FITNESS_LOGIN:-}"
+# TOKEN FERRY FALLBACK — the fitness App key never enters the box; the base entrypoint mints a
+# <=1h installation token and ferries it (with the login) to this 0600 home-volume file on the
+# 40-min tick. Explicit env ALWAYS wins (testing / CI); the ferry only fills what is unset. The
+# file is root-written KEY=VALUE (trusted producer: the entrypoint), sourced only when readable.
+if [ -z "${FITNESS_GH_TOKEN:-}" ] && [ -r "${FITNESS_ENV_FILE:-$HOME/.config/fitness/env}" ]; then
+  _fl_pre="${FITNESS_LOGIN:-}"
+  . "${FITNESS_ENV_FILE:-$HOME/.config/fitness/env}"
+  [ -n "$_fl_pre" ] && FITNESS_LOGIN="$_fl_pre"   # explicit login wins over the ferried one
+fi
+# Fleet default: the org-wide independent fitness App (verdicts valid on ANY oso-gato repo as
+# long as it differs from the PR author — enforced fail-closed below either way).
+FITNESS_LOGIN="${FITNESS_LOGIN:-oso-gato-fitness}"
 # NOTE: the login form MUST match what `gh pr view --json comments` (GraphQL) returns for the bot —
 # that is the NON-`[bot]` form (REST's .user.login adds `[bot]`; GraphQL's .author.login does NOT).
 # auto-merge.sh reads via the same GraphQL surface, so both must use the non-`[bot]` login. Use `-`
@@ -85,6 +104,12 @@ die(){ log "$*"; exit 1; }
 
 pr_author="$(gh pr view "$PR" --repo "$SLUG" --json author -q .author.login 2>/dev/null)"
 [ -n "$pr_author" ] || die "cannot read PR author for $SLUG#$PR (fail-closed)"
+# NORMALIZE: `--json author` prefixes an App-authored PR's login with `app/` (e.g.
+# `app/oso-gato-nox-claudebox`) while comment authors carry the bare form — PROVEN empirically
+# (dry-run vs fedora-dev#110). Without stripping it, the self-review comparison below could NEVER
+# match an App-authored PR (`oso-gato-fitness` != `app/oso-gato-fitness`) — fail-OPEN on the exact
+# case it guards. Strip the prefix so identities compare in one canonical form.
+pr_author="${pr_author#app/}"
 
 # SEPARATION OF DUTIES — fail-closed, identical rule to the one auto-merge.sh enforces on read.
 [ -n "$FITNESS_LOGIN" ] || die "FITNESS_LOGIN unset — a fitness verdict must be posted by a DISTINCT bot; refusing (fail-closed)"
@@ -137,8 +162,8 @@ Decide:
              or the diff is unreadable/truncated past the point of judgment).
 When unsure between PASS and a lower verdict, do NOT PASS.
 
-End your reply with EXACTLY one line, nothing after it:
-FITNESS_VERDICT: PASS   (or RETURN, or ESCALATE)
+End your reply with EXACTLY one line, nothing after it — the token alone, no brackets, no trailing text:
+FITNESS_VERDICT: <PASS|RETURN|ESCALATE>
 
 === PR $SLUG#$PR ===
 TITLE: $title
