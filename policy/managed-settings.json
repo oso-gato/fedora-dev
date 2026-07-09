@@ -1,13 +1,26 @@
 {
+    "comment_pin": "allowManagedPermissionRulesOnly + allowManagedHooksOnly MUST sit at this TOP level: claude-code reads them ONLY at the settings root (verified against the shipped binary v2.1.205 at every read site); nested inside permissions{} they are silently INERT — which is how a stray user-layer ask rule stalled an unattended run on 2026-07-09. With the pin LIVE, user/project/local/cliArg/session permission rules (allow+ask+deny) AND user-layer hooks are ALL ignored — so everything the loop needs lives in THIS file: the gate hook, the stall-visibility loggers, the one destructive ask, and the tool allows. Session-added ask rules (the stall class) are structurally impossible.",
     "effortLevel": "xhigh",
     "env": {
         "DISABLE_UPDATES": "1",
         "DISABLE_AUTOUPDATER": "1"
     },
+    "allowManagedPermissionRulesOnly": true,
+    "allowManagedHooksOnly": true,
     "permissions": {
-        "comment_allow": "Full-autonomy (make-it-work stage): allow ALL Bash so the autonomous loop never prompts. The deny[] below still hard-blocks its entries (deny > allow), and the gate-push.sh PreToolUse hook still runs (hooks fire regardless of allow rules) so every push-to-main / merge verb still routes to Arthur's click. Tighten back to a scoped list in the make-it-safe stage.",
+        "comment_allow": "Full-autonomy (make-it-work stage): allow ALL Bash + the file/orchestration tools so the autonomous loop never prompts (with rules pinned managed-only, no user-layer allow list backstops these). The deny[] below still hard-blocks its entries (deny > allow), and the gate-push.sh PreToolUse hook still runs (hooks fire regardless of allow rules) so every push-to-main / merge verb still routes to Arthur's click. The sole surviving ask beyond the gate is gh repo delete — never on a loop path; there a stall beats execution. Tighten back to a scoped list in the make-it-safe stage.",
         "allow": [
-            "Bash(*)"
+            "Bash(*)",
+            "Edit",
+            "Write",
+            "NotebookEdit",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Agent"
+        ],
+        "ask": [
+            "Bash(gh repo delete:*)"
         ],
         "deny": [
             "Bash(dnf copr:*)",
@@ -35,9 +48,7 @@
             "mcp__*pull_request*merge*"
         ],
         "disableBypassPermissionsMode": "disable",
-        "defaultMode": "auto",
-        "allowManagedPermissionRulesOnly": true,
-        "allowManagedHooksOnly": true
+        "defaultMode": "auto"
     },
     "hooks": {
         "PreToolUse": [
@@ -47,6 +58,26 @@
                     {
                         "type": "command",
                         "command": "/etc/claude-code/hooks/gate-push.sh"
+                    }
+                ]
+            }
+        ],
+        "PermissionRequest": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "mkdir -p /home/core/autonomy-runs 2>/dev/null; printf '%s PERMISSION_PROMPT %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$(cat)\" >> /home/core/autonomy-runs/interventions.log 2>/dev/null; exit 0"
+                    }
+                ]
+            }
+        ],
+        "PermissionDenied": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "mkdir -p /home/core/autonomy-runs 2>/dev/null; printf '%s DENIED %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$(cat)\" >> /home/core/autonomy-runs/interventions.log 2>/dev/null; exit 0"
                     }
                 ]
             }
