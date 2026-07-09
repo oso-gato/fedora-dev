@@ -388,15 +388,16 @@ runuser -u core -- bash -c '
 # deliberately OUTSIDE the hard watchdog below: a poller death must never take the container down.
 #
 # ENV ACROSS THE BOX BOUNDARY: `distrobox enter` does NOT inherit this base entrypoint's environment, so
-# the poller's config — POLLER_ARMED above all — must be forwarded EXPLICITLY or arming can never reach
-# pr-poller.sh inside the box. Expand the values HERE (root entrypoint env, delivered by run.sh/Quadlet)
-# into a `VAR=val …` prefix the in-box login shell applies before `exec`, passed as $1 (no reliance on
-# runuser env-preservation). Every var is colon-dash-defaulted downstream (poller-service.sh + pr-poller.sh),
-# so an unset/empty value safely falls back to the in-box default (repo=fedora-dev, interval=60, etc.).
+# the poller's arming config must be forwarded EXPLICITLY or POLLER_ARMED can never reach pr-poller.sh
+# inside the box. Expand the poller vars run.sh/Quadlet actually deliver to THIS base env — POLLER_ARMED
+# and FITNESS_LOGIN — into a `VAR=val …` prefix the in-box login shell applies before `exec`, passed as
+# $1 (no reliance on runuser env-preservation). Both are colon-dash-defaulted downstream, so an unset
+# value safely falls back (POLLER_ARMED→0 = DISARMED; FITNESS_LOGIN→the fleet default). The poller's other
+# knobs (POLLER_REPO, POLL_INTERVAL, FITNESS_SAME_IDENTITY) keep their correct in-box defaults until
+# run.sh/Quadlet are extended to deliver them — a separate, deliberate change.
 if [ "${POLLER_ENABLED:-0}" = 1 ]; then
     echo "[poller] POLLER_ENABLED=1 — starting the dev-side poller in-box (armed=${POLLER_ARMED:-0})"
-    poller_env="POLLER_ARMED=${POLLER_ARMED:-0} POLLER_REPO=${POLLER_REPO:-} POLL_INTERVAL=${POLL_INTERVAL:-}"
-    poller_env="$poller_env FITNESS_SAME_IDENTITY=${FITNESS_SAME_IDENTITY:-} FITNESS_LOGIN=${FITNESS_LOGIN:-}"
+    poller_env="POLLER_ARMED=${POLLER_ARMED:-0} FITNESS_LOGIN=${FITNESS_LOGIN:-}"
     runuser -u core -- bash -c '
         st=/home/core/.local/state/claudebox
         until [ -e "$st/.assembled" ]; do sleep 15; done   # box must exist before `distrobox enter`
