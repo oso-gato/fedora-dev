@@ -126,7 +126,11 @@ log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
 # Surface a decision to Arthur WITHOUT merging: a single idempotent comment per (pr,sha,kind). The
 # poller never clicks — it makes the human touchpoint visible and stops churning.
 surface(){ # <pr> <sha> <kind> <message>
-  local pr="$1" sha="$2" kind="$3" msg="$4" m="$STATE/surfaced-${pr}-${sha}-${kind}.done"
+  # NB: two `local` statements ON PURPOSE. Bash expands ALL words of a declaration builtin BEFORE
+  # executing it, so `${kind}` inside a `m=…` word on the SAME line would be expanded before
+  # kind="$3" is assigned → `set -u` abort. Proven live: the first real sweep died here (#116).
+  local pr="$1" sha="$2" kind="$3" msg="$4"
+  local m="$STATE/surfaced-${pr}-${sha}-${kind}.done"
   [ -f "$m" ] && return 0
   log "SURFACE $SLUG#$pr @ ${sha:0:7} [$kind]: $msg"
   gh pr comment "$pr" --repo "$SLUG" --body "**Poller → Arthur [$kind]:** $msg"$'\n\n<sub>dev-side poller (Step 5); no merge taken — needs your decision.</sub>' >/dev/null 2>&1 && : > "$m"
