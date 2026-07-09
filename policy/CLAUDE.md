@@ -15,7 +15,7 @@ PRs, present them to Arthur as a discrete clickable decision, and on his APPROVE
 
 ```
 IN:   a repo to develop/modify; OR a repo's open PRs to review + merge on Arthur's approval
-OUT:  merged `main` (on Arthur's clickable APPROVE) → CI builds + signs → ghcr.io/oso-gato/<name>:latest → fedora-bootstrap deploys.
+OUT:  merged `main` (on Arthur's clickable APPROVE) → CI builds → ghcr.io/oso-gato/<name>:latest (unsigned) → fedora-bootstrap deploys.
 ```
 
 ## DO

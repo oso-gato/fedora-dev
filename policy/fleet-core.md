@@ -71,7 +71,8 @@ MOST of the work and thinking; the human is engaged only at the two points in EN
 2. Engage the host ONLY in the two TWO-TIER scenarios (below), via the `live-validate` label → the host
    builds a DISPOSABLE candidate + live-gates it (Gate B) → posts a GREEN/RED verdict comment → iterate
    (RED: push a fix, or SUPERSEDE the branch if the approach was wrong; GREEN: build upon it) → repeat.
-3. Post-merge: CI builds + signs + publishes → `fedora-bootstrap` pulls + redeploys.
+3. Post-merge: CI builds + publishes (UNSIGNED — image signing was dropped fleet-wide as
+   unenforced theatre; no host cosign-verifies) → `fedora-bootstrap` pulls + redeploys.
 - ROLES: build = always CI; operate/deploy = always `fedora-bootstrap`; merge = always `fedora-dev` (or
   Arthur). A box asked to do another box's job → STOP-AND-SURFACE.
 - Repos enroll DYNAMICALLY: create/rename/merge/delete freely; enroll by labelling a PR `live-validate`
