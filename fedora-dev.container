@@ -108,11 +108,14 @@ PublishPort=61001-62000:61001-62000/udp
 # Health = liveness of the core services PLUS readiness of the nested rootless
 # podman API socket (the CONTAINER_HOST bridge). The socket check catches a
 # broken-but-running image (e.g. the socket failing to bind) so Notify=healthy
-# and the harness's auto-rollback actually fire. Deliberately NOT gated on full
-# claudebox assembly (background + slow on first boot) — that would cause
-# false-unhealthy rollbacks. Must match run.sh's --health-cmd. pgrep needs
-# procps-ng (base image).
-HealthCmd=pgrep -x sshd && pgrep -x tailscaled && test -S /run/user/1000/podman/podman.sock
+# and the harness's auto-rollback actually fire. Still NOT gated on assembly
+# COMPLETION (background + slow on first boot) — that would cause false-unhealthy
+# rollbacks — but IS gated on assembly not having FAILED: claudebox-assemble.sh
+# writes .assemble-failed on a non-zero exit (cleared on success), so a
+# half-assembled box (#11) reads UNHEALTHY while a normal in-progress first-boot
+# assemble (marker absent) stays healthy. Must match run.sh's --health-cmd.
+# pgrep needs procps-ng (base image).
+HealthCmd=pgrep -x sshd && pgrep -x tailscaled && test -S /run/user/1000/podman/podman.sock && ! test -e /home/core/.local/state/claudebox/.assemble-failed
 HealthInterval=30s
 HealthRetries=3
 HealthStartPeriod=30s

@@ -18,6 +18,30 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 cd "$LIVE"
 
+# Health-honesty marker (#11). claudebox-assemble.sh is the SINGLE entry for every
+# assemble path (entrypoint first boot, the `claude` wrapper self-heal, box-rebuild),
+# so an EXIT trap here is the one authoritative place to reflect THIS run's outcome:
+#   non-zero exit (any failure / `set -e` abort) -> write .assemble-failed
+#   clean exit                                   -> clear it
+# The container health cmd keys off `! test -e .assemble-failed`, so a half-assembled
+# box reads UNHEALTHY, while a normal IN-PROGRESS assemble (marker absent) stays
+# healthy — no false-unhealthy during the slow first boot (cf. fedora-dev.container).
+# Keyed on FAILURE (not on the .assembled success marker on purpose): .assembled
+# persists on the home volume, so a FAILED re-assemble/rebuild would still read
+# healthy off a stale success marker — the failure marker cannot.
+STATE="$HOME/.local/state/claudebox"
+mkdir -p "$STATE"
+_assemble_finish() {
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+        rm -f "$STATE/.assemble-failed"
+    else
+        printf '%s assemble exited rc=%s — see first-assemble.log\n' \
+            "$(date -u +%FT%TZ 2>/dev/null || date)" "$rc" > "$STATE/.assemble-failed"
+    fi
+}
+trap _assemble_finish EXIT
+
 # Robust teardown: distrobox/podman `rm -f` can fail to evict a box wedged in
 # podman's `stopping` state. In this nested-rootless setup, crun's SIGKILL may not
 # reap the container init within the stop timeout (`rm -f` reports "given PID did
@@ -151,8 +175,9 @@ podman exec claudebox test -x /etc/claude-code/hooks/gate-push.sh || {
     exit 1
 }
 
-# Mark assembled — entrypoint's first-boot guard checks this.
-touch "$HOME/.local/state/claudebox/.assembled"
+# Mark assembled — entrypoint's first-boot guard checks this. The _assemble_finish
+# EXIT trap clears any .assemble-failed on this clean exit (health reads healthy).
+touch "$STATE/.assembled"
 
 echo "==== claudebox READY: claude-code on latest channel + bridges + policy ===="
 echo "   Run 'claude' from a tmux shell to start working."

@@ -58,7 +58,7 @@ podman run -d --name fedora-dev \
     -v fedora-dev-state:/var/lib/tailscale \
     -p 4444:22 \
     -p 61001-62000:61001-62000/udp \
-    --health-cmd 'pgrep -x sshd && pgrep -x tailscaled && test -S /run/user/1000/podman/podman.sock' \
+    --health-cmd 'pgrep -x sshd && pgrep -x tailscaled && test -S /run/user/1000/podman/podman.sock && ! test -e /home/core/.local/state/claudebox/.assemble-failed' \
     --health-interval 30s --health-retries 3 \
     "$IMAGE"
 
