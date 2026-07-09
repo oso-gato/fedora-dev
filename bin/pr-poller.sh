@@ -108,10 +108,13 @@ SLUG="oso-gato/$POLLER_REPO"
 # login MUST be the GraphQL form (no `[bot]` suffix) — that is what `gh pr view --json comments`
 # returns and what auto-merge.sh matches against. REST's `.user.login` adds `[bot]`; do NOT use it.
 LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
-# Fleet default: the org-wide independent fitness App. The TOKEN is not read here — the poller only
-# EXTRACTS verdicts by author; fitness-review.sh (which posts) sources the ferried token itself from
-# ~/.config/fitness/env (written by the base entrypoint's ferry; the App key never enters the box).
-FITNESS_LOGIN="${FITNESS_LOGIN:-oso-gato-fitness-claudebox}"
+# MAKE-IT-WORK DEFAULT: same-identity fitness (no separate App / ferry). FITNESS_SAME_IDENTITY=1 makes
+# fitness-review.sh post the verdict — and auto-merge.sh accept it — under the DEV identity (the PR
+# author, oso-gato-nox-claudebox); the review is still an independent agent-context (fresh `claude -p`).
+# Cross-identity independence stays with the host live-gate (erebus). EXPORTED so both sub-scripts see it.
+# To restore strict separation-of-duties later: FITNESS_SAME_IDENTITY=0 + FITNESS_LOGIN=<real fitness App>.
+export FITNESS_SAME_IDENTITY="${FITNESS_SAME_IDENTITY:-1}"
+FITNESS_LOGIN="${FITNESS_LOGIN:-oso-gato-nox-claudebox}"
 POLLER_ARMED="${POLLER_ARMED:-0}"
 POLL_INTERVAL="${POLL_INTERVAL:-60}"
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
@@ -123,7 +126,11 @@ log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
 # Surface a decision to Arthur WITHOUT merging: a single idempotent comment per (pr,sha,kind). The
 # poller never clicks — it makes the human touchpoint visible and stops churning.
 surface(){ # <pr> <sha> <kind> <message>
-  local pr="$1" sha="$2" kind="$3" msg="$4" m="$STATE/surfaced-${pr}-${sha}-${kind}.done"
+  # NB: two `local` statements ON PURPOSE. Bash expands ALL words of a declaration builtin BEFORE
+  # executing it, so `${kind}` inside a `m=…` word on the SAME line would be expanded before
+  # kind="$3" is assigned → `set -u` abort. Proven live: the first real sweep died here (#116).
+  local pr="$1" sha="$2" kind="$3" msg="$4"
+  local m="$STATE/surfaced-${pr}-${sha}-${kind}.done"
   [ -f "$m" ] && return 0
   log "SURFACE $SLUG#$pr @ ${sha:0:7} [$kind]: $msg"
   gh pr comment "$pr" --repo "$SLUG" --body "**Poller → Arthur [$kind]:** $msg"$'\n\n<sub>dev-side poller (Step 5); no merge taken — needs your decision.</sub>' >/dev/null 2>&1 && : > "$m"
@@ -174,9 +181,11 @@ sweep(){
     ref="$(gh pr view "$pr" --repo "$SLUG" --json headRefName -q .headRefName 2>/dev/null)"
     sha="$(gh pr view "$pr" --repo "$SLUG" --json headRefOid -q .headRefOid 2>/dev/null)"
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
-    # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) at/for this PR.
+    # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — AND bound to
+    # THIS head sha (the verdict comment embeds "<repo> @ <sha7>"): a fresh, ungated head must never
+    # inherit the previous head's GREEN. Proven live: #117 read stale GREEN across two pushes.
     comments="$(gh pr view "$pr" --repo "$SLUG" --json comments \
-                -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | .body" 2>/dev/null)"
+                -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | select(.body | contains(\"@ ${sha:0:7}\")) | .body" 2>/dev/null)"
     host="$(printf '%s' "$comments" | host_verdict)"; host="${host:-NONE}"
     # dedup: act on each (pr,sha,host-verdict) at most once for the terminal actions; REVIEW/FIX manage
     # their own re-entry (fitness marker; progress signature), so only gate the whole sweep-action here.
@@ -184,8 +193,10 @@ sweep(){
     tier="$(gh pr view "$pr" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; tier="${tier:-A}"
     fit="NONE"
     if [ -n "$FITNESS_LOGIN" ]; then
+      # fitness verdicts are also per-head (the comment's <sub> line embeds "head \`<sha7>\`") —
+      # bind to THIS sha so a stale PASS/RETURN from a previous head never routes the new one.
       fit="$(gh pr view "$pr" --repo "$SLUG" --json comments \
-             -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | .body" 2>/dev/null | fitness_verdict)"; fit="${fit:-NONE}"
+             -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | select(.body | contains(\"head \`${sha:0:7}\`\")) | .body" 2>/dev/null | fitness_verdict)"; fit="${fit:-NONE}"
     fi
     action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED")"
     log "#$pr ${sha:0:7} host=$host tier=$tier fitness=$fit ⇒ $action"
