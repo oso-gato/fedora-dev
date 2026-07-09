@@ -20,13 +20,12 @@ permissions:
   contents: read
   packages: write
   pull-requests: read
-  id-token: write  # OIDC for cosign keyless signing
 
 jobs:
   # ==========================================================================
-  # BUILD + COSIGN-SIGN + PUSH to ghcr.io/oso-gato/fedora-dev.
+  # BUILD + PUSH to ghcr.io/oso-gato/fedora-dev.
   # On pull_request: BUILD-ONLY validation (no registry write). On push to main /
-  # cron / dispatch: build, push, sign.
+  # cron / dispatch: build, push.
   #
   # There is NO CI label-gate: the in-session gate-push.sh click is the sole
   # backstop (it routes every push that could touch `main` and every merge verb to
@@ -48,10 +47,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install cosign
-        if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v3
-
       - name: Compute tags
         id: meta
         run: |
@@ -71,14 +66,3 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/fedora-dev:latest
             ghcr.io/${{ github.repository_owner }}/fedora-dev:${{ steps.meta.outputs.date }}
             ghcr.io/${{ github.repository_owner }}/fedora-dev:${{ steps.meta.outputs.sha }}
-
-      # Keyless cosign signing via GitHub Actions OIDC. Signs the IMMUTABLE
-      # manifest digest. NOTE: host policy.json does NOT enforce this yet
-      # (insecureAcceptAnything for ghcr.io/oso-gato/*) — the signature is an audit
-      # trail; sigstoreSigned enforcement is operator-gated (Arthur's one-time item).
-      - name: Sign image with cosign
-        if: github.event_name != 'pull_request'
-        env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/fedora-dev
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: cosign sign --yes "${IMAGE}@${DIGEST}"
