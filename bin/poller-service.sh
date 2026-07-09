@@ -10,8 +10,10 @@
 # The interactive agent is deliberately gated FROM these actions; the dumb, gate-checked service is the
 # sanctioned autonomous-merge path. DISARMED by default — arming (POLLER_ARMED=1) is the #96 Tier-A flip.
 #
-# Env: POLLER_ARMED (default 0), POLLER_REPO, POLL_INTERVAL, FITNESS_SAME_IDENTITY — all pass through to
-# pr-poller.sh. This wrapper only adds readiness-waiting + restart-on-death.
+# Env: this wrapper passes its whole environment through to pr-poller.sh. entrypoint.sh forwards
+# POLLER_ARMED + FITNESS_LOGIN into the box across the distrobox boundary (`distrobox enter` does not
+# inherit the base env); POLLER_REPO, POLL_INTERVAL, FITNESS_SAME_IDENTITY use their in-box defaults.
+# This wrapper only adds readiness-waiting + restart-on-death.
 set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 STATE="$HOME/.local/state/claudebox"
