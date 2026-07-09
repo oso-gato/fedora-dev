@@ -1,51 +1,55 @@
 {
-  "effortLevel": "xhigh",
-  "env": {
-    "DISABLE_UPDATES": "1",
-    "DISABLE_AUTOUPDATER": "1"
-  },
-  "permissions": {
-    "deny": [
-      "Bash(dnf copr:*)",
-      "Bash(distrobox-host-exec sudo dnf install:*)",
-      "Bash(distrobox-host-exec sudo dnf -y install:*)",
-      "Bash(distrobox-host-exec sudo rpm -i:*)",
-      "Bash(pip install --user:*)",
-      "Bash(pip3 install --user:*)",
-      "Bash(pipx install:*)",
-      "Bash(npm install -g:*)",
-      "Bash(npm i -g:*)",
-      "Bash(yarn global add:*)",
-      "Bash(pnpm add -g:*)",
-      "Bash(cargo install:*)",
-      "Bash(go install:*)",
-      "Bash(gem install:*)",
-      "Bash(brew install:*)",
-      "Bash(flatpak install:*)",
-      "Bash(snap install:*)",
-      "Write(~/.local/bin/**)",
-      "Write(/usr/local/bin/**)",
-      "mcp__*merge*",
-      "mcp__*__merge*",
-      "mcp__*__*merge*",
-      "mcp__*pull_request*merge*"
-    ],
-    "disableBypassPermissionsMode": "disable",
-    "defaultMode": "auto",
-    "allowManagedPermissionRulesOnly": true,
-    "allowManagedHooksOnly": true
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/etc/claude-code/hooks/gate-push.sh"
-          }
+    "effortLevel": "xhigh",
+    "env": {
+        "DISABLE_UPDATES": "1",
+        "DISABLE_AUTOUPDATER": "1"
+    },
+    "permissions": {
+        "comment_allow": "Full-autonomy (make-it-work stage): allow ALL Bash so the autonomous loop never prompts. The deny[] below still hard-blocks its entries (deny > allow), and the gate-push.sh PreToolUse hook still runs (hooks fire regardless of allow rules) so every push-to-main / merge verb still routes to Arthur's click. Tighten back to a scoped list in the make-it-safe stage.",
+        "allow": [
+            "Bash(*)"
+        ],
+        "deny": [
+            "Bash(dnf copr:*)",
+            "Bash(distrobox-host-exec sudo dnf install:*)",
+            "Bash(distrobox-host-exec sudo dnf -y install:*)",
+            "Bash(distrobox-host-exec sudo rpm -i:*)",
+            "Bash(pip install --user:*)",
+            "Bash(pip3 install --user:*)",
+            "Bash(pipx install:*)",
+            "Bash(npm install -g:*)",
+            "Bash(npm i -g:*)",
+            "Bash(yarn global add:*)",
+            "Bash(pnpm add -g:*)",
+            "Bash(cargo install:*)",
+            "Bash(go install:*)",
+            "Bash(gem install:*)",
+            "Bash(brew install:*)",
+            "Bash(flatpak install:*)",
+            "Bash(snap install:*)",
+            "Write(~/.local/bin/**)",
+            "Write(/usr/local/bin/**)",
+            "mcp__*merge*",
+            "mcp__*__merge*",
+            "mcp__*__*merge*",
+            "mcp__*pull_request*merge*"
+        ],
+        "disableBypassPermissionsMode": "disable",
+        "defaultMode": "auto",
+        "allowManagedPermissionRulesOnly": true,
+        "allowManagedHooksOnly": true
+    },
+    "hooks": {
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "/etc/claude-code/hooks/gate-push.sh"
+                    }
+                ]
+            }
         ]
-      }
-    ]
-  }
+    }
 }
