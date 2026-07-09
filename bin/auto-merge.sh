@@ -68,6 +68,12 @@ pr_author="${pr_author#app/}"
 # Tier A still never auto-merges. Tighten back with a real fitness App later.
 [ "${FITNESS_SAME_IDENTITY:-0}" = 1 ] && FITNESS_LOGIN="$pr_author"
 
+# HEAD PIN — verdicts are per-head, so every gate below is bound to THIS sha (a new, ungated head
+# must never inherit the previous head's GREEN/PASS), and the merge itself carries
+# --match-head-commit so a commit racing in between the checks and the merge cannot land unverified.
+head_sha="$(gh pr view "$PR" --repo "$SLUG" --json headRefOid -q .headRefOid 2>/dev/null)"
+[ -n "$head_sha" ] || { echo "[auto-merge] cannot read head sha — REFUSE (fail-closed)"; exit 1; }
+
 # Gate 1 — TIER from the changed files (fail-closed: no files → treat as A/HUMAN, never auto)
 tier="$(gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null \
         | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; tier="${tier:-A}"
@@ -77,7 +83,7 @@ tier="$(gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/n
 gate="NONE"
 if [ -n "$LG_HOST_LOGIN" ] && [ "$LG_HOST_LOGIN" != "$pr_author" ]; then
   lgc="$(gh pr view "$PR" --repo "$SLUG" --json comments \
-         -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | .body" 2>/dev/null \
+         -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | select(.body | contains(\"@ ${head_sha:0:7}\")) | .body" 2>/dev/null \
          | grep -oE 'Host live-gate \(Gate B\): VERDICT (GREEN|RED)' | tail -1)"
   case "$lgc" in *GREEN) gate=GREEN;; *RED) gate=RED;; esac
 else
@@ -90,7 +96,7 @@ fi
 fit="NONE"
 if [ -n "$FITNESS_LOGIN" ] && { [ "${FITNESS_SAME_IDENTITY:-0}" = 1 ] || [ "$FITNESS_LOGIN" != "$pr_author" ]; }; then
   fvc="$(gh pr view "$PR" --repo "$SLUG" --json comments \
-         -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | .body" 2>/dev/null \
+         -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | select(.body | contains(\"head \`${head_sha:0:7}\`\")) | .body" 2>/dev/null \
          | grep -oE 'Fitness review: VERDICT (PASS|RETURN|ESCALATE)' | tail -1)"
   case "$fvc" in *PASS) fit=PASS;; *RETURN) fit=RETURN;; *ESCALATE) fit=ESCALATE;; esac
 else
@@ -103,7 +109,7 @@ echo "[auto-merge] $SLUG#$PR — tier=$tier live-gate=$gate fitness=$fit ⇒ $de
 case "$decision" in
   MERGE)
     if [ "$COMMIT" = 1 ]; then
-      gh pr merge "$PR" --repo "$SLUG" --squash --delete-branch \
+      gh pr merge "$PR" --repo "$SLUG" --squash --delete-branch --match-head-commit "$head_sha" \
         && echo "[auto-merge] MERGED $SLUG#$PR (Tier $tier, GREEN, fitness PASS)" \
         || { echo "[auto-merge] merge command failed"; exit 1; }
     else

@@ -181,9 +181,11 @@ sweep(){
     ref="$(gh pr view "$pr" --repo "$SLUG" --json headRefName -q .headRefName 2>/dev/null)"
     sha="$(gh pr view "$pr" --repo "$SLUG" --json headRefOid -q .headRefOid 2>/dev/null)"
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
-    # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) at/for this PR.
+    # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — AND bound to
+    # THIS head sha (the verdict comment embeds "<repo> @ <sha7>"): a fresh, ungated head must never
+    # inherit the previous head's GREEN. Proven live: #117 read stale GREEN across two pushes.
     comments="$(gh pr view "$pr" --repo "$SLUG" --json comments \
-                -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | .body" 2>/dev/null)"
+                -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | select(.body | contains(\"@ ${sha:0:7}\")) | .body" 2>/dev/null)"
     host="$(printf '%s' "$comments" | host_verdict)"; host="${host:-NONE}"
     # dedup: act on each (pr,sha,host-verdict) at most once for the terminal actions; REVIEW/FIX manage
     # their own re-entry (fitness marker; progress signature), so only gate the whole sweep-action here.
@@ -191,8 +193,10 @@ sweep(){
     tier="$(gh pr view "$pr" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; tier="${tier:-A}"
     fit="NONE"
     if [ -n "$FITNESS_LOGIN" ]; then
+      # fitness verdicts are also per-head (the comment's <sub> line embeds "head \`<sha7>\`") —
+      # bind to THIS sha so a stale PASS/RETURN from a previous head never routes the new one.
       fit="$(gh pr view "$pr" --repo "$SLUG" --json comments \
-             -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | .body" 2>/dev/null | fitness_verdict)"; fit="${fit:-NONE}"
+             -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | select(.body | contains(\"head \`${sha:0:7}\`\")) | .body" 2>/dev/null | fitness_verdict)"; fit="${fit:-NONE}"
     fi
     action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED")"
     log "#$pr ${sha:0:7} host=$host tier=$tier fitness=$fit ⇒ $action"
