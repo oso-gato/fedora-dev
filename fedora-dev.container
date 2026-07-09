@@ -91,6 +91,11 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # Secret=gh_app_key_fitness,type=mount,target=gh_app_key_fitness
 # Environment=GH_APP_FITNESS_ID=4241099 GH_APP_FITNESS_INSTALLATION_ID=145067591
 
+# Optional DEV-SIDE PR POLLER (Step 5 / #93) as a headless in-box service. OPT-IN + DISARMED:
+# reviews + routes open PRs but NEVER merges until armed. Uncomment to enable; add ` POLLER_ARMED=1`
+# only as the #96 Tier-A arming flip (autonomous Tier-B/C merges). See bin/poller-service.sh.
+# Environment=POLLER_ENABLED=1
+
 # Optional TS_AUTHKEY for an UNATTENDED tailnet join — a podman secret injected as an ENV
 # VAR (type=env; the entrypoint honors $TS_AUTHKEY, else falls back to web-login).
 # fedora-bootstrap's setup-user creates the secret from the spin-up answer and uncomments:
