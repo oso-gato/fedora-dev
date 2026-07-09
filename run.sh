@@ -53,6 +53,8 @@ podman run -d --name fedora-dev \
     --device /dev/fuse \
     --security-opt label=disable \
     -e TS_AUTHKEY="${TS_AUTHKEY:-}" \
+    -e POLLER_ENABLED="${POLLER_ENABLED:-}" \
+    -e POLLER_ARMED="${POLLER_ARMED:-}" \
     "${gh_args[@]}" \
     -v fedora-dev-home:/home/core \
     -v fedora-dev-state:/var/lib/tailscale \
