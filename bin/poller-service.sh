@@ -30,7 +30,7 @@ until [ -e "$STATE/.assembled" ]; do sleep 10; done
 log "waiting for the standing GitHub credential…"
 until gh auth status >/dev/null 2>&1 || [ -s "$HOME/.git-credentials" ]; do sleep 10; done
 
-log "up — repo=${POLLER_REPO:-fedora-dev} armed=${POLLER_ARMED:-0} interval=${POLL_INTERVAL:-60}s same-identity=${FITNESS_SAME_IDENTITY:-1}"
+log "up — repo=${POLLER_REPO:-fedora-dev} armed=${POLLER_ARMED:-0} interval=${POLL_INTERVAL:-10}s same-identity=${FITNESS_SAME_IDENTITY:-1}"
 
 # 3) Run the watch loop (pr-poller.sh holds its own flock singleton). Restart on unexpected exit so a
 #    transient failure (network blip, API 5xx) self-heals; bounded backoff so a hard-fail can't spin.

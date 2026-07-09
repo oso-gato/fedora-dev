@@ -152,7 +152,7 @@ Full law: `policy/CLAUDE.md` (THE SELF-SUSTAINING APPARATUS section); always in 
    no image, so it has no build-only CI step.
 4. **Host pre-merge live-gate (Tier 2 — when the box can't validate it, or the final pre-production shipment; see *Two-tier validation*).** Label the PR `live-validate` — that
    is the whole enrolment, for **any repo in the org** (the host discovers it ORG-WIDE by the label, no
-   per-repo list to maintain). On the host, `live-gate-watch.timer` (15 s poll) runs
+   per-repo list to maintain). On the host, `live-gate-watch.timer` (10 s poll) runs
    `live-gate-watch.sh`, which finds the `live-validate` PRs across the org and, **once per head commit**
    (dedup marker `~/.local/state/live-gate/<WL>-<sha>.done`), calls `live-gate-run.sh`. That fetches the
    head on-demand, applies a **STRUCTURAL GUARD** (only builds a candidate carrying a
