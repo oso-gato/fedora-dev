@@ -380,24 +380,32 @@ runuser -u core -- bash -c '
 ' &
 
 # ---- optional: dev-side PR poller as a headless IN-BOX service (Step 5 / #93) --
-# OPT-IN via POLLER_ENABLED=1 (set through the Quadlet/run.sh env). DISARMED — it reviews + routes but
-# NEVER merges (bin/pr-poller.sh defaults POLLER_ARMED=0; arming is the #96 Tier-A flip, which will add
-# the armed-env propagation into the box). Runs INSIDE the claudebox because its REVIEW/FIX steps spawn
-# `claude`, which is absent from this base image. Plain-shell (no Claude Code → no gate/classifier), so
-# the sanctioned deterministic auto-merge path can execute once armed — NOT the interactive agent, which
-# is deliberately gated FROM merging. Best-effort + self-restarting, and deliberately OUTSIDE the hard
-# watchdog below: a poller death must never take the container down.
+# OPT-IN via POLLER_ENABLED=1 (set through the Quadlet/run.sh env). DISARMED BY DEFAULT — it reviews +
+# routes but NEVER merges until POLLER_ARMED=1 (the #96 Tier-A arming flip). Runs INSIDE the claudebox
+# because its REVIEW/FIX steps spawn `claude`, absent from this base image. Plain-shell (no Claude Code →
+# no gate/classifier), so the sanctioned deterministic auto-merge path can execute once armed — NOT the
+# interactive agent, which is deliberately gated FROM merging. Best-effort + self-restarting, and
+# deliberately OUTSIDE the hard watchdog below: a poller death must never take the container down.
+#
+# ENV ACROSS THE BOX BOUNDARY: `distrobox enter` does NOT inherit this base entrypoint's environment, so
+# the poller's config — POLLER_ARMED above all — must be forwarded EXPLICITLY or arming can never reach
+# pr-poller.sh inside the box. Expand the values HERE (root entrypoint env, delivered by run.sh/Quadlet)
+# into a `VAR=val …` prefix the in-box login shell applies before `exec`, passed as $1 (no reliance on
+# runuser env-preservation). Every var is colon-dash-defaulted downstream (poller-service.sh + pr-poller.sh),
+# so an unset/empty value safely falls back to the in-box default (repo=fedora-dev, interval=60, etc.).
 if [ "${POLLER_ENABLED:-0}" = 1 ]; then
-    echo "[poller] POLLER_ENABLED=1 — starting the dev-side poller in-box (DISARMED)"
+    echo "[poller] POLLER_ENABLED=1 — starting the dev-side poller in-box (armed=${POLLER_ARMED:-0})"
+    poller_env="POLLER_ARMED=${POLLER_ARMED:-0} POLLER_REPO=${POLLER_REPO:-} POLL_INTERVAL=${POLL_INTERVAL:-}"
+    poller_env="$poller_env FITNESS_SAME_IDENTITY=${FITNESS_SAME_IDENTITY:-} FITNESS_LOGIN=${FITNESS_LOGIN:-}"
     runuser -u core -- bash -c '
         st=/home/core/.local/state/claudebox
         until [ -e "$st/.assembled" ]; do sleep 15; done   # box must exist before `distrobox enter`
         while :; do
             distrobox enter claudebox -- bash -lc \
-                "exec /home/core/.local/share/fedora-dev/bin/poller-service.sh" || true
+                "$1 exec /home/core/.local/share/fedora-dev/bin/poller-service.sh" || true
             sleep 30
         done
-    ' &
+    ' _ "$poller_env" &
 fi
 
 echo "fedora-dev up: ssh :22 (tailnet) + ssh :4444 (public, key-only) + mosh UDP 61001-62000, $(podman --version)"
