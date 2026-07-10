@@ -68,13 +68,13 @@ gh label create "$LABEL" --repo "$SLUG" --color 5319e7 \
    --description "dev→host op ticket — host-agent-watch consumes line 1 (host-op:)" --force >/dev/null 2>&1 || true
 
 tmp="$(mktemp)" || die "mktemp failed"
+trap 'rm -f "$tmp"' EXIT   # Principle-10 teardown: no temp leak on any exit path (incl. SIGINT mid-create)
 { printf '%s\n\n' "$opline"
   printf '%s\n' "_Filed by host-ticket.sh — the dev→host ticket bus (apparatus R5). The host agent reads line 1 (\`host-op:\`), performs the allowlisted op, and posts the outcome below + closes this issue._"
 } > "$tmp"
 
 url="$(gh issue create --repo "$SLUG" --title "host-task: $verb${args:+ $args}" --label "$LABEL" --body-file "$tmp" 2>&1)" \
-   || { rm -f "$tmp"; die "gh issue create failed (does the App have Issues:write on $SLUG?): $url"; }
-rm -f "$tmp"
+   || die "gh issue create failed (does the App have Issues:write on $SLUG?): $url"
 echo "$url"
 num="${url##*/}"
 case "$num" in ''|*[!0-9]*) [ "$WAIT" = 1 ] && die "created, but could not parse an issue number from '$url' to --wait"; exit 0;; esac
@@ -84,11 +84,14 @@ case "$num" in ''|*[!0-9]*) [ "$WAIT" = 1 ] && die "created, but could not parse
 log "waiting up to ${WAIT_TIMEOUT}s for the host agent to respond to $SLUG#$num (poll ${POLL_INTERVAL}s)…"
 waited=0
 while :; do
-  oc="$(gh issue view "$num" --repo "$SLUG" --json comments -q '.comments[].body' 2>/dev/null | outcome_of)"
+  # anchor to each comment's FIRST line — the consumer puts its `**host-agent: DONE|FAILED** — …` marker
+  # on line 1, so the same marker merely quoted in another comment's prose can never false-positive.
+  oc="$(gh issue view "$num" --repo "$SLUG" --json comments -q '.comments[].body | split("\n")[0]' 2>/dev/null | outcome_of)"
   case "$oc" in
     done)   log "host-agent DONE — $SLUG#$num"; exit 0;;
     failed) log "host-agent FAILED — $SLUG#$num"; exit 1;;
   esac
-  [ "$waited" -ge "$WAIT_TIMEOUT" ] && die "timeout after ${WAIT_TIMEOUT}s — no host-agent response on $SLUG#$num (is the host agent running on erebus?)"
+  # timeout is exit 2 (NOT die's 1) so a caller can tell a retryable "no response yet" from a FAILED op.
+  [ "$waited" -ge "$WAIT_TIMEOUT" ] && { log "timeout after ${WAIT_TIMEOUT}s — no host-agent response on $SLUG#$num (is the host agent running on erebus?)"; exit 2; }
   sleep "$POLL_INTERVAL"; waited=$((waited+POLL_INTERVAL))
 done
