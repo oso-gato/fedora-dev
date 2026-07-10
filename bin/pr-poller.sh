@@ -48,7 +48,14 @@
 #   LG_HOST_LOGIN     host bot login whose verdict is trusted (default: oso-gato-erebus-claudebox[bot])
 #   FITNESS_LOGIN     fitness bot login (passed through to fitness-review.sh + auto-merge.sh)
 #   POLLER_ARMED      1 → GREEN+B/C+PASS actually merges (auto-merge --commit). Default 0 (dry-run).
-#   POLL_INTERVAL     seconds between --watch sweeps (default 60, matching the host watcher cadence)
+#   POLL_INTERVAL     seconds between --watch sweeps (default 10, matching the host watcher cadence).
+#                     Cost at 10s: 1 list call + ~5 gh calls per open PR per sweep ≈ 360×(1+5N)/h
+#                     against the dev App's 5k/h REST budget — which is SHARED with the fixer,
+#                     fitness reviewer and auto-merge. Comfortable at N≤2 open PRs; saturates around
+#                     N=3 sustained for an hour. On exhaustion gh calls fail and sweeps degrade to
+#                     NOOP until the window resets — safe (fail-closed, self-recovering), but slower
+#                     pickup than 60s under that load. Follow-up queued: batch the per-PR fetches
+#                     into one `gh pr view` (cost → 1+N calls/sweep, ceiling ~10 open PRs).
 #   POLLER_FIXER      headless fixer command (default: claude -p). Overridable for testing.
 #   FIXER_TIMEOUT     max seconds for ONE fixer run (default 1800). Bounds a single iteration, not the
 #                     count of iterations.
@@ -165,7 +172,7 @@ LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
 export FITNESS_SAME_IDENTITY="${FITNESS_SAME_IDENTITY:-1}"
 FITNESS_LOGIN="${FITNESS_LOGIN:-oso-gato-nox-claudebox}"
 POLLER_ARMED="${POLLER_ARMED:-0}"
-POLL_INTERVAL="${POLL_INTERVAL:-60}"
+POLL_INTERVAL="${POLL_INTERVAL:-10}"
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
 FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
