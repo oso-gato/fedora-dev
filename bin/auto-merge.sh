@@ -36,12 +36,16 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # ---- the PURE decision function (no I/O — testable in isolation) -----------------------------------
 # decide <tier:A|B|C> <livegate:GREEN|RED|NONE> <fitness:PASS|RETURN|ESCALATE|NONE> -> MERGE|HUMAN|REFUSE
 decide(){
+  # ZERO-GATE (2026-07-10, Arthur's decision): tier NO LONGER gates the merge. The old
+  # `A → HUMAN` click was built on a misrepresented requirement (the real red line is throwaway
+  # build-isolation for WORKLOAD dev, not "never touch the control plane" — building the apparatus
+  # itself inherently edits policy/gate/quadlets). Recoverability is kept AUTOMATIC, not human:
+  # the host post-deploy health-gate + digest auto-rollback, full git-revertability, and the fitness
+  # reviewer's standing "preserve recoverability" requirement (a change that removes rollback or
+  # exfiltrates the credential FAILS review). So the merge rests on the two INDEPENDENT gates only:
+  # host live-gate GREEN + independent fitness PASS. `tier` is retained purely for the caller's
+  # report/digest — it is not read here.
   local tier="$1" gate="$2" fit="$3"
-  case "$tier" in
-    A) echo HUMAN; return;;                     # Tier A NEVER auto-merges — Arthur's click
-    B|C) : ;;
-    *) echo REFUSE; return;;                     # unknown tier → fail closed
-  esac
   [ "$gate" = GREEN ] || { echo REFUSE; return; }   # host must have live-gated GREEN
   [ "$fit"  = PASS  ] || { echo REFUSE; return; }   # independent fitness must PASS
   echo MERGE
@@ -152,7 +156,6 @@ case "$decision" in
     else
       echo "[auto-merge] DRY-RUN — would merge (pass --commit to arm). Nothing merged."
     fi;;
-  HUMAN)  echo "[auto-merge] Tier A — presenting to Arthur; NOT auto-merging.";;
   REFUSE) echo "[auto-merge] gates not all green — REFUSE (fail-closed). No merge.";;
 esac
-[ "$decision" = MERGE ] || [ "$decision" = HUMAN ]   # exit 0 for MERGE/HUMAN, 1 for REFUSE
+[ "$decision" = MERGE ]   # exit 0 for MERGE, 1 for REFUSE (HUMAN is gone under zero-gate)
