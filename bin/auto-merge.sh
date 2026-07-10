@@ -13,9 +13,14 @@
 #      HOST BOT ($LG_HOST_LOGIN). Comments from anyone else (incl. the PR author) are ignored.
 #   3. FITNESS = PASS  — a `Fitness review: VERDICT PASS` comment AUTHORED BY THE FITNESS-REVIEW BOT
 #      ($FITNESS_LOGIN), NOT a self-appliable label. A verdict authored by the PR author is invalid.
-# Both trust anchors MUST be configured and MUST differ from the PR author, else the gate is
-# UNVERIFIABLE ⇒ REFUSE (fail-closed — a forgeable gate is treated as no gate). Only verified
-# (B|C) AND GREEN AND PASS ⇒ merge. This is the ratified "Tier B/C auto-merges" — nothing else.
+# Both trust anchors MUST be configured, MUST differ from the PR author, AND MUST differ from EACH
+# OTHER (G1 — one compromised token must never satisfy both gates). Verdicts are parsed from each
+# anchor comment's FIRST LINE only (G2 — the host comment embeds a tail-N log of the candidate's own
+# output; a log-embedded forgery is ignored), each bound to the CURRENT head sha, and the merge is
+# --match-head-commit pinned. Same-identity fitness (FITNESS_SAME_IDENTITY=1) is DRY-RUN-ONLY:
+# --commit under it is a hard REFUSE (#96 STEP 1 — arming requires a real, distinct fitness App).
+# Else the gate is UNVERIFIABLE ⇒ REFUSE (fail-closed — a forgeable gate is treated as no gate).
+# Only verified (B|C) AND GREEN AND PASS ⇒ merge. The ratified "Tier B/C auto-merges" — nothing else.
 #
 # SAFE BY DEFAULT: --dry-run (the default) prints the DECISION and merges nothing. --commit actually
 # merges. So wiring it up changes nothing until explicitly armed.
@@ -62,17 +67,46 @@ pr_author="$(gh pr view "$PR" --repo "$SLUG" --json author -q .author.login 2>/d
 # NEVER match an App-authored PR (`x` != `app/x`) — fail-OPEN on the exact self-review case they
 # exist to refuse. One canonical (bare) form for every identity comparison.
 pr_author="${pr_author#app/}"
-# MAKE-IT-WORK: FITNESS_SAME_IDENTITY=1 accepts a fitness verdict authored by the dev identity (the
-# PR author) — no separate fitness App. The host live-gate (Gate 2, erebus, a separate box) remains
-# the genuinely-independent anchor and is NOT relaxed. Accepted tradeoff (forgeable fitness verdict);
-# Tier A still never auto-merges. Tighten back with a real fitness App later.
-[ "${FITNESS_SAME_IDENTITY:-0}" = 1 ] && FITNESS_LOGIN="$pr_author"
+# MAKE-IT-WORK (DRY-RUN ONLY): FITNESS_SAME_IDENTITY=1 accepts a fitness verdict authored by the dev
+# identity (the PR author) — no separate fitness App — so the loop can be OBSERVED end-to-end before
+# SoD exists. That signal is forgeable by the author, so it may NEVER arm: --commit under
+# same-identity is a hard REFUSE (#96 STEP 1). The host live-gate (Gate 2, erebus) is never relaxed.
+if [ "${FITNESS_SAME_IDENTITY:-0}" = 1 ]; then
+  if [ "$COMMIT" = 1 ]; then
+    echo "[auto-merge] REFUSE: FITNESS_SAME_IDENTITY=1 may never --commit — a same-identity fitness"
+    echo "  verdict is forgeable by the PR author. Arm only with a distinct fitness App (#96 STEP 1)."
+    exit 1
+  fi
+  FITNESS_LOGIN="$pr_author"
+fi
+
+# SEPARATION OF DUTIES (G1): the two trust anchors MUST be DISTINCT identities — if one bot answered
+# both gates, a single compromised token would satisfy them together. Equal (non-empty) anchors
+# disable both gates → every path below reads NONE → REFUSE (fail-closed).
+if [ -n "$LG_HOST_LOGIN" ] && [ "$LG_HOST_LOGIN" = "$FITNESS_LOGIN" ]; then
+  echo "[auto-merge] G1 REFUSE: LG_HOST_LOGIN == FITNESS_LOGIN — the live-gate and fitness identities"
+  echo "  must be distinct bot logins (one token must not satisfy both gates)."
+  LG_HOST_LOGIN=""; FITNESS_LOGIN=""
+fi
 
 # HEAD PIN — verdicts are per-head, so every gate below is bound to THIS sha (a new, ungated head
 # must never inherit the previous head's GREEN/PASS), and the merge itself carries
 # --match-head-commit so a commit racing in between the checks and the merge cannot land unverified.
 head_sha="$(gh pr view "$PR" --repo "$SLUG" --json headRefOid -q .headRefOid 2>/dev/null)"
 [ -n "$head_sha" ] || { echo "[auto-merge] cannot read head sha — REFUSE (fail-closed)"; exit 1; }
+
+# hdr_verdict <login> <sha-anchor> <verdict-ERE> (G2): the verdict is read from ONLY THE FIRST LINE
+# of each sha-bound comment authored by <login>, newest last. WHY: the host's verdict comment EMBEDS
+# a tail-N log block of the candidate's OWN build/probe output — a malicious PR that PRINTS a verdict
+# string would plant a forged 'VERDICT GREEN' in that log, and a body-wide match could pick the
+# forgery over a real RED header. Both anchors emit their verdict as the comment's FIRST line (the
+# host header also carries '@ <sha7>'; the fitness sha rides the <sub> footer) — so the sha-anchor
+# SELECTS the comment (whole-body contains) and the verdict is EXTRACTED from line 1 only.
+hdr_verdict(){ # $1=login $2=sha-anchor-substring $3=verdict-ERE → newest first-line verdict, or empty
+  gh pr view "$PR" --repo "$SLUG" --json comments \
+    -q ".comments[] | select(.author.login==\"$1\") | select(.body | contains(\"$2\")) | .body | split(\"\n\")[0]" 2>/dev/null \
+    | grep -oE "$3" | tail -1
+}
 
 # Gate 1 — TIER from the changed files (fail-closed: no files → treat as A/HUMAN, never auto)
 tier="$(gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null \
@@ -82,9 +116,7 @@ tier="$(gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/n
 # from anyone else (incl. the PR author) is ignored. No trust anchor ⇒ gate=NONE ⇒ REFUSE.
 gate="NONE"
 if [ -n "$LG_HOST_LOGIN" ] && [ "$LG_HOST_LOGIN" != "$pr_author" ]; then
-  lgc="$(gh pr view "$PR" --repo "$SLUG" --json comments \
-         -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | select(.body | contains(\"@ ${head_sha:0:7}\")) | .body" 2>/dev/null \
-         | grep -oE 'Host live-gate \(Gate B\): VERDICT (GREEN|RED)' | tail -1)"
+  lgc="$(hdr_verdict "$LG_HOST_LOGIN" "@ ${head_sha:0:7}" 'Host live-gate \(Gate B\): VERDICT (GREEN|RED)')"
   case "$lgc" in *GREEN) gate=GREEN;; *RED) gate=RED;; esac
 else
   echo "[auto-merge] live-gate trust anchor unset or == PR author — gate unverifiable (fail-closed)"
@@ -95,9 +127,7 @@ fi
 # invalid. No trust anchor ⇒ fit=NONE ⇒ REFUSE. (This is why the fitness harness POSTS such a comment.)
 fit="NONE"
 if [ -n "$FITNESS_LOGIN" ] && { [ "${FITNESS_SAME_IDENTITY:-0}" = 1 ] || [ "$FITNESS_LOGIN" != "$pr_author" ]; }; then
-  fvc="$(gh pr view "$PR" --repo "$SLUG" --json comments \
-         -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | select(.body | contains(\"head \`${head_sha:0:7}\`\")) | .body" 2>/dev/null \
-         | grep -oE 'Fitness review: VERDICT (PASS|RETURN|ESCALATE)' | tail -1)"
+  fvc="$(hdr_verdict "$FITNESS_LOGIN" "head \`${head_sha:0:7}\`" 'Fitness review: VERDICT (PASS|RETURN|ESCALATE)')"
   case "$fvc" in *PASS) fit=PASS;; *RETURN) fit=RETURN;; *ESCALATE) fit=ESCALATE;; esac
 else
   echo "[auto-merge] fitness trust anchor unset or == PR author — fitness unverifiable (fail-closed)"
