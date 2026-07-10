@@ -49,13 +49,17 @@
 #   FITNESS_LOGIN     fitness bot login (passed through to fitness-review.sh + auto-merge.sh)
 #   POLLER_ARMED      1 → GREEN+B/C+PASS actually merges (auto-merge --commit). Default 0 (dry-run).
 #   POLL_INTERVAL     seconds between --watch sweeps (default 10, matching the host watcher cadence).
-#                     Cost at 10s: 1 list call + ~5 gh calls per open PR per sweep ≈ 360×(1+5N)/h
-#                     against the dev App's 5k/h REST budget — which is SHARED with the fixer,
-#                     fitness reviewer and auto-merge. Comfortable at N≤2 open PRs; saturates around
-#                     N=3 sustained for an hour. On exhaustion gh calls fail and sweeps degrade to
-#                     NOOP until the window resets — safe (fail-closed, self-recovering), but slower
-#                     pickup than 60s under that load. Follow-up queued: batch the per-PR fetches
-#                     into one `gh pr view` (cost → 1+N calls/sweep, ceiling ~10 open PRs).
+#                     Cost at 10s (fetch-BATCHED sweep): steady state ≈ 360×(2+N)/h — the open-PR
+#                     list (TSV: number+ref+sha in ONE call), the retire merged-list, and ONE
+#                     sha-bound comments call per open PR; tier(files) + fitness comments are
+#                     fetched ONLY at a PR's GREEN routing moment (+2 for that PR, that sweep).
+#                     Against the dev App's 5k/h REST budget (SHARED with the fixer, fitness
+#                     reviewer and auto-merge): N=10 open PRs ≈ 4.3k/h — the ceiling is ~10
+#                     sustained open PRs (was 2-3 unbatched). On exhaustion gh calls fail and
+#                     sweeps degrade to NOOP until the window resets — fail-closed,
+#                     self-recovering; GREEN-moment fetch failures skip that PR for that sweep
+#                     (retry next), never a misroute. Escalation if ever needed: one GraphQL
+#                     sweep query for ALL open PRs (N-independent) — designed, not built.
 #   POLLER_FIXER      headless fixer command (default: claude -p). Overridable for testing.
 #   FIXER_TIMEOUT     max seconds for ONE fixer run (default 1800). Bounds a single iteration, not the
 #                     count of iterations.
@@ -282,14 +286,20 @@ retire_superseded(){
 sweep(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"
   retire_superseded
-  local prs; prs="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid 2>/dev/null)"
-  [ -n "$prs" ] || { log "no open PRs / list failed"; return 0; }
-  local n; n="$(printf '%s' "$prs" | grep -oE '"number":[0-9]+' | grep -oE '[0-9]+')"
-  local pr
-  for pr in $n; do
-    local ref sha comments host tier fit action
-    ref="$(gh pr view "$pr" --repo "$SLUG" --json headRefName -q .headRefName 2>/dev/null)"
-    sha="$(gh pr view "$pr" --repo "$SLUG" --json headRefOid -q .headRefOid 2>/dev/null)"
+  # BATCHED list: ONE call yields number+ref+sha as TSV — the old per-PR headRefName/headRefOid
+  # re-fetches duplicated fields this same list already carried (2 calls/PR saved). Branch names
+  # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
+  # number (no torn read across a mid-sweep push).
+  local rows
+  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid \
+          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)"' 2>/dev/null)"
+  [ -n "$rows" ] || { log "no open PRs / list failed"; return 0; }
+  # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
+  # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
+  # --watch flock; FD 3 is free.
+  local pr ref sha comments host tier fit action files fitraw
+  while IFS=$'\t' read -r -u 3 pr ref sha; do
+    [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
     # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — AND bound to
     # THIS head sha (the verdict comment embeds "<repo> @ <sha7>"): a fresh, ungated head must never
@@ -300,13 +310,26 @@ sweep(){
     # dedup: act on each (pr,sha,host-verdict) at most once for the terminal actions; REVIEW/FIX manage
     # their own re-entry (fitness marker; progress signature), so only gate the whole sweep-action here.
     local done="$STATE/acted-${pr}-${sha}-${host}.done"
-    tier="$(gh pr view "$pr" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; tier="${tier:-A}"
-    fit="NONE"
-    if [ -n "$FITNESS_LOGIN" ]; then
-      # fitness verdicts are also per-head (the comment's <sub> line embeds "head \`<sha7>\`") —
-      # bind to THIS sha so a stale PASS/RETURN from a previous head never routes the new one.
-      fit="$(gh pr view "$pr" --repo "$SLUG" --json comments \
-             -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | select(.body | contains(\"head \`${sha:0:7}\`\")) | .body" 2>/dev/null | fitness_verdict)"; fit="${fit:-NONE}"
+    # BATCHED gate reads: plan() consults tier + fitness ONLY on GREEN — so fetch them ONLY then
+    # (a NOOP/RED PR costs exactly one comments call per sweep). Both GREEN-moment fetches are
+    # rc-checked and SKIP this PR for THIS sweep on a transient failure (retry next sweep) — they
+    # must never misroute: a failed files fetch defaulting to tier=A would PRESENT an
+    # auto-mergeable PR and stick via the acted marker; a failed fitness fetch reading as NONE
+    # would spuriously re-run the review harness. rc is only distinguishable on an UNPIPED
+    # capture, hence the fetch-to-var-then-filter shape.
+    tier=""; fit="NONE"
+    if [ "$host" = "GREEN" ]; then
+      files="$(gh pr view "$pr" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null)" \
+        || { log "#$pr: files fetch failed — skip this sweep, retry next"; continue; }
+      tier="$(printf '%s' "$files" | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; tier="${tier:-A}"
+      if [ -n "$FITNESS_LOGIN" ]; then
+        # fitness verdicts are also per-head (the comment's <sub> line embeds "head \`<sha7>\`") —
+        # bind to THIS sha so a stale PASS/RETURN from a previous head never routes the new one.
+        fitraw="$(gh pr view "$pr" --repo "$SLUG" --json comments \
+               -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | select(.body | contains(\"head \`${sha:0:7}\`\")) | .body" 2>/dev/null)" \
+          || { log "#$pr: fitness-comments fetch failed — skip this sweep, retry next"; continue; }
+        fit="$(printf '%s' "$fitraw" | fitness_verdict)"; fit="${fit:-NONE}"
+      fi
     fi
     action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED")"
     log "#$pr ${sha:0:7} host=$host tier=$tier fitness=$fit ⇒ $action"
@@ -335,7 +358,7 @@ sweep(){
         : > "$done"
         ;;
     esac
-  done
+  done 3<<< "$rows"
 }
 
 case "${1:-}" in
