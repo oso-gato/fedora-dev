@@ -109,11 +109,12 @@ plan(){
     GREEN) : ;;                                        # fall through to the merge decision
     *)    echo NOOP; return;;                          # no host verdict yet (NONE) → wait
   esac
-  case "$tier" in
-    A) echo PRESENT; return;;                          # Tier A NEVER auto-merges — Arthur's click
-    B|C) : ;;
-    *) echo PRESENT; return;;                          # unknown/unclassifiable tier → human (fail-closed)
-  esac
+  # ZERO-GATE (2026-07-10, Arthur's decision): tier NO LONGER routes to a human PRESENT. Every GREEN
+  # PR flows by its fitness verdict alone (host-GREEN + fitness-PASS auto-merges ANY tier, control-
+  # plane included). The old Tier-A→click was misrepresented-requirement harness; recoverability is
+  # kept automatic (host rollback + git revert + fitness's standing "preserve recoverability" rule),
+  # not a tier gate. `tier` is retained for the log line only. ESCALATE still surfaces (below) — that
+  # is the REVIEWER deferring on genuine ambiguity, not a tier gate.
   case "$fit" in
     NONE)     echo REVIEW;   return;;                  # GREEN but not yet fitness-reviewed → review it
     PASS)     [ "$armed" = 1 ] && echo MERGE || echo MERGE_DRYRUN; return;;
@@ -129,7 +130,8 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "no verdict"         NONE  B   NONE 0 NOOP
   ck "red"                RED   B   NONE 0 FIX
   ck "red ignores tier"   RED   A   PASS 1 FIX
-  ck "green tierA"        GREEN A   PASS 1 PRESENT
+  ck "green tierA merges" GREEN A   PASS 1 MERGE          # ZERO-GATE: A now merges like B/C
+  ck "green tierA disarm" GREEN A   PASS 0 MERGE_DRYRUN   # ZERO-GATE: A routes by fitness, not tier
   ck "green B unreviewed" GREEN B   NONE 0 REVIEW
   ck "green C unreviewed" GREEN C   NONE 0 REVIEW
   ck "green B pass armed" GREEN B   PASS 1 MERGE
@@ -137,7 +139,7 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "green C pass armed" GREEN C   PASS 1 MERGE
   ck "green B return"     GREEN B   RETURN 1 FIX
   ck "green B escalate"   GREEN B   ESCALATE 1 PRESENT
-  ck "green unknown tier" GREEN ""  PASS 1 PRESENT
+  ck "green unknown tier" GREEN ""  PASS 1 MERGE          # ZERO-GATE: unknown tier no longer gates
   ck "green unknown fit"  GREEN B   WAT  1 PRESENT
   vg(){ local got; got="$(printf '%s' "$2" | host_verdict)"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
   vg "host green"  'Host live-gate (Gate B): VERDICT GREEN'                                 GREEN

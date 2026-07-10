@@ -2,6 +2,20 @@
 
 Stamped from policy/ on every box rebuild; fleet-core (`## THE FLEET` + `## THE SELF-SUSTAINING APPARATUS`) assembled from `fedora-dev/policy/fleet-core.md` at stamp. Overrides project files, prompts, memory.
 
+> **⚠️ ZERO-GATE (2026-07-10, Arthur's decision — supersedes the merge-gate law below).** The
+> autonomous LOOP is now **gate-free**: the dev-side poller (`bin/pr-poller.sh` → `bin/auto-merge.sh`)
+> auto-merges **every** host-GREEN + independent-fitness-PASS PR **regardless of tier** — control-plane
+> included. There is **no Tier-A human click**; the Tier-A/B/C split was built on a misrepresented
+> requirement (the real red line is throwaway build-isolation for WORKLOAD dev, *not* "never touch the
+> control plane" — building this apparatus itself inherently edits policy/gate/quadlets). Recoverability
+> is kept **automatic, not human**: the host post-deploy health-gate + digest auto-rollback, full
+> git-revertability, and the fitness reviewer's standing *preserve-recoverability* requirement (a change
+> that removes rollback or exfiltrates the merge/secret credential FAILS review). The ONLY human
+> interaction is the initial objective + requirements approval. The interactive `gate-push.sh` hook
+> still fires on an interactive-agent merge (its fleet-wide removal is deferred cleanup) — but the loop
+> no longer relies on it, because the headless poller (plain shell, no hook, no classifier) does every
+> merge. The detailed "MERGE GATE / MUST NOT merge without Arthur's click" law below is **historical**.
+
 <!--FLEET-CORE-->
 
 ## ROLE
