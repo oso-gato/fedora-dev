@@ -80,10 +80,13 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # PURE decision core — no I/O, exercised by --selftest.
 # ===================================================================================================
 
-# extract the newest host live-gate verdict (GREEN|RED) from a blob of host-bot comment bodies on stdin.
-host_verdict(){ grep -oE 'Host live-gate \(Gate B\): VERDICT (GREEN|RED)' | grep -oE '(GREEN|RED)$' | tail -1; }
-# extract the newest fitness verdict (PASS|RETURN|ESCALATE) from fitness-bot comment bodies on stdin.
-fitness_verdict(){ grep -oE 'Fitness review: VERDICT (PASS|RETURN|ESCALATE)' | grep -oE '(PASS|RETURN|ESCALATE)$' | tail -1; }
+# extract the newest host live-gate verdict (GREEN|RED) from header lines on stdin. LINE-START
+# anchored: a verdict string quoted mid-line (embedded candidate log, prose) never matches — the
+# same G2 discipline as bin/auto-merge.sh, applied to ROUTING so forged strings can't even misroute.
+host_verdict(){ grep -oE '^\**Host live-gate \(Gate B\): VERDICT (GREEN|RED)' | grep -oE '(GREEN|RED)$' | tail -1; }
+# extract the newest fitness verdict (PASS|RETURN|ESCALATE) from header lines on stdin (line-start
+# anchored, same rationale).
+fitness_verdict(){ grep -oE '^Fitness review: VERDICT (PASS|RETURN|ESCALATE)' | grep -oE '(PASS|RETURN|ESCALATE)$' | tail -1; }
 # extract same-repo supersession targets (PR numbers, one per line, deduped) from a PR body on stdin.
 # STRICT WHOLE-LINE grammar — a line that is EXACTLY `Supersedes #N[, #M…]` (case-insensitive, up to
 # 3 leading spaces, trailing whitespace ok, CRLF stripped) and NOTHING else. ALL-OR-NOTHING: a line
@@ -316,11 +319,13 @@ sweep(){
   while IFS=$'\t' read -r -u 3 pr ref sha; do
     [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
-    # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — AND bound to
-    # THIS head sha (the verdict comment embeds "<repo> @ <sha7>"): a fresh, ungated head must never
-    # inherit the previous head's GREEN. Proven live: #117 read stale GREEN across two pushes.
+    # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — bound to THIS
+    # head's FULL sha, and read from the comment's FIRST LINE only (the machine-owned header carries
+    # "<repo> @ <full-sha>"): a fresh, ungated head must never inherit a previous head's GREEN
+    # (proven live: #117 read stale GREEN across two pushes), a 7-hex prefix would be grindable, and
+    # embedded candidate-log prose must never select or decide (G2, mirrored from auto-merge.sh).
     comments="$(gh pr view "$pr" --repo "$SLUG" --json comments \
-                -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | select(.body | contains(\"@ ${sha:0:7}\")) | .body" 2>/dev/null)"
+                -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | .body | split(\"\n\")[0] | select(contains(\"@ $sha\"))" 2>/dev/null)"
     host="$(printf '%s' "$comments" | host_verdict)"; host="${host:-NONE}"
     # dedup: act on each (pr,sha,host-verdict) at most once for the terminal actions; REVIEW/FIX manage
     # their own re-entry (fitness marker; progress signature), so only gate the whole sweep-action here.
@@ -351,10 +356,12 @@ sweep(){
       # printf '%s\n' "" would feed one EMPTY line and flip it to all-docs → C.
       tier="$([ -n "$files" ] && printf '%s\n' "$files" | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; tier="${tier:-A}"
       if [ -n "$FITNESS_LOGIN" ]; then
-        # fitness verdicts are also per-head (the comment's <sub> line embeds "head \`<sha7>\`") —
-        # bind to THIS sha so a stale PASS/RETURN from a previous head never routes the new one.
+        # fitness verdicts are also per-head — LINE 1 of the fitness comment carries
+        # "… VERDICT X — head <full-sha>" (bin/fitness-review.sh); bind to THIS head's FULL sha on
+        # that machine-owned line only, so a stale PASS/RETURN from a previous head — or an anchor
+        # planted in the reviewer's rationale prose — never routes the new one.
         fitraw="$(gh pr view "$pr" --repo "$SLUG" --json comments \
-               -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | select(.body | contains(\"head \`${sha:0:7}\`\")) | .body" 2>/dev/null)" \
+               -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | .body | split(\"\n\")[0] | select(contains(\"head $sha\"))" 2>/dev/null)" \
           || { log "#$pr: fitness-comments fetch failed — skip this sweep, retry next"; continue; }
         fit="$(printf '%s' "$fitraw" | fitness_verdict)"; fit="${fit:-NONE}"
       fi
@@ -378,8 +385,16 @@ sweep(){
         [ -f "$done" ] && continue
         local flag=""; [ "$action" = MERGE ] && flag="--commit"
         log "#$pr GREEN+B/C+PASS → auto-merge.sh $flag"
-        LG_HOST_LOGIN="$LG_HOST_LOGIN" FITNESS_LOGIN="$FITNESS_LOGIN" "$HERE/auto-merge.sh" $flag "$POLLER_REPO" "$pr" | tee -a "$LOG"
-        : > "$done"
+        # a REFUSE here (rc 1) despite GREEN+PASS routing means the MERGER disagrees with the
+        # poller's reads — misconfigured anchors, same-identity while armed, or a gate its stricter
+        # parse rejects. SURFACE it (idempotent) so a quietly dead merge path reaches Arthur instead
+        # of sitting parked in poller.log; the marker lands only once surfacing succeeded.
+        if LG_HOST_LOGIN="$LG_HOST_LOGIN" FITNESS_LOGIN="$FITNESS_LOGIN" "$HERE/auto-merge.sh" $flag "$POLLER_REPO" "$pr" | tee -a "$LOG"; then
+          : > "$done"
+        else
+          surface "$pr" "$sha" "refused" "auto-merge REFUSED despite GREEN+PASS routing — trust-anchor/SoD config mismatch or a gate its stricter parse rejects (see poller.log)." \
+            && : > "$done"
+        fi
         ;;
       PRESENT)
         # the acted marker is gated on surface()'s rc: a FAILED comment POST must NOT park the

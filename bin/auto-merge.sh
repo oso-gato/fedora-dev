@@ -14,10 +14,11 @@
 #   3. FITNESS = PASS  — a `Fitness review: VERDICT PASS` comment AUTHORED BY THE FITNESS-REVIEW BOT
 #      ($FITNESS_LOGIN), NOT a self-appliable label. A verdict authored by the PR author is invalid.
 # Both trust anchors MUST be configured, MUST differ from the PR author, AND MUST differ from EACH
-# OTHER (G1 — one compromised token must never satisfy both gates). Verdicts are parsed from each
-# anchor comment's FIRST LINE only (G2 — the host comment embeds a tail-N log of the candidate's own
-# output; a log-embedded forgery is ignored), each bound to the CURRENT head sha, and the merge is
-# --match-head-commit pinned. Same-identity fitness (FITNESS_SAME_IDENTITY=1) is DRY-RUN-ONLY:
+# OTHER (G1 — one compromised token must never satisfy both gates). Verdict SELECTION and EXTRACTION
+# both read ONLY line 1 of each anchor comment (G2 — embedded candidate logs and reviewer rationale
+# are attacker-influenceable prose; neither a forged verdict nor a planted future-head anchor there
+# can act), each bound to the FULL 40-hex head sha (a 7-hex prefix would be grindable), and the
+# merge is --match-head-commit pinned. Same-identity fitness (FITNESS_SAME_IDENTITY=1) is DRY-RUN-ONLY:
 # --commit under it is a hard REFUSE (#96 STEP 1 — arming requires a real, distinct fitness App).
 # Else the gate is UNVERIFIABLE ⇒ REFUSE (fail-closed — a forgeable gate is treated as no gate).
 # Only verified (B|C) AND GREEN AND PASS ⇒ merge. The ratified "Tier B/C auto-merges" — nothing else.
@@ -67,6 +68,9 @@ pr_author="$(gh pr view "$PR" --repo "$SLUG" --json author -q .author.login 2>/d
 # NEVER match an App-authored PR (`x` != `app/x`) — fail-OPEN on the exact self-review case they
 # exist to refuse. One canonical (bare) form for every identity comparison.
 pr_author="${pr_author#app/}"
+# FAIL-CLOSED on an unreadable author: an empty pr_author would trivially pass every `!= pr_author`
+# self-review guard below (fail-OPEN on exactly the anchor-authored-PR case they exist to refuse).
+[ -n "$pr_author" ] || { echo "[auto-merge] cannot read PR author — REFUSE (fail-closed)"; exit 1; }
 # MAKE-IT-WORK (DRY-RUN ONLY): FITNESS_SAME_IDENTITY=1 accepts a fitness verdict authored by the dev
 # identity (the PR author) — no separate fitness App — so the loop can be OBSERVED end-to-end before
 # SoD exists. That signal is forgeable by the author, so it may NEVER arm: --commit under
@@ -95,16 +99,19 @@ fi
 head_sha="$(gh pr view "$PR" --repo "$SLUG" --json headRefOid -q .headRefOid 2>/dev/null)"
 [ -n "$head_sha" ] || { echo "[auto-merge] cannot read head sha — REFUSE (fail-closed)"; exit 1; }
 
-# hdr_verdict <login> <sha-anchor> <verdict-ERE> (G2): the verdict is read from ONLY THE FIRST LINE
-# of each sha-bound comment authored by <login>, newest last. WHY: the host's verdict comment EMBEDS
-# a tail-N log block of the candidate's OWN build/probe output — a malicious PR that PRINTS a verdict
-# string would plant a forged 'VERDICT GREEN' in that log, and a body-wide match could pick the
-# forgery over a real RED header. Both anchors emit their verdict as the comment's FIRST line (the
-# host header also carries '@ <sha7>'; the fitness sha rides the <sub> footer) — so the sha-anchor
-# SELECTS the comment (whole-body contains) and the verdict is EXTRACTED from line 1 only.
-hdr_verdict(){ # $1=login $2=sha-anchor-substring $3=verdict-ERE → newest first-line verdict, or empty
+# hdr_verdict <login> <sha-anchor> <verdict-ERE> (G2): BOTH the sha-anchor SELECTION and the verdict
+# EXTRACTION read ONLY THE FIRST LINE (the machine-owned header) of each comment authored by <login>,
+# newest last, and the anchor is the FULL 40-hex head sha. WHY line-1-only: the host comment embeds
+# a tail-N log of the candidate's OWN output and the fitness comment embeds the reviewer model's
+# rationale — both are attacker-influenceable prose; a planted verdict string OR a planted
+# future-head sha anchor in those regions must never select or decide (the STEP-2 forge-hunt showed
+# whole-body contains() lets an old PASS donate itself to a never-reviewed head). WHY the FULL sha:
+# a 7-hex prefix is 28 bits — a ground commit collision would inherit GREEN+PASS wholesale; 40 hex
+# is not grindable. Verdict EREs are line-START anchored so trailing header text (e.g. the host's
+# '(targets: …)') can never smuggle a second verdict token past the extraction.
+hdr_verdict(){ # $1=login $2=full-sha-anchor $3=line-anchored verdict-ERE → newest verdict, or empty
   gh pr view "$PR" --repo "$SLUG" --json comments \
-    -q ".comments[] | select(.author.login==\"$1\") | select(.body | contains(\"$2\")) | .body | split(\"\n\")[0]" 2>/dev/null \
+    -q ".comments[] | select(.author.login==\"$1\") | .body | split(\"\n\")[0] | select(contains(\"$2\"))" 2>/dev/null \
     | grep -oE "$3" | tail -1
 }
 
@@ -116,7 +123,7 @@ tier="$(gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/n
 # from anyone else (incl. the PR author) is ignored. No trust anchor ⇒ gate=NONE ⇒ REFUSE.
 gate="NONE"
 if [ -n "$LG_HOST_LOGIN" ] && [ "$LG_HOST_LOGIN" != "$pr_author" ]; then
-  lgc="$(hdr_verdict "$LG_HOST_LOGIN" "@ ${head_sha:0:7}" 'Host live-gate \(Gate B\): VERDICT (GREEN|RED)')"
+  lgc="$(hdr_verdict "$LG_HOST_LOGIN" "@ $head_sha" '^\**Host live-gate \(Gate B\): VERDICT (GREEN|RED)')"
   case "$lgc" in *GREEN) gate=GREEN;; *RED) gate=RED;; esac
 else
   echo "[auto-merge] live-gate trust anchor unset or == PR author — gate unverifiable (fail-closed)"
@@ -127,7 +134,7 @@ fi
 # invalid. No trust anchor ⇒ fit=NONE ⇒ REFUSE. (This is why the fitness harness POSTS such a comment.)
 fit="NONE"
 if [ -n "$FITNESS_LOGIN" ] && { [ "${FITNESS_SAME_IDENTITY:-0}" = 1 ] || [ "$FITNESS_LOGIN" != "$pr_author" ]; }; then
-  fvc="$(hdr_verdict "$FITNESS_LOGIN" "head \`${head_sha:0:7}\`" 'Fitness review: VERDICT (PASS|RETURN|ESCALATE)')"
+  fvc="$(hdr_verdict "$FITNESS_LOGIN" "head $head_sha" '^Fitness review: VERDICT (PASS|RETURN|ESCALATE)')"
   case "$fvc" in *PASS) fit=PASS;; *RETURN) fit=RETURN;; *ESCALATE) fit=ESCALATE;; esac
 else
   echo "[auto-merge] fitness trust anchor unset or == PR author — fitness unverifiable (fail-closed)"
