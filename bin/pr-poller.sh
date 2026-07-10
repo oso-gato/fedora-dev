@@ -163,7 +163,8 @@ if [ "${1:-}" = "--selftest" ]; then
   # tier-classify --stdin regression harness (the sibling script IS a dependency of sweep routing):
   # the gather loop must keep a FINAL UNTERMINATED line — a command-substituted variable loses its
   # trailing newline, and dropping that line classified a one-file PR from ZERO paths (round-2
-  # review blocker). Empty stdin must stay "no files" (exit 2, no output) → the sweep's ${tier:-A}.
+  # review blocker). Empty stdin must stay "no files" — asserted here as EMPTY OUTPUT (the property
+  # the sweep's ${tier:-A} consumes; the script also exits 2, not asserted).
   tc(){ local got; got="$(printf '%s' "$2" | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; got="${got:-NONE}"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
   tc "tier unterminated one"  'README.md'                    'C'
   tc "tier unterminated last" $'README.md\npolicy/CLAUDE.md' 'A'
@@ -381,8 +382,12 @@ sweep(){
         : > "$done"
         ;;
       PRESENT)
-        surface "$pr" "$sha" "review" "GREEN PR needs your decision (tier=$tier, fitness=$fit). Present for a clickable merge — the poller does not auto-merge this."
-        : > "$done"
+        # the acted marker is gated on surface()'s rc: a FAILED comment POST must NOT park the
+        # tuple (the terminal-state skip would otherwise silence the human touchpoint forever
+        # after one throttled POST — comment CREATION rate-limits while reads still succeed).
+        # surface() returns 0 on its already-surfaced early-exit, so idempotence is preserved.
+        surface "$pr" "$sha" "review" "GREEN PR needs your decision (tier=$tier, fitness=$fit). Present for a clickable merge — the poller does not auto-merge this." \
+          && : > "$done"
         ;;
     esac
   done 3<<< "$rows"
