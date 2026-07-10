@@ -13,14 +13,30 @@
 #   GREEN → run the independent fitness harness (bin/fitness-review.sh); then the merge decision:
 #           Tier A → present to Arthur (never auto); Tier B/C + fitness PASS → bin/auto-merge.sh.
 #
+#   RETIRE → each sweep FIRST retires SUPERSEDED PRs: a MERGED PR whose body carries a WHOLE LINE that
+#           is exactly `Supersedes #N[, #M…]` (same-repo, case-insensitive, nothing else on the line)
+#           closes a still-OPEN #N with an explanatory comment. The authorizing event is the
+#           SUPERSEDER'S MERGE — already human-clicked (or, armed, three-gate-checked) — so
+#           retirement runs even while DISARMED: a close is reversible (reopen button) and never
+#           touches main; arming (#96) gates the MERGE boundary only. Fail-closed to NO-OP: an issue
+#           number, a cross-repo ref, prose, a backticked/blockquoted/fenced/code-indented example,
+#           a malformed list, or an already-closed target never acts; a transient API failure degrades to the
+#           status quo (the PR stays open for a human) — never to a wrong close; a human REOPEN is
+#           durable (a PR carrying a prior retire comment is never re-closed, even after local state
+#           loss). WHY THE POLLER: the interactive agent is classifier-DENIED `gh pr close` on PRs
+#           it didn't create (run-003 lesson b), so this deterministic verb is the sanctioned
+#           retirement path.
+#
 # SAFE BY DEFAULT — DISARMED: the GREEN→merge path calls auto-merge.sh in --dry-run (prints the
 # DECISION, merges nothing) UNLESS POLLER_ARMED=1. Arming (flipping to --commit) is the LAST step and a
-# Tier-A change gated on Arthur's click (#96) — building the poller changes nothing until armed. And
+# Tier-A change gated on Arthur's click (#96) — disarmed, the MERGE boundary stays untouched. And
 # auto-merge.sh itself re-checks all three gates fail-closed, so a stale plan can never mis-merge.
 #
-# The poller has NO merge credential of its own: it only OBSERVES, spawns a feature-branch fixer, and
-# delegates the merge to the dumb, gate-checked auto-merge.sh. It cannot be prompt-injected — it runs no
-# model; the only model it spawns is the disposable fixer, whose prompt forbids merge/main.
+# The poller has NO merge credential of its own: it OBSERVES, spawns a feature-branch fixer, retires
+# superseded PRs (a reversible close — see RETIRE above; the one non-merge write it performs even
+# disarmed, alongside its surface/fitness comments), and delegates the merge to the dumb, gate-checked
+# auto-merge.sh. It cannot be prompt-injected — it runs no model; the only model it spawns is the
+# disposable fixer, whose prompt forbids merge/main.
 #
 # Usage:
 #   pr-poller.sh --once                # one sweep of all open PRs, then exit (cron / manual / testing)
@@ -36,6 +52,12 @@
 #   POLLER_FIXER      headless fixer command (default: claude -p). Overridable for testing.
 #   FIXER_TIMEOUT     max seconds for ONE fixer run (default 1800). Bounds a single iteration, not the
 #                     count of iterations.
+#   RETIRE_LOOKBACK   how many of the most recently UPDATED merged PRs each sweep scans for
+#                     `Supersedes #N` declarations (default 15; sorted by update recency so a
+#                     long-parked PR that merges late still enters the window; each merged PR is
+#                     scanned only once — state marker). Residual: if the poller is DOWN while more
+#                     than this many merged PRs receive updates, older declarations fall out of the
+#                     window unscanned — degrades to status quo (the PR stays open for a human).
 set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 
@@ -47,6 +69,16 @@ HERE="$(dirname "$(readlink -f "$0")")"
 host_verdict(){ grep -oE 'Host live-gate \(Gate B\): VERDICT (GREEN|RED)' | grep -oE '(GREEN|RED)$' | tail -1; }
 # extract the newest fitness verdict (PASS|RETURN|ESCALATE) from fitness-bot comment bodies on stdin.
 fitness_verdict(){ grep -oE 'Fitness review: VERDICT (PASS|RETURN|ESCALATE)' | grep -oE '(PASS|RETURN|ESCALATE)$' | tail -1; }
+# extract same-repo supersession targets (PR numbers, one per line, deduped) from a PR body on stdin.
+# STRICT WHOLE-LINE grammar — a line that is EXACTLY `Supersedes #N[, #M…]` (case-insensitive, up to
+# 3 leading spaces, trailing whitespace ok, CRLF stripped) and NOTHING else. ALL-OR-NOTHING: a line
+# with any other text — backticks, a blockquote `>`, mid-sentence prose, trailing words, a
+# space-separated list — matches NOTHING (never a partial list), so quoted examples with a live
+# number, negations, cross-repo refs and unrelated `#N` can never act. MARKDOWN-AWARE: fenced code
+# blocks (``` / ~~~ toggles) are stripped before matching and a ≥4-space/tab indent is markdown code
+# — so DOCUMENTING the grammar in a fence or code-indent can never act either (belt: still write
+# `#N` — letters — in prose examples). The superseding PR carries the declaration as its own line.
+supersede_targets(){ tr -d '\r' | awk '/^ {0,3}(```|~~~)/{f=!f; next} !f' | grep -ioE '^ {0,3}supersedes:?[[:space:]]+#[0-9]+([[:space:]]*,[[:space:]]*#[0-9]+)*[[:space:]]*$' | grep -oE '#[0-9]+' | tr -d '#' | sort -un; }
 
 # plan <host:GREEN|RED|NONE> <tier:A|B|C|""> <fitness:PASS|RETURN|ESCALATE|NONE> <armed:0|1>
 #   -> NOOP | FIX | REVIEW | MERGE | MERGE_DRYRUN | PRESENT
@@ -96,6 +128,23 @@ if [ "${1:-}" = "--selftest" ]; then
   fv(){ local got; got="$(printf '%s' "$2" | fitness_verdict)"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
   fv "fit pass"    'Fitness review: VERDICT PASS'                                           PASS
   fv "fit latest"  $'Fitness review: VERDICT RETURN\nFitness review: VERDICT PASS'          PASS
+  st(){ local got; got="$(printf '%s' "$2" | supersede_targets | tr '\n' ' ')"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
+  st "retire one"        'Supersedes #97'                                                   '97 '
+  st "retire colon list" $'Body text.\nsupersedes: #12, #13\nMore.'                         '12 13 '
+  st "retire crlf+indent" $'  Supersedes #42\r\nother\r\n'                                  '42 '
+  st "retire dedup"      $'Supersedes #7\nSupersedes #7'                                    '7 '
+  st "retire cross-repo" 'Supersedes oso-gato/fedora-desktop#97'                            ''
+  st "retire prose only" 'this supersedes the old approach entirely'                        ''
+  st "retire unrelated"  'relates to #4; fixes #5'                                          ''
+  st "retire mid-line"   'note: this PR supersedes #12 in spirit'                           ''
+  st "retire backticked" '`Supersedes #97`'                                                 ''
+  st "retire blockquote" '> Supersedes #97'                                                 ''
+  st "retire trailing"   'Supersedes #12 — replaced by the new approach'                    ''
+  st "retire space list" 'Supersedes #12 #13'                                               ''
+  st "retire fenced"     $'```\nSupersedes #55\n```'                                        ''
+  st "retire tilde fence" $'~~~\nSupersedes #56\n~~~'                                       ''
+  st "retire code indent" '    Supersedes #55'                                              ''
+  st "retire post-fence" $'```\ndoc example\n```\nSupersedes #57'                           '57 '
   [ "$fail" = 0 ] && echo "ALL POLLER SELFTESTS PASS" || echo "POLLER SELFTESTS FAILED"
   exit "$fail"
 fi
@@ -119,6 +168,7 @@ POLLER_ARMED="${POLLER_ARMED:-0}"
 POLL_INTERVAL="${POLL_INTERVAL:-60}"
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
 FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
+RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
@@ -170,8 +220,61 @@ FIX_EOF
   fi
 }
 
+# Retire superseded PRs (see header RETIRE). Trust anchor: only MERGED superseders are scanned (their
+# body AS READ AT SCAN TIME — merged = it passed the click; post-merge body edits are trusted under
+# the single-operator + App-token threat model, bounded by the scan-once marker and a reversible,
+# audited close), and every declared target must still be an OPEN PR in the SAME repo. The list is
+# sorted by UPDATE recency (`sort:updated-desc` — a merge updates the PR), so a long-parked PR that
+# merges late still enters the window; plain `gh pr list` would order by CREATION date and miss it.
+# Each merged PR is scanned exactly once — the marker is written only after a SUCCESSFUL body fetch,
+# so a transient list/body failure retries next sweep. Per-target probes/closes are deliberately
+# single-shot (no retry machinery): a transient failure there degrades to the status quo — the
+# superseded PR stays open for a human, and the log says RETIRE FAILED, never a false success. An
+# issue number or an already-closed target fails the OPEN probe → no-op. REOPEN IS DURABLE: a target
+# already carrying a `Poller [retire]:` comment is never closed again (GitHub is the durable record,
+# so a human reopen survives even total local-state loss), only re-marked locally.
+retire_superseded(){
+  local merged m
+  merged="$(gh pr list --repo "$SLUG" --state merged --search 'sort:updated-desc' --limit "$RETIRE_LOOKBACK" --json number -q '.[].number' 2>/dev/null)"
+  [ -n "$merged" ] || return 0
+  for m in $merged; do
+    local scanned="$STATE/retire-scan-${m}.done"
+    [ -f "$scanned" ] && continue
+    local body targets t
+    body="$(gh pr view "$m" --repo "$SLUG" --json body -q .body 2>/dev/null)" || continue
+    targets="$(printf '%s' "$body" | supersede_targets)"
+    : > "$scanned"
+    [ -n "$targets" ] || continue
+    for t in $targets; do
+      [ "$t" = "$m" ] && continue                     # never the superseder itself
+      local rmark="$STATE/retired-${t}.done" tstate
+      [ -f "$rmark" ] && continue
+      tstate="$(gh pr view "$t" --repo "$SLUG" --json state -q .state 2>/dev/null)" || continue
+      [ "$tstate" = "OPEN" ] || continue              # not an open PR (issue / closed / merged) → no-op
+      # reopen guard: a prior poller retirement on this PR means a HUMAN reopened it — never re-close.
+      # FAIL-CLOSED: the comments fetch is rc-checked into a variable — a transient fetch failure
+      # SKIPS the close (status quo), it must never bypass the guard. grep reads to EOF (no -q) so a
+      # large comment blob can't SIGPIPE the pipeline under pipefail.
+      local tcomments
+      tcomments="$(gh pr view "$t" --repo "$SLUG" --json comments -q '.comments[].body' 2>/dev/null)" || continue
+      if printf '%s' "$tcomments" | grep 'Poller \[retire\]:' >/dev/null; then
+        : > "$rmark"; continue
+      fi
+      if gh pr close "$t" --repo "$SLUG" \
+           --comment "**Poller [retire]:** #$m (merged) declares \`Supersedes #$t\` — closing this superseded PR. Deterministic retirement (Step 5); reopen if this was wrong (a reopen is durable — the poller never re-closes a PR carrying this comment)." \
+           >/dev/null 2>&1; then
+        log "RETIRE $SLUG#$t — closed (superseded by merged #$m)"
+        : > "$rmark"
+      else
+        log "RETIRE FAILED $SLUG#$t (superseded by merged #$m) — close error; single-shot, left open for a human"
+      fi
+    done
+  done
+}
+
 sweep(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"
+  retire_superseded
   local prs; prs="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid 2>/dev/null)"
   [ -n "$prs" ] || { log "no open PRs / list failed"; return 0; }
   local n; n="$(printf '%s' "$prs" | grep -oE '"number":[0-9]+' | grep -oE '[0-9]+')"
