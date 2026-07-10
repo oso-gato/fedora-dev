@@ -49,13 +49,21 @@
 #   FITNESS_LOGIN     fitness bot login (passed through to fitness-review.sh + auto-merge.sh)
 #   POLLER_ARMED      1 → GREEN+B/C+PASS actually merges (auto-merge --commit). Default 0 (dry-run).
 #   POLL_INTERVAL     seconds between --watch sweeps (default 10, matching the host watcher cadence).
-#                     Cost at 10s: 1 list call + ~5 gh calls per open PR per sweep ≈ 360×(1+5N)/h
-#                     against the dev App's 5k/h REST budget — which is SHARED with the fixer,
-#                     fitness reviewer and auto-merge. Comfortable at N≤2 open PRs; saturates around
-#                     N=3 sustained for an hour. On exhaustion gh calls fail and sweeps degrade to
-#                     NOOP until the window resets — safe (fail-closed, self-recovering), but slower
-#                     pickup than 60s under that load. Follow-up queued: batch the per-PR fetches
-#                     into one `gh pr view` (cost → 1+N calls/sweep, ceiling ~10 open PRs).
+#                     Cost at 10s (fetch-BATCHED sweep): steady state ≈ 360×(2+N)/h — the open-PR
+#                     list (TSV: number+ref+sha in ONE call), the retire merged-list, and ONE
+#                     sha-bound comments call per open PR. A PARKED GREEN PR (already acted:
+#                     PRESENT posted / dry-run decided / merge attempted) is terminal-state-skipped
+#                     on its acted marker, so it too costs exactly 1 comments call/sweep; only a
+#                     GREEN PR whose routing is PENDING (fitness verdict not yet posted, or
+#                     fitness-RETURN driving the fixer) costs +2 (files + fitness comments) per
+#                     sweep until it parks — short-lived, and bounded by the fitness/fixer
+#                     turnaround. Against the dev App's 5k/h REST budget (SHARED with the fixer,
+#                     fitness reviewer and auto-merge): N=10 open PRs ≈ 4.3k/h — the ceiling is
+#                     ~10 sustained open PRs (was 2-3 unbatched). On exhaustion gh calls fail and
+#                     sweeps degrade to NOOP until the window resets — fail-closed,
+#                     self-recovering; GREEN-moment fetch failures skip that PR for that sweep
+#                     (retry next), never a misroute. Escalation if ever needed: one GraphQL
+#                     sweep query for ALL open PRs (N-independent) — designed, not built.
 #   POLLER_FIXER      headless fixer command (default: claude -p). Overridable for testing.
 #   FIXER_TIMEOUT     max seconds for ONE fixer run (default 1800). Bounds a single iteration, not the
 #                     count of iterations.
@@ -152,6 +160,16 @@ if [ "${1:-}" = "--selftest" ]; then
   st "retire tilde fence" $'~~~\nSupersedes #56\n~~~'                                       ''
   st "retire code indent" '    Supersedes #55'                                              ''
   st "retire post-fence" $'```\ndoc example\n```\nSupersedes #57'                           '57 '
+  # tier-classify --stdin regression harness (the sibling script IS a dependency of sweep routing):
+  # the gather loop must keep a FINAL UNTERMINATED line — a command-substituted variable loses its
+  # trailing newline, and dropping that line classified a one-file PR from ZERO paths (round-2
+  # review blocker). Empty stdin must stay "no files" — asserted here as EMPTY OUTPUT (the property
+  # the sweep's ${tier:-A} consumes; the script also exits 2, not asserted).
+  tc(){ local got; got="$(printf '%s' "$2" | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; got="${got:-NONE}"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
+  tc "tier unterminated one"  'README.md'                    'C'
+  tc "tier unterminated last" $'README.md\npolicy/CLAUDE.md' 'A'
+  tc "tier terminated parity" $'README.md\n'                 'C'
+  tc "tier empty stdin"       ''                             'NONE'
   [ "$fail" = 0 ] && echo "ALL POLLER SELFTESTS PASS" || echo "POLLER SELFTESTS FAILED"
   exit "$fail"
 fi
@@ -282,14 +300,21 @@ retire_superseded(){
 sweep(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"
   retire_superseded
-  local prs; prs="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid 2>/dev/null)"
-  [ -n "$prs" ] || { log "no open PRs / list failed"; return 0; }
-  local n; n="$(printf '%s' "$prs" | grep -oE '"number":[0-9]+' | grep -oE '[0-9]+')"
-  local pr
-  for pr in $n; do
-    local ref sha comments host tier fit action
-    ref="$(gh pr view "$pr" --repo "$SLUG" --json headRefName -q .headRefName 2>/dev/null)"
-    sha="$(gh pr view "$pr" --repo "$SLUG" --json headRefOid -q .headRefOid 2>/dev/null)"
+  # BATCHED list: ONE call yields number+ref+sha as TSV — the old per-PR headRefName/headRefOid
+  # re-fetches duplicated fields this same list already carried (2 calls/PR saved). Branch names
+  # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
+  # number (no torn read across a mid-sweep push).
+  local rows
+  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid \
+          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)"' 2>/dev/null)" \
+    || { log "pr list failed — skipping sweep"; return 0; }
+  [ -n "$rows" ] || return 0                       # zero open PRs — quiet (rc 0 distinguishes it)
+  # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
+  # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
+  # --watch flock; FD 3 is free.
+  local pr ref sha comments host tier fit action files fitraw
+  while IFS=$'\t' read -r -u 3 pr ref sha; do
+    [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
     # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — AND bound to
     # THIS head sha (the verdict comment embeds "<repo> @ <sha7>"): a fresh, ungated head must never
@@ -300,13 +325,39 @@ sweep(){
     # dedup: act on each (pr,sha,host-verdict) at most once for the terminal actions; REVIEW/FIX manage
     # their own re-entry (fitness marker; progress signature), so only gate the whole sweep-action here.
     local done="$STATE/acted-${pr}-${sha}-${host}.done"
-    tier="$(gh pr view "$pr" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; tier="${tier:-A}"
-    fit="NONE"
-    if [ -n "$FITNESS_LOGIN" ]; then
-      # fitness verdicts are also per-head (the comment's <sub> line embeds "head \`<sha7>\`") —
-      # bind to THIS sha so a stale PASS/RETURN from a previous head never routes the new one.
-      fit="$(gh pr view "$pr" --repo "$SLUG" --json comments \
-             -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | select(.body | contains(\"head \`${sha:0:7}\`\")) | .body" 2>/dev/null | fitness_verdict)"; fit="${fit:-NONE}"
+    # TERMINAL-STATE SKIP: once (pr,sha,GREEN) has ACTED (PRESENT posted / dry-run decided / merge
+    # attempted), no further action exists for this tuple — the case arms below would only hit
+    # their own `[ -f "$done" ] && continue`. Skip the GREEN-moment fetches too, so a PARKED GREEN
+    # PR (awaiting the click; dry-run while disarmed) costs ONE comments call per sweep — this is
+    # what makes the cost formula above true. A new head sha or verdict keys a NEW marker; a
+    # REVIEW-pending PR never holds this marker (fitness re-entry unaffected); FIX never writes it.
+    # NB (pre-existing semantics, unchanged): a dry-run marker also blocks a later ARMED merge of
+    # the same (pr,sha) — arming re-routes only new heads; part of the #96 flip discussion.
+    [ -f "$done" ] && { log "#$pr ${sha:0:7} host=$host — acted, parked"; continue; }
+    # BATCHED gate reads: plan() consults tier + fitness ONLY on GREEN — so fetch them ONLY then
+    # (a NOOP/RED PR costs exactly one comments call per sweep). Both GREEN-moment fetches are
+    # rc-checked and SKIP this PR for THIS sweep on a transient failure (retry next sweep) — they
+    # must never misroute: a failed files fetch defaulting to tier=A would PRESENT an
+    # auto-mergeable PR and stick via the acted marker; a failed fitness fetch reading as NONE
+    # would spuriously re-run the review harness. rc is only distinguishable on an UNPIPED
+    # capture, hence the fetch-to-var-then-filter shape.
+    tier=""; fit="NONE"
+    if [ "$host" = "GREEN" ]; then
+      files="$(gh pr view "$pr" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null)" \
+        || { log "#$pr: files fetch failed — skip this sweep, retry next"; continue; }
+      # newline-TERMINATE the captured paths ($(…) strips the final newline; an unterminated last
+      # line would be dropped by a plain while-read gather — the single-file PR would classify
+      # from ZERO paths). The [ -n ] guard keeps a zero-file PR fail-closed to A: a bare
+      # printf '%s\n' "" would feed one EMPTY line and flip it to all-docs → C.
+      tier="$([ -n "$files" ] && printf '%s\n' "$files" | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; tier="${tier:-A}"
+      if [ -n "$FITNESS_LOGIN" ]; then
+        # fitness verdicts are also per-head (the comment's <sub> line embeds "head \`<sha7>\`") —
+        # bind to THIS sha so a stale PASS/RETURN from a previous head never routes the new one.
+        fitraw="$(gh pr view "$pr" --repo "$SLUG" --json comments \
+               -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | select(.body | contains(\"head \`${sha:0:7}\`\")) | .body" 2>/dev/null)" \
+          || { log "#$pr: fitness-comments fetch failed — skip this sweep, retry next"; continue; }
+        fit="$(printf '%s' "$fitraw" | fitness_verdict)"; fit="${fit:-NONE}"
+      fi
     fi
     action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED")"
     log "#$pr ${sha:0:7} host=$host tier=$tier fitness=$fit ⇒ $action"
@@ -331,11 +382,15 @@ sweep(){
         : > "$done"
         ;;
       PRESENT)
-        surface "$pr" "$sha" "review" "GREEN PR needs your decision (tier=$tier, fitness=$fit). Present for a clickable merge — the poller does not auto-merge this."
-        : > "$done"
+        # the acted marker is gated on surface()'s rc: a FAILED comment POST must NOT park the
+        # tuple (the terminal-state skip would otherwise silence the human touchpoint forever
+        # after one throttled POST — comment CREATION rate-limits while reads still succeed).
+        # surface() returns 0 on its already-surfaced early-exit, so idempotence is preserved.
+        surface "$pr" "$sha" "review" "GREEN PR needs your decision (tier=$tier, fitness=$fit). Present for a clickable merge — the poller does not auto-merge this." \
+          && : > "$done"
         ;;
     esac
-  done
+  done 3<<< "$rows"
 }
 
 case "${1:-}" in

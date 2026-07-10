@@ -72,7 +72,12 @@ if [ "${1:-}" = "--pr" ]; then
     < <(gh pr view "$pr" --repo "oso-gato/$repo" --json files -q '.files[].path' 2>/dev/null)
   [ "${#files[@]}" -gt 0 ] || { echo "tier-classify: could not read PR files (gh)" >&2; exit 2; }
 elif [ "${1:-}" = "--stdin" ]; then
-  while IFS= read -r line; do files+=( "$line" ); done
+  # `|| [ -n "$line" ]` keeps the FINAL line when the stream lacks a terminating newline (read
+  # fills the var but returns nonzero at EOF; a plain `while read` silently DROPS that line — a
+  # caller feeding a command-substituted variable would lose its last path, and a ONE-path input
+  # would classify from zero paths). Fail-closed depends on reading every path; harden here so
+  # every present and future caller inherits the fix.
+  while IFS= read -r line || [ -n "$line" ]; do files+=( "$line" ); done
 else
   files=( "$@" )
 fi
