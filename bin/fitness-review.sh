@@ -130,8 +130,8 @@ fi
 # LG_HOST_LOGIN) for offline testing.
 if [ -n "$LG_HOST_LOGIN" ]; then
   gate="$(gh pr view "$PR" --repo "$SLUG" --json comments \
-          -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | .body" 2>/dev/null \
-          | grep -oE 'Host live-gate \(Gate B\): VERDICT (GREEN|RED)' | grep -oE '(GREEN|RED)$' | tail -1)"
+          -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | .body | split(\"\n\")[0]" 2>/dev/null \
+          | grep -oE '^\**Host live-gate \(Gate B\): VERDICT (GREEN|RED)' | grep -oE '(GREEN|RED)$' | tail -1)"
   case "$gate" in GREEN) : ;; *) die "PR is not host-GREEN (latest host verdict: ${gate:-NONE}) — fitness runs only on GREEN"; esac
 fi
 
@@ -197,9 +197,9 @@ fi
 
 # ---- compose the CANONICAL verdict comment (shell-owned) + the model's rationale -------------------
 rationale="$(printf '%s' "$review" | grep -vE '^[[:space:]]*FITNESS_VERDICT:' | sed -e 's/[[:space:]]*$//')"
-comment="Fitness review: VERDICT $verdict
+comment="Fitness review: VERDICT $verdict — head $head_sha
 
-<sub>Independent fitness review (Step 4b) — reviewer \`$FITNESS_LOGIN\`, head \`${head_sha:0:7}\`. Machine-read by \`bin/auto-merge.sh\`; the verdict token above is authoritative.</sub>
+<sub>Independent fitness review (Step 4b) — reviewer \`$FITNESS_LOGIN\`, head \`${head_sha:0:7}\`. Machine-read by \`bin/auto-merge.sh\` from LINE 1 ONLY (verdict + FULL head sha — prose/rationale below this line is never machine-trusted); the verdict token above is authoritative.</sub>
 
 <details><summary>rationale</summary>
 
