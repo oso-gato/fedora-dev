@@ -3,7 +3,16 @@
 > **What this is.** The fixed reference the fitness gate grades every change against, and the standing
 > law for how work reaches (or does not reach) the maintainer. Written by the **product owner** — a
 > non-coding maintainer whose authority is *intent*, not code review. The developer and reviewer agents
-> do NOT edit this; only the maintainer does (a change to this file is itself Tier A — his click).
+> do NOT edit this; only the maintainer changes it — by his own edit/merge, or by his recorded act
+> (§6(c) records how the one 2026-07-11 amendment was authorized; whether comment-based
+> pre-authorization becomes a standing amendment procedure is HIS open question, not assumed here).
+>
+> **⚠️ AMENDED 2026-07-11 — ZERO-GATE ENACTED (see §6(c) for the maintainer's recorded decision).**
+> The Tier-A "maintainer's click" merge routing in §3–§5 below is **superseded**: every PR — control-plane
+> included — merges via the autonomous two-gate pipeline (host live-gate + independent fitness, distinct
+> App identities, sha-bound); a fitness **ESCALATE** routes a genuine judgment question to the maintainer
+> (a question, never a merge button). The click-era text is retained below for history and for everything
+> in it that still binds (the three questions, RETURN/ESCALATE semantics, the anti-hijack intent).
 >
 > This is the human-readable map. The **binding, stamped** operative rules live in
 > `policy/fleet-core.md` (THE SELF-SUSTAINING APPARATUS) which every box carries in-context; this file
@@ -87,13 +96,12 @@ authored by bootstrap/desktop is still **merged by fedora-dev**, never the propo
 
 | Tier | What | Merge (always by fedora-dev) | Maintainer sees |
 |---|---|---|---|
-| **A** | Boundary / irreversible (§3) | **Maintainer's click required** — fedora-dev's in-session clickable `ask`, OR the maintainer acting **remotely** (GitHub web / a machine outside the boxes). NEVER auto; NEVER from bootstrap/desktop. Preceded by the Stage-3 adversarial review that can RETURN it. | a decision + the 3-question brief + review verdicts |
+| **A** | Boundary / irreversible (§3) | ~~Maintainer's click required~~ **SUPERSEDED by §6(c) zero-gate: auto-merges under the two-gate pipeline like every tier**; the Stage-3 adversarial review runs inside the fitness gate and can RETURN it; a genuine governance trade-off ESCALATEs as a question. | an ESCALATE question when one arises + a line in the digest |
 | **B** | Reversible, non-boundary feature work | **fedora-dev auto-merges** under the fitness gate | a line in the digest |
 | **C** | Docs / comments only | **fedora-dev auto-merges** | a line in the digest |
 
-*The "click to merge" prompt is a **fedora-dev-session** construct by design — the only box whose gate
-routes `main`-touching actions to `ask` rather than `deny`. The maintainer's remote action (GitHub web
-/ a non-box machine) is the other Tier A path.*
+*(Pre-amendment note, historical: the "click to merge" prompt was a fedora-dev-session construct; the
+gate-push hook that produced it was retired 2026-07-11 — §6(c).)*
 
 ## 5. The governance workflow (how this feeds the loop)
 
@@ -121,23 +129,49 @@ change against both the per-request spec and this constitution — **the three q
 2. **Does it contradict another requirement?** Satisfies A by breaking B → RETURN.
 3. **Fit for purpose?** Advances the whole objective (not locally-correct-but-globally-useless / hampering) **and honors the PROBLEM-SOLVING DOCTRINE** (`fleet-core.md`, top): solution-oriented · iterated-on-facts (validated, not asserted) · zero-based · objective-held & pivoted (not patched) · no rabbit-hole. Q3 grades the change against those six as a checklist — violating one FAILS Q3.
 
-**Stage 2 — three outcomes, only one reaches the maintainer:**
-- **PASS** (all three positive) → route by tier (§4): Tier A → his click; Tier B/C → auto-merge + digest.
+**Stage 2 — three outcomes, only one reaches the maintainer** *(amended per §6(c) — zero-gate)*:
+- **PASS** (all three positive) → **auto-merge, ANY tier** (control-plane included) + digest. Tier labels
+  the digest; it no longer routes to a click.
 - **RETURN** (fails Q2/Q3) → back to the developer agent to rework; the maintainer never sees it.
-- **ESCALATE** (genuinely ambiguous fit) → to the maintainer as a **question, not a merge button**.
+- **ESCALATE** (genuinely ambiguous fit / a governance trade-off) → to the maintainer as a **question,
+  not a merge button** — the one human-judgment path that survives zero-gate, by design.
 
-**Stage 3 — Tier A also gets an adversarial pass.** For boundary changes, an independent agent tries to
-**break** it (the security-review pattern); it can RETURN, and repeats until it converges clean, before
-the maintainer's click. (This is what the fence fix went through — multiple rounds, real bugs caught.)
+**Stage 3 — boundary changes also get an adversarial pass** *(amended per §6(c))*: for control-plane
+changes an independent agent tries to **break** it (the security-review pattern); it can RETURN, and
+repeats until it converges clean — running **inside the fitness gate**, not as a pre-merge click ritual.
+(This is what the fence fix and the 2026-07-11 unshackle wave went through — multiple rounds, real
+defects caught: two rebuild-bricks, an overclaimed safety statement, a false verification claim.)
 
 ## 6. Resolved decisions (each states DECISION vs current STATUS explicitly)
 
+**(c) ZERO-GATE — the maintainer's recorded enactment (2026-07-11).**
+- **DECISION (the maintainer's own words, posted from his account `oso-gato` on fedora-dev#139 —
+  https://github.com/oso-gato/fedora-dev/pull/139#issuecomment-4945056383):**
+  > CONFIRMED — zero-click merge authority applies to ALL tiers, control-plane included
+  > (re-confirming my #130 ZERO-GATE decision). The TIER ROUTING rewrite in this PR
+  > correctly records my decision. I authorize amending GOVERNANCE.md §5/§6 to match,
+  > via a PR citing this comment. Adversarial review continues inside the fitness gate,
+  > not as a pre-merge click. Also confirming: fedora-desktop is in the unshackle scope.
+- **What it supersedes:** the Tier-A→click routing (§4 table row A, §5 Stage 2), the pre-click Stage-3
+  ritual (§5), and §6(a)'s "no merge authority" clause. The interactive gate-push hook + auto-classifier
+  are retired in fedora-dev (#137/#139) and fedora-bootstrap (#122, v1.2.59); the fedora-desktop port
+  (#114) is in flight, confirmed in scope by the comment above. The poller IS the merge authority, under
+  two independent gates (host live-gate App + fitness App). Recoverability is automatic (host
+  health-gate digest rollback, git revert, fitness's standing preserve-recoverability rule), not a click.
+- **The chain of enactment (recorded as it actually happened):** #130 (ZERO-GATE poller, 2026-07-10) →
+  #137 (hook retirement; merged 2026-07-11 08:35Z by the poller App under the standing #130 decision,
+  BEFORE the comment below existed — the maintainer's recorded confirmation is retroactive and covers it,
+  "re-confirming my #130 ZERO-GATE decision") → the recorded comment above → #139 (fleet-core TIER
+  ROUTING amendment, merged bc5d868) → this GOVERNANCE amendment (the one edit the comment pre-authorized).
+- **STATUS: ENACTED.** The stamped operative law (`fleet-core.md` TIER ROUTING) already carries it.
+
 **(a) Supervised poller.**
 - **DECISION:** BUILD IT (approved). A small always-on in-box service watches for the host verdict and
-  re-wakes the agent to iterate — **no merge authority** (the click stays the only boundary control).
+  re-wakes the agent to iterate — *(the "no merge authority" clause is superseded by §6(c): the poller
+  is now the merge authority, under the two independent gates)*.
   This is what makes the loop autonomous rather than "autonomous while a human babysits a session."
-- **STATUS: NOT YET BUILT.** No code exists yet — the decision is made, the work is not started. Until
-  it is built, the loop still needs a live agent session to be the heartbeat (principle 3's open gap).
+- **STATUS: BUILT + ARMED** (superseding the earlier "not yet built" — `bin/pr-poller.sh` +
+  `bin/poller-service.sh` + `bin/auto-merge.sh` run live; first zero-click merge #129, org-wide #136+).
 
 **(b) Host-validation isolation — gVisor.**
 - **DECISION:** a real VM is provider-blocked (Hostinger disables nested virtualization, verified), so a
