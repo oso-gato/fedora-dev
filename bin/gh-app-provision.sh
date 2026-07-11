@@ -77,8 +77,12 @@ _gha_reflow_pem() {  # stdin: pasted text -> stdout: normalized PEM
   printf '%s\n' "$ftr"
 }
 
-# Validate a PEM actually parses as a private key (openssl, stdin only — never a file).
-_gha_pem_valid() { printf '%s\n' "$1" | openssl pkey -noout 2>/dev/null; }
+# Validate a PEM actually parses as a private key (openssl, stdin only — never a file). `-passin pass:`
+# supplies an EMPTY passphrase so an ENCRYPTED key fails FAST here (bad-decrypt, rc!=0) instead of
+# HANGING on openssl's hidden /dev/tty passphrase prompt (stderr is /dev/null, so the hang is silent —
+# it cost a live host visit once, see the fitness-key incident). An unencrypted key ignores -passin and
+# validates normally. GitHub App keys are unencrypted PKCS#1, so this only ever REJECTS a wrong-format key.
+_gha_pem_valid() { printf '%s\n' "$1" | openssl pkey -passin pass: -noout 2>/dev/null; }
 
 # Read + reflow + VALIDATE a pasted PEM, re-prompting on a mangled paste (up to 3 tries).
 # Validation runs BEFORE any secret is created — a truncated console paste (bytes silently
@@ -88,9 +92,16 @@ _gha_read_valid_pem() {  # -> echoes the validated PEM; rc 1 after 3 failed atte
   for attempt in 1 2 3; do
     pem="$(_gha_stream_pem | _gha_reflow_pem)" || pem=""
     if [ -n "$pem" ] && _gha_pem_valid "$pem"; then printf '%s' "$pem"; return 0; fi
-    printf '>> That paste is NOT a valid private key (%s chars received) — likely truncated/garbled\n' "${#pem}" >"$GHA_TTY"
-    printf '>> by the console (browser consoles mangle long pastes). Attempt %s of 3 — paste again\n' "$attempt" >"$GHA_TTY"
-    printf '>> (or Ctrl-C and run Day-0 over plain ssh, the reliable channel for pastes):\n' >"$GHA_TTY"
+    # Name the cause. An ENCRYPTED (passphrase-protected) key is NOT a paste problem — re-pasting won't
+    # fix it; only regenerating an unencrypted App key will. Distinguish it from a truncated/garbled paste.
+    if printf '%s' "$pem" | grep -q 'ENCRYPTED'; then
+      printf '>> That key is ENCRYPTED (passphrase-protected). GitHub App keys are UNENCRYPTED PKCS#1 —\n' >"$GHA_TTY"
+      printf '>> regenerate one at the App Settings -> Private keys -> "Generate a private key", then paste that.\n' >"$GHA_TTY"
+    else
+      printf '>> That paste is NOT a valid private key (%s chars received) — likely truncated/garbled\n' "${#pem}" >"$GHA_TTY"
+      printf '>> by the console (browser consoles mangle long pastes). Attempt %s of 3 — paste again\n' "$attempt" >"$GHA_TTY"
+      printf '>> (or Ctrl-C and run Day-0 over plain ssh, the reliable channel for pastes):\n' >"$GHA_TTY"
+    fi
   done
   echo "gha: no valid PEM after 3 attempts" >&2; return 1
 }
