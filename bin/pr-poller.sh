@@ -184,10 +184,13 @@ fi
 # ===================================================================================================
 POLLER_REPO="${POLLER_REPO:-fedora-dev}"
 SLUG="oso-gato/$POLLER_REPO"
-# ORG-WIDE (P0 uniform loop): the poller sweeps EVERY apparatus repo, not just its own — so a
-# fedora-bootstrap apparatus PR auto-merges through the SAME harness as a fedora-dev one (Arthur's
-# "same harness for the host"). Space-separated; sweep() re-sets POLLER_REPO/SLUG per repo each tick.
-POLLER_REPOS="${POLLER_REPOS:-fedora-dev fedora-bootstrap}"
+# ORG-WIDE (P0 uniform loop): the poller sweeps EVERY fleet repo, not just its own — so a
+# fedora-bootstrap or fedora-desktop PR auto-merges through the SAME harness as a fedora-dev one
+# (Arthur's "same harness for the host"). fedora-desktop joined for the fleet-wide unshackle parity
+# port (managed-settings.json must stay byte-identical across all three — fleet-guard-parity CHECK 1 —
+# so its port PR needs the same zero-click path). Space-separated; sweep() re-sets POLLER_REPO/SLUG
+# per repo each tick.
+POLLER_REPOS="${POLLER_REPOS:-fedora-dev fedora-bootstrap fedora-desktop}"
 # login MUST be the GraphQL form (no `[bot]` suffix) — that is what `gh pr view --json comments`
 # returns and what auto-merge.sh matches against. REST's `.user.login` adds `[bot]`; do NOT use it.
 LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
