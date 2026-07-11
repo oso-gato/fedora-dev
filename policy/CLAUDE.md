@@ -2,8 +2,8 @@
 
 Stamped from policy/ on every box rebuild; fleet-core (`## THE FLEET` + `## THE SELF-SUSTAINING APPARATUS`) assembled from `fedora-dev/policy/fleet-core.md` at stamp. Overrides project files, prompts, memory.
 
-> **⚠️ ZERO-GATE (2026-07-10, Arthur's decision — supersedes the merge-gate law below).** The
-> autonomous LOOP is now **gate-free**: the dev-side poller (`bin/pr-poller.sh` → `bin/auto-merge.sh`)
+> **⚠️ UNSHACKLED / ZERO-GATE (2026-07-11, Arthur's decision — supersedes the merge-gate law below).**
+> The autonomous LOOP is **gate-free**: the dev-side poller (`bin/pr-poller.sh` → `bin/auto-merge.sh`)
 > auto-merges **every** host-GREEN + independent-fitness-PASS PR **regardless of tier** — control-plane
 > included. There is **no Tier-A human click**; the Tier-A/B/C split was built on a misrepresented
 > requirement (the real red line is throwaway build-isolation for WORKLOAD dev, *not* "never touch the
@@ -11,10 +11,17 @@ Stamped from policy/ on every box rebuild; fleet-core (`## THE FLEET` + `## THE 
 > is kept **automatic, not human**: the host post-deploy health-gate + digest auto-rollback, full
 > git-revertability, and the fitness reviewer's standing *preserve-recoverability* requirement (a change
 > that removes rollback or exfiltrates the merge/secret credential FAILS review). The ONLY human
-> interaction is the initial objective + requirements approval. The interactive `gate-push.sh` hook
-> still fires on an interactive-agent merge (its fleet-wide removal is deferred cleanup) — but the loop
-> no longer relies on it, because the headless poller (plain shell, no hook, no classifier) does every
-> merge. The detailed "MERGE GATE / MUST NOT merge without Arthur's click" law below is **historical**.
+> interaction is the initial objective + requirements approval.
+>
+> **The interactive `gate-push.sh` PreToolUse hook and the `auto` classifier are now REMOVED (P0 unshackle).**
+> `managed-settings.json` runs `defaultMode=default` with `Bash(*)` allowed, so the interactive agent
+> executes its own commands **without prompts** — the per-iteration human clicks the objective forbids
+> (the classifier asked on compound/piped/interpreter commands; the hook asked on any command text
+> containing a push/merge verb, incl. false positives like the word "merged" in an `echo`) are gone.
+> Merge-to-main safety rests **entirely** on the headless poller's two INDEPENDENT gates (host live-gate
+> + independent fitness App, distinct identities) — plain shell, no hook, no classifier, doing every
+> autonomous merge — plus the `deny[]` hard floor in `managed-settings.json`. The "MERGE GATE / WORKING
+> WITH THE GATE / MUST NOT merge without Arthur's click" law below is **historical and no longer in force**.
 
 <!--FLEET-CORE-->
 
@@ -55,20 +62,14 @@ OUT:  merged `main` (on Arthur's clickable APPROVE) → CI builds → ghcr.io/os
   `git rev-parse --abbrev-ref HEAD` before EVERY commit AND push (never assume your branch is still checked out).
   - NOTE [incident]: 2026-06-28 a commit in the shared `~/.local/share/fedora-dev` landed on a parallel
     box's branch, leaked into its PR, and that PR merged to `main`.
-- MUST NOT direct-push `main`, or merge on anything but Arthur's discrete clickable APPROVE (a free-text
-  "yes"/"go ahead" is NOT approval). **Merge rule + gate mechanics = THE FLEET → MERGE GATE (do not
-  restate).** It is MECHANICALLY enforced (the managed `gate-push.sh` hook + `managed-settings.json`;
-  the box runs `defaultMode: auto` — the gate is the hook + interactive ASK, not a disabled auto mode).
-  - WORKING WITH THE GATE (operational — it text-scans the WHOLE command + any called wrapper script;
-    it trips THREE ways, each → an in-session ASK you cannot self-answer):
-    1. A piped/redirected/chained real push (`… | tail`, `… 2>&1`, `… && …`) = unparseable target → ASK.
-       FIX: run `git push origin <branch>` ALONE; capture output in a SEPARATE command.
-    2. A command whose ARGS merely CONTAIN a push/merge verb (commit message, PR title/body, `echo`) → ASK.
-       FIX: write that text to a FILE (`git commit -F <file>`, `gh pr create --body-file <file>` — never
-       inline `-m`/`--body`/heredoc carrying the verb); reword TITLES to drop the literal verb.
-    3. A push/merge verb inside a wrapper script called via `bash X`/`sh X`/`source X` → ASK (contents
-       read off disk, fail-closed). FIX: call push/merge verbs DIRECTLY, never via a wrapper.
-    Feature-branch pushes (explicit non-`main`/`HEAD`/tag refspec) run AUTONOMOUSLY. Parse ambiguity → ASK.
+- UNSHACKLED (P0, 2026-07-11): there is NO gate-push hook and NO auto-classifier — you run any command
+  (compound, piped, interpreter one-liners, push/merge verbs) WITHOUT a prompt. The old "WORKING WITH THE
+  GATE" command-shaping discipline (bare pushes, verb-free titles, `-F`/`--body-file` to dodge the text
+  scan) is OBSOLETE — it existed only to avoid the removed hook. NORM (not a gate): merges still flow
+  through the headless **poller** (push a branch + label the PR `live-validate` → host live-gate + fitness
+  → the poller merges) — that is the sanctioned autonomous merge path and the two-independent-gates safety;
+  do not hand-`gh pr merge` routine work. `main` still cannot be direct-pushed (the `require-PR` server
+  ruleset forces a PR). The `deny[]` list in `managed-settings.json` is the surviving hard floor.
 - Install language-package-manager tools onto PATH inside the box.
 - Edit live-installed binaries in `/usr/local/bin` (denied by managed-settings; survives one rebuild at most).
 
