@@ -55,14 +55,26 @@ if [ ! -e "$state/.assembled" ] || [ -e "$state/.assemble-failed" ]; then
 fi
 
 # Hold the SHARED session lock for the session's lifetime.
-# --model opus: ultracode (injected via --settings below) requires an
-# xhigh-capable model. claude-code 2.1.195 changed the DEFAULT model to
-# Sonnet 4.6, which has no ultracode mode — so after a rebuild to that client
-# the box silently booted at a downgraded model and ultracode vanished, even
-# though the --settings injection was unchanged. Pinning the `opus` alias
-# (always the latest Opus, currently 4.8) restores the pre-downgrade default
-# and is immune to future client default-model changes. Still overridable
-# mid-session via /model.
+# BOX STARTUP DEFAULTS (Arthur, 2026-07-11 — a fleet build requirement; the box must come up ready to
+# work at full capability with NO per-session toggling). Three launch flags, all session-scoped so they
+# survive rebuilds without depending on accumulated home state, and all overridable mid-session:
+#   --model default        the RECOMMENDED model, NOT a version pin. The `default` alias resolves to the
+#                          provider's recommended model and AUTO-FOLLOWS new releases (currently Opus 4.8,
+#                          Sonnet 5 on lower tiers) — every recommended tier is xhigh/ultracode-capable, so
+#                          this both un-pins the model AND avoids the 2.1.195 regression where NO --model
+#                          let the client default to a Sonnet tier with no ultracode. (Was `--model opus`,
+#                          a version pin Arthur explicitly does not want.) Overridable via /model.
+#   --permission-mode auto AUTO mode, not manual — the box starts autonomous. A launch flag (not home
+#                          state), so a FRESH box reliably starts in auto (a bare box came up "manual").
+#                          RECONCILIATION with the 2026-07-11 unshackle: that change set managed-settings
+#                          `defaultMode: default` as the NO-FLAG floor (so a non-wrapper invocation does
+#                          not silently inherit auto). This launch flag is the DELIBERATE per-box override
+#                          back to auto for the operator's own session — an explicit choice, not a silent
+#                          regression — and it does NOT re-add the removed gate-push hook/prompts.
+#                          Overridable via shift+tab.
+#   --effort ultracode     the canonical current ultracode flag (xhigh effort + dynamic workflows).
+#                          Replaces the old `--settings '{"ultracode":true}'` injection; ultracode is
+#                          session-only by design (it cannot be persisted in a settings file).
 #
 # Retry the transient post-rebuild OCI/PTY race: right after a box rebuild the freshly (re)started
 # container's /dev/pts can need a moment before an interactive `podman exec` can allocate a
@@ -80,7 +92,7 @@ fi
 attempt=0
 while :; do
     flock -s "$state/session.lock" \
-        distrobox enter claudebox -- bash -lc 'exec /usr/bin/claude --model opus --settings "{\"ultracode\":true}" "$@"' bash "$@"
+        distrobox enter claudebox -- bash -lc 'exec /usr/bin/claude --model default --permission-mode auto --effort ultracode "$@"' bash "$@"
     rc=$?
     { [ "$rc" -eq 125 ] || [ "$rc" -eq 126 ]; } && [ "$attempt" -lt 6 ] || break
     attempt=$((attempt + 1))
