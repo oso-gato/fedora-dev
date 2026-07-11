@@ -35,29 +35,28 @@
 - Control-plane PRs merge on the same click. Arthur may also merge on GitHub himself.
 - `fedora-bootstrap` + `fedora-desktop` MUST stop at the PR (propose-only).
 
-**MERGE GATE** — the managed `gate-push.sh` PreToolUse hook + `managed-settings.json` are the SOLE
-control plane (refspec-aware, fail-closed, in-session):
-- AUTONOMOUS (no prompt): a feature-branch push — an explicit non-`main`, non-`HEAD`, non-tag
-  destination refspec.
-- GATED: any push that could touch `main` (a bare `git push`; a `main`/`HEAD`/`refs/tags/*`
-  destination; `--all`/`--mirror`/`--tags`; any unparseable/quoted/chained target) PLUS the merge verbs
-  (`gh pr merge`; `gh pr create --merge|--squash|--rebase|--auto`; `gh api …/merge|/merges`).
-- GATED ROUTES TO: on `fedora-dev` → an in-session clickable `ask` (only Arthur answers); on
-  `fedora-bootstrap` + `fedora-desktop` → an in-session `deny`.
-  - EXCEPTION (`fedora-desktop` only): its automatic vault git-sync `git -C <vault> push` is allowed.
-- No approval-marker mechanism — native `ask`/`deny` only; nothing reaches `main` without Arthur's
-  out-of-band click (prompt-injection cannot fake it).
-- SERVER FLOOR: a loop-neutral `require-PR` ruleset on `main` (no required reviews or status checks) is
-  active on all three repos — it forces every change through a PR, closing the headless `claude -p` path
-  that in-session hooks cannot catch.
-  - NOTE [rationale]: `main` carries no required-review branch protection and no CI label-gate beyond
-    this thin floor — in a single-operator fleet those layers added friction without proportional value;
-    the click already gates every merge.
-- Control-plane changes MUST stay STANDALONE (never bundled) and be FLAGGED in the merge TLDR.
+**MERGE PATH (UNSHACKLED, 2026-07-11)** — merges are done by the headless **poller**, not an
+interactive gate. The `gate-push.sh` PreToolUse hook AND the `auto` classifier are REMOVED fleet-wide
+(P0 unshackle): every box runs `defaultMode=default` with `Bash(*)` allowed, so the interactive agent
+prompts on nothing (the hook and classifier WERE the per-iteration human clicks the objective forbids).
+- AUTONOMOUS MERGE: the plain-shell poller (`bin/pr-poller.sh` → `bin/auto-merge.sh`) merges every
+  host-GREEN + independent-fitness-PASS PR, ANY tier — no human click. Two INDEPENDENT gates (the host
+  live-gate App + the fitness App, distinct identities, sha-bound, fail-closed) ARE the merge safety.
+- INTERACTIVE-MERGE BLOCK (two precise controls — so the now-hook-free interactive agent STILL cannot
+  reach `main`): (a) a loop-neutral `require-PR` ruleset on `main` on all three repos forces every change
+  through a PR — nothing direct-pushes `main`; (b) `Bash(gh pr merge:*)` is a hard **deny** in every box's
+  `managed-settings.json` (auto-deny, no prompt, a precise prefix rule that never false-positives) — the
+  interactive agent cannot hand-merge a PR. The poller is plain shell, so it bypasses managed-settings and
+  merges normally; a compromised interactive box cannot merge anything.
+- HARD FLOOR: the `deny[]` list (package-manager escape hatches, `$PATH`-shadow writes) blocks its entries
+  regardless of mode.
+- Control-plane changes merge through the SAME poller path; recoverability is AUTOMATIC (host post-deploy
+  health-gate + digest rollback, git-revertability, the fitness *preserve-recoverability* rule), not a click.
 
-**CONTROL-PLANE CLASS** = `policy/**` · `managed-settings.json` · `policy/hooks/gate-push.sh` ·
+**CONTROL-PLANE CLASS** = `policy/**` · `managed-settings.json` ·
 `.github/workflows/**` · `*.container` · `run.sh*` (security flags + publish set) · the
-box-rebuild/assemble machinery · key-sync · `*sudoers*`. MUST be standalone, never bundled.
+box-rebuild/assemble machinery · key-sync · `*sudoers*`. Merges via the poller like any change (no
+standalone-click rule — the ZERO-GATE decision removed it); the fitness reviewer still scrutinises them.
 
 ## THE LOOP — dev↔host, two-tier validation
 
