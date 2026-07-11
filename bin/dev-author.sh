@@ -18,7 +18,9 @@
 #   4. Gate the author's own work IN-BOX before spending a host build: `bin/validate.sh` (build +
 #      assembly + lint, the nested-engine ceiling). RED in-box → surface BLOCKED, do not push noise.
 #   5. Hand off: push the branch, open the PR (draft at first push per R3, then mark ready), label it
-#      `live-validate`. The host live-gate + fitness + poller take it from there — zero human.
+#      `live-validate`, and confirm the ship with ONE best-effort comment on the backlog issue (R5
+#      audit loop — the ticket shows its own outcome, symmetric with the BLOCKED question below).
+#      The host live-gate + fitness + poller take it from there — zero human.
 #   6. BLOCKED (R13): if the model can't implement it (needs a decision / missing access / wrong
 #      approach) it ends with `AUTHOR_BLOCKED: <reason>`; the harness posts that as a dev-task QUESTION
 #      comment on the ISSUE (never an approval request) and exits non-zero. No-progress (no commit and
@@ -223,6 +225,11 @@ rm -f "$bodyfile"
 pr_num="${pr_url##*/}"
 gh pr ready "$pr_num" --repo "$SLUG" >/dev/null 2>&1 || log "WARN: could not mark #$pr_num ready"
 gh pr edit "$pr_num" --repo "$SLUG" --add-label "$AUTHOR_LABEL" >/dev/null 2>&1 || log "WARN: could not add $AUTHOR_LABEL to #$pr_num"
+
+# R5 audit loop — confirm the ship ON the backlog issue (symmetric with surface_blocked). Best-effort
+# BY DESIGN: the PR is already the source of truth, so a failed comment logs a WARN, never fails the run.
+ship_body="**dev-author → shipped:** authored and enrolled #$pr_num in the live-gate → fitness → poller pipeline. $pr_url"$'\n\n<sub>autonomous feature-author (R3). No merge taken — the two-gate pipeline decides.</sub>'
+gh issue comment "$ISSUE" --repo "$SLUG" --body "$ship_body" >/dev/null 2>&1 || log "WARN: could not post shipped comment on #$ISSUE"
 
 : > "$marker"   # idempotent replay guard — this issue is now authored
 log "AUTHORED $SLUG#$ISSUE → $pr_url (labelled $AUTHOR_LABEL; the pipeline takes it from here)"
