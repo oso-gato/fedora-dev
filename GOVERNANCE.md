@@ -3,9 +3,9 @@
 > **What this is.** The fixed reference the fitness gate grades every change against, and the standing
 > law for how work reaches (or does not reach) the maintainer. Written by the **product owner** — a
 > non-coding maintainer whose authority is *intent*, not code review. The developer and reviewer agents
-> do NOT edit this on their own authority; it changes only by the maintainer's recorded act (his own
-> edit/merge, or a PR he explicitly pre-authorized in an attributable comment from his account —
-> this amendment's authorization: §6(c)).
+> do NOT edit this; only the maintainer changes it — by his own edit/merge, or by his recorded act
+> (§6(c) records how the one 2026-07-11 amendment was authorized; whether comment-based
+> pre-authorization becomes a standing amendment procedure is HIS open question, not assumed here).
 >
 > **⚠️ AMENDED 2026-07-11 — ZERO-GATE ENACTED (see §6(c) for the maintainer's recorded decision).**
 > The Tier-A "maintainer's click" merge routing in §3–§5 below is **superseded**: every PR — control-plane
@@ -154,12 +154,15 @@ defects caught: two rebuild-bricks, an overclaimed safety statement, a false ver
   > not as a pre-merge click. Also confirming: fedora-desktop is in the unshackle scope.
 - **What it supersedes:** the Tier-A→click routing (§4 table row A, §5 Stage 2), the pre-click Stage-3
   ritual (§5), and §6(a)'s "no merge authority" clause. The interactive gate-push hook + auto-classifier
-  are retired fleet-wide (fedora-dev#137/#139); the poller IS the merge authority, under two independent
-  gates (host live-gate App + fitness App). Recoverability is automatic (host health-gate digest
-  rollback, git revert, fitness's standing preserve-recoverability rule), not a click.
-- **The chain of enactment:** #130 (ZERO-GATE poller, 2026-07-10) → #137 (hook retired; merged by the
-  maintainer himself) → the recorded comment above → #139 (fleet-core TIER ROUTING amendment, merged
-  bc5d868) → this GOVERNANCE amendment (authorized by the comment, verbatim).
+  are retired in fedora-dev (#137/#139) and fedora-bootstrap (#122, v1.2.59); the fedora-desktop port
+  (#114) is in flight, confirmed in scope by the comment above. The poller IS the merge authority, under
+  two independent gates (host live-gate App + fitness App). Recoverability is automatic (host
+  health-gate digest rollback, git revert, fitness's standing preserve-recoverability rule), not a click.
+- **The chain of enactment (recorded as it actually happened):** #130 (ZERO-GATE poller, 2026-07-10) →
+  #137 (hook retirement; merged 2026-07-11 08:35Z by the poller App under the standing #130 decision,
+  BEFORE the comment below existed — the maintainer's recorded confirmation is retroactive and covers it,
+  "re-confirming my #130 ZERO-GATE decision") → the recorded comment above → #139 (fleet-core TIER
+  ROUTING amendment, merged bc5d868) → this GOVERNANCE amendment (the one edit the comment pre-authorized).
 - **STATUS: ENACTED.** The stamped operative law (`fleet-core.md` TIER ROUTING) already carries it.
 
 **(a) Supervised poller.**
