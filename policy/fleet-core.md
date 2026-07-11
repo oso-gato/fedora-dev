@@ -42,12 +42,15 @@ prompts on nothing (the hook and classifier WERE the per-iteration human clicks 
 - AUTONOMOUS MERGE: the plain-shell poller (`bin/pr-poller.sh` → `bin/auto-merge.sh`) merges every
   host-GREEN + independent-fitness-PASS PR, ANY tier — no human click. Two INDEPENDENT gates (the host
   live-gate App + the fitness App, distinct identities, sha-bound, fail-closed) ARE the merge safety.
-- INTERACTIVE-MERGE BLOCK (two precise controls — so the now-hook-free interactive agent STILL cannot
-  reach `main`): (a) a loop-neutral `require-PR` ruleset on `main` on all three repos forces every change
-  through a PR — nothing direct-pushes `main`; (b) `Bash(gh pr merge:*)` is a hard **deny** in every box's
-  `managed-settings.json` (auto-deny, no prompt, a precise prefix rule that never false-positives) — the
-  interactive agent cannot hand-merge a PR. The poller is plain shell, so it bypasses managed-settings and
-  merges normally; a compromised interactive box cannot merge anything.
+- INTERACTIVE-MERGE BLOCK (two precise controls + one HONEST residual): (a) a loop-neutral `require-PR`
+  ruleset on `main` on all three repos — nothing direct-pushes `main`; (b) `Bash(gh pr merge:*)` is a
+  hard **deny** in every box's `managed-settings.json` (auto-deny, no prompt, a precise prefix rule that
+  never false-positives) — the DIRECT merge verb is blocked. RESIDUAL (known, accepted per the zero-gate
+  decision): a raw-API merge (`gh api`/GraphQL/curl) remains possible under `Bash(*)` — pattern-denying
+  those shapes would be prefix-fragile sieve-theater (ANTI-THEATER doctrine), and recovery from a bad
+  merge is AUTOMATIC (git revert + host health-gate digest rollback + the fitness
+  *preserve-recoverability* rule). The raw-API path is FORBIDDEN by law: the poller pipeline is the ONLY
+  sanctioned merge route. The poller is plain shell, so it bypasses managed-settings and merges normally.
 - HARD FLOOR: the `deny[]` list (package-manager escape hatches, `$PATH`-shadow writes) blocks its entries
   regardless of mode.
 - Control-plane changes merge through the SAME poller path; recoverability is AUTOMATIC (host post-deploy
