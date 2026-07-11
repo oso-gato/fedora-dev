@@ -42,12 +42,15 @@ prompts on nothing (the hook and classifier WERE the per-iteration human clicks 
 - AUTONOMOUS MERGE: the plain-shell poller (`bin/pr-poller.sh` → `bin/auto-merge.sh`) merges every
   host-GREEN + independent-fitness-PASS PR, ANY tier — no human click. Two INDEPENDENT gates (the host
   live-gate App + the fitness App, distinct identities, sha-bound, fail-closed) ARE the merge safety.
-- INTERACTIVE-MERGE BLOCK (two precise controls — so the now-hook-free interactive agent STILL cannot
-  reach `main`): (a) a loop-neutral `require-PR` ruleset on `main` on all three repos forces every change
-  through a PR — nothing direct-pushes `main`; (b) `Bash(gh pr merge:*)` is a hard **deny** in every box's
-  `managed-settings.json` (auto-deny, no prompt, a precise prefix rule that never false-positives) — the
-  interactive agent cannot hand-merge a PR. The poller is plain shell, so it bypasses managed-settings and
-  merges normally; a compromised interactive box cannot merge anything.
+- INTERACTIVE-MERGE BLOCK (two precise controls + one HONEST residual): (a) a loop-neutral `require-PR`
+  ruleset on `main` on all three repos — nothing direct-pushes `main`; (b) `Bash(gh pr merge:*)` is a
+  hard **deny** in every box's `managed-settings.json` (auto-deny, no prompt, a precise prefix rule that
+  never false-positives) — the DIRECT merge verb is blocked. RESIDUAL (known, accepted per the zero-gate
+  decision): a raw-API merge (`gh api`/GraphQL/curl) remains possible under `Bash(*)` — pattern-denying
+  those shapes would be prefix-fragile sieve-theater (ANTI-THEATER doctrine), and recovery from a bad
+  merge is AUTOMATIC (git revert + host health-gate digest rollback + the fitness
+  *preserve-recoverability* rule). The raw-API path is FORBIDDEN by law: the poller pipeline is the ONLY
+  sanctioned merge route. The poller is plain shell, so it bypasses managed-settings and merges normally.
 - HARD FLOOR: the `deny[]` list (package-manager escape hatches, `$PATH`-shadow writes) blocks its entries
   regardless of mode.
 - Control-plane changes merge through the SAME poller path; recoverability is AUTOMATIC (host post-deploy
@@ -163,14 +166,18 @@ NOT reasons to engage the human: status-confirmation, option-shopping, "which sh
    - NOTE [rationale]: author self-review is unreliable; during this apparatus's construction, defects
      that author-confidence had shipped to a branch were caught only by an independent pass.
 
-**TIER ROUTING — who merges a PASS** (authoritative boundary classifier = `bin/tier-classify.sh` (code,
-fail-closed); human expansion = `GOVERNANCE.md` §3):
-- Merge authority = `fedora-dev` ONLY (`fedora-bootstrap` + `fedora-desktop` are propose-only, gate → deny).
-- TIER A → Arthur's click, preceded by an independent ADVERSARIAL pass (Stage 3 — an agent tries to
-  *break* it; repeats until clean). Tier A = control-plane class + live-host-apply-without-auto-rollback
-  + hard-to-undo. Editing `GOVERNANCE.md` or the DOCTRINE is itself Tier A.
-- TIER B/C → `fedora-dev` auto-merges under the fitness gate, digest-reported, no human = reversible /
-  non-boundary / docs.
+**TIER ROUTING — who merges a PASS** (ZERO-GATE, Arthur's decision #130 2026-07-10, RE-CONFIRMED by
+his adjudication of the 2026-07-11 fitness escalation: control-plane parity ports included — "zero-click,
+fix the law". Authoritative classifier = `bin/tier-classify.sh`, now REPORTING-ONLY):
+- Merge authority = the `fedora-dev` poller ONLY (`fedora-bootstrap` + `fedora-desktop` are propose-only).
+- EVERY tier — control-plane class included — auto-merges on host-GREEN + independent-fitness-PASS via
+  the poller. There is NO Tier-A human click; tier labels the digest/report, it does not route.
+- Recoverability is AUTOMATIC, not human: host post-deploy health-gate + digest rollback, full
+  git-revertability, and fitness's standing *preserve-recoverability* rule (a change that removes
+  rollback or exfiltrates the merge/secret credential FAILS review).
+- A fitness ESCALATE still routes to Arthur — not as a merge click, but as the adjudication of a genuine
+  policy ambiguity (this is the one human-judgment path that survives, by design). Editing the DOCTRINE
+  or `GOVERNANCE.md` remains maintainer-adjudicated through exactly that path.
 
-RULE: only when 1–5 hold does a change go to the human (reason: approve-to-merge). The TLDR is the final
-step before the human.
+RULE: a change is presentable/mergeable only when 1–5 hold. The human is engaged by ESCALATE (a
+question), never by a routine approve-to-merge.

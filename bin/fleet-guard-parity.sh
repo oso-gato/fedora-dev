@@ -5,8 +5,8 @@
 # WHY THIS EXISTS: each box's claudebox spec is necessarily SELF-CONTAINED — fedora-dev bakes its spec
 # into the image AND clones it at runtime with an OFFLINE seeded fallback, so a git submodule / shared
 # clone would break that offline path. That forces the shared guard payload to be DUPLICATED per repo:
-#   * policy/managed-settings.json — the agent deny-list + the claude-code self-update `env` lockout +
-#     bypass/mode/allowManaged + the gate-push hook wiring;
+#   * policy/managed-settings.json — the agent deny-list (incl. the `gh pr merge` interactive-merge
+#     block) + the claude-code self-update `env` lockout + bypass/mode/allowManaged;
 #   * claudebox-init.sh — the claude-code self-update lockout (/etc/profile.d/20-claude-no-selfupdate.sh)
 #     + the native-build-shadow self-heal (fedora-dev PR #45);
 #   * distrobox.ini — the claude-code PROVENANCE (official `latest` channel, gpgcheck, signing key).
@@ -56,10 +56,10 @@ printf 'participating claudebox repos @ %s%s: %s\n' "$REF" "${SELF:+ (self=$SELF
 [ "${#parts[@]}" -ge 2 ] || { echo "fewer than 2 claudebox repos — nothing to compare"; exit 0; }
 canon="${parts[0]}"
 
-# CHECK 1 — policy/managed-settings.json byte-identical fleet-wide. The deny-list, the env lockout,
-# disableBypassPermissionsMode/defaultMode/allowManaged*, and the gate-push hook WIRING are fleet
-# INVARIANTS. (Per-box policy divergence lives in CLAUDE.md role docs + gate-push.sh's ask-vs-deny
-# terminal verb — NOT in managed-settings.json.)
+# CHECK 1 — policy/managed-settings.json byte-identical fleet-wide. The deny-list (incl. the
+# `gh pr merge` interactive-merge block), the env lockout, and
+# disableBypassPermissionsMode/defaultMode/allowManaged* are fleet INVARIANTS. (Per-box policy
+# divergence lives in CLAUDE.md role docs — NOT in managed-settings.json.)
 hr "CHECK 1: policy/managed-settings.json byte-parity (canonical: $canon)"
 csum="$(fetch "$canon" policy/managed-settings.json | sha256sum | cut -d' ' -f1)"
 for r in "${parts[@]}"; do
@@ -134,39 +134,24 @@ blk_lines="$(printf '%s\n' "$block" | wc -l | tr -d ' ')"
 [ "$blk_lines" -le 40 ] && ok "doctrine is lean ($blk_lines lines <= 40 — stays salient)" \
                         || bad "doctrine bloated to $blk_lines lines (>40) — brevity is the anti-dilution rule; tighten it"
 
-# CHECK 5 — gate-push.sh terminal-verb invariant for PR-only boxes.
-# fedora-dev's gate routes main-touching pushes to `ask` (Arthur's click); the PR-only boxes
-# (fedora-bootstrap, fedora-desktop) must route them to `deny` — they never merge, so `ask`
-# has nothing to approve and would produce confusing prompts Arthur can't safely action.
-# A PR that silently promotes a PR-only box's deny() to ask() passes managed-settings.json
-# parity (CHECK 1) and all other checks — this catch makes that promotion LOUD.
-hr "CHECK 5: gate-push.sh terminal verb — PR-only boxes must deny, not ask"
-pr_only_repos=()
+# CHECK 5 — the gate-push hook stays RETIRED fleet-wide (UNSHACKLE, 2026-07-11).
+# The interactive gate-push PreToolUse hook was removed as the per-iteration human click the
+# autonomy objective forbids (merge safety = the require-PR ruleset + the `gh pr merge` deny +
+# the poller's two independent gates). This check replaces the old terminal-verb assertion with
+# its inverse: NO fleet repo may still ship (or resurrect) policy/hooks/gate-push.sh. While a
+# repo has not yet merged its unshackle port, this stays RED — the drift alarm working as
+# intended, pointing at exactly which repo still carries the retired hook.
+# Failure posture: fetch() failing (network) is indistinguishable from "absent" — acceptable here
+# because participation (above) already proved this repo reachable this run, and the check guards
+# against RESURRECTION (a wrongly-ok transient pass self-heals on the next daily run).
+hr "CHECK 5: gate-push hook retired — no repo ships policy/hooks/gate-push.sh"
 for r in "${parts[@]}"; do
-  [ "$r" = "fedora-dev" ] && continue
-  pr_only_repos+=("$r")
+  if fetch "$r" policy/hooks/gate-push.sh >/dev/null; then
+    bad "$r still ships policy/hooks/gate-push.sh — the retired interactive gate must not return (or the repo's unshackle port has not merged yet)"
+  else
+    ok "$r ships no gate-push hook (unshackled)"
+  fi
 done
-if [ "${#pr_only_repos[@]}" -eq 0 ]; then
-  ok "no PR-only boxes in participating set — skip"
-else
-  for r in "${pr_only_repos[@]}"; do
-    gate="$(fetch "$r" policy/hooks/gate-push.sh)"
-    if [ -z "$gate" ]; then
-      bad "$r policy/hooks/gate-push.sh: fetch failed or empty"
-      continue
-    fi
-    has_deny=0; has_ask=0
-    printf '%s\n' "$gate" | grep -q 'permissionDecision.*deny' && has_deny=1
-    printf '%s\n' "$gate" | grep -q 'permissionDecision.*ask'  && has_ask=1
-    if [ "$has_deny" -eq 1 ] && [ "$has_ask" -eq 0 ]; then
-      ok "$r gate-push.sh: deny present, ask absent (correct for a PR-only box)"
-    elif [ "$has_deny" -eq 0 ]; then
-      bad "$r gate-push.sh: deny MISSING — a PR-only box must use deny() not ask()"
-    else
-      bad "$r gate-push.sh: ask present — a PR-only box must use deny(), not ask(); a PR may have silently promoted the terminal verb"
-    fi
-  done
-fi
 
 hr "VERDICT"
 if [ "$fail" = 0 ]; then

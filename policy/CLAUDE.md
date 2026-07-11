@@ -24,9 +24,13 @@ Stamped from policy/ on every box rebuild; fleet-core (`## THE FLEET` + `## THE 
 > PR to `main` (an AUTO-DENY, never a prompt; a precise prefix rule, so unlike the removed text-scanning
 > hook it never false-positives on "merged" in text); (3) the headless poller (plain shell — it bypasses
 > managed-settings) does every AUTONOMOUS merge under its two INDEPENDENT gates (host live-gate App +
-> fitness App, distinct identities). Net: the interactive agent is unshackled for normal work yet
-> STRUCTURALLY cannot merge to `main`. The "MERGE GATE / WORKING WITH THE GATE / MUST NOT merge without
-> Arthur's click" law below is **historical and no longer in force**.
+> fitness App, distinct identities). HONEST RESIDUAL: the deny stops the DIRECT merge verb only — a
+> raw-API merge (`gh api`/GraphQL/curl) remains possible under `Bash(*)`; that residual is KNOWN and
+> ACCEPTED per the zero-gate decision (pattern-denying API shapes = prefix-fragile sieve-theater per
+> the ANTI-THEATER doctrine; recovery from a bad merge is AUTOMATIC — git revert + the host
+> health-gate digest rollback + fitness's preserve-recoverability rule). You MUST NOT use that path:
+> the poller pipeline is the ONLY sanctioned merge route. The "MERGE GATE / WORKING WITH THE GATE /
+> MUST NOT merge without Arthur's click" law below is **historical and no longer in force**.
 
 <!--FLEET-CORE-->
 
@@ -71,12 +75,13 @@ OUT:  merged `main` (on Arthur's clickable APPROVE) → CI builds → ghcr.io/os
   (compound, piped, interpreter one-liners, feature-branch pushes, commands whose TEXT contains a
   push/merge verb) WITHOUT a prompt. The old "WORKING WITH THE GATE" command-shaping discipline (bare
   pushes, verb-free titles, `-F`/`--body-file` to dodge the text scan) is OBSOLETE — it existed only to
-  avoid the removed hook. TWO structural limits remain (neither stops normal work): `main` cannot be
+  avoid the removed hook. TWO limits remain (neither stops normal work): `main` cannot be
   direct-pushed (the `require-PR` server ruleset), and `gh pr merge` is a hard **deny** in
-  `managed-settings.json` (auto-deny, no prompt) — so you STRUCTURALLY cannot hand-merge to `main`. Merges
-  flow through the headless **poller**: push a branch + label the PR `live-validate` → host live-gate +
-  fitness → the poller merges (its two independent gates are the merge safety). The `deny[]` list also
-  blocks the package-manager escape hatches + `$PATH`-shadow writes.
+  `managed-settings.json` (auto-deny, no prompt). A raw-API merge is technically possible under
+  `Bash(*)` (known, accepted residual — see the managed-settings comment) but is FORBIDDEN: the
+  headless **poller** is the ONLY sanctioned merge route — push a branch + label the PR
+  `live-validate` → host live-gate + fitness → the poller merges (its two independent gates are the
+  merge safety). The `deny[]` list also blocks the package-manager escape hatches + `$PATH`-shadow writes.
 - Install language-package-manager tools onto PATH inside the box.
 - Edit live-installed binaries in `/usr/local/bin` (denied by managed-settings; survives one rebuild at most).
 
