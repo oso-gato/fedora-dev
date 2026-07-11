@@ -2,8 +2,8 @@
 # dev-author.test.sh — MOCK end-to-end dry-run of bin/dev-author.sh with ZERO GitHub / network / model.
 #
 # The author's load-bearing safety is its CONTROL FLOW: guard → isolate → bounded author → in-box gate
-# → hand off (push + draft PR + ready + label), with a BLOCKED path that surfaces a dev-task question and
-# opens NO PR. We exercise all of it by STUBBING gh, git, claude, fresh-tree.sh, and validate.sh on PATH
+# → hand off (push + draft PR + ready + label + ONE shipped-confirmation comment on the issue, R5 audit
+# loop), with a BLOCKED path that surfaces a dev-task question and opens NO PR. We exercise all of it by STUBBING gh, git, claude, fresh-tree.sh, and validate.sh on PATH
 # and asserting the exact sequence of calls each case makes — while NOTHING touches GitHub, and the
 # "author" is a scripted stub, so no real model runs. Runs on a plain runner (no podman, no gh, no net).
 #
@@ -96,11 +96,17 @@ run(){ # <desc> <env-assignments> <expect: PRCREATE|ISSUECOMMENT|NONE> <extra-gr
                   grep -q 'live-validate' "$GH_LOG" || { ok=0; echo "  FAIL $desc: not labelled live-validate"; }
                   grep -q '^GITPUSH'     "$GH_LOG" || { ok=0; echo "  FAIL $desc: no push"; }
                   grep -q '^VALIDATE'    "$GH_LOG" || { ok=0; echo "  FAIL $desc: in-box validate not run"; }
-                  grep -q '^ISSUECOMMENT' "$GH_LOG" && { ok=0; echo "  FAIL $desc: unexpected BLOCKED comment"; } ;;
+                  # R5 audit loop: EXACTLY ONE issue comment — the shipped confirmation carrying the PR URL.
+                  grep -q '^ISSUECOMMENT.*dev-author → shipped:.*pull/999' "$GH_LOG" \
+                                                          || { ok=0; echo "  FAIL $desc: no shipped confirmation (with PR URL) on the issue"; }
+                  [ "$(grep -c '^ISSUECOMMENT' "$GH_LOG")" -eq 1 ] \
+                                                          || { ok=0; echo "  FAIL $desc: expected exactly one issue comment (the shipped confirmation)"; } ;;
     ISSUECOMMENT) grep -q '^ISSUECOMMENT' "$GH_LOG" || { ok=0; echo "  FAIL $desc: no BLOCKED comment on issue"; }
                   grep -q '^PRCREATE'    "$GH_LOG" && { ok=0; echo "  FAIL $desc: opened a PR when it should have blocked"; }
                   # a not-DONE outcome must NEVER push a branch — the reviewer's headline assertion.
-                  grep -q '^GITPUSH'     "$GH_LOG" && { ok=0; echo "  FAIL $desc: pushed a branch on a not-DONE outcome"; } ;;
+                  grep -q '^GITPUSH'     "$GH_LOG" && { ok=0; echo "  FAIL $desc: pushed a branch on a not-DONE outcome"; }
+                  # the shipped confirmation belongs ONLY to a successful hand-off — never these paths.
+                  grep -q 'dev-author → shipped' "$GH_LOG" && { ok=0; echo "  FAIL $desc: shipped confirmation on a not-shipped outcome"; } ;;
     NONE)         grep -q '^PRCREATE'    "$GH_LOG" && { ok=0; echo "  FAIL $desc: opened a PR when it should have skipped"; } ;;
   esac
   [ -n "$extra" ] && { grep -q "$extra" "$GH_LOG" || { ok=0; echo "  FAIL $desc: missing [$extra]"; }; }
