@@ -18,10 +18,15 @@ Stamped from policy/ on every box rebuild; fleet-core (`## THE FLEET` + `## THE 
 > executes its own commands **without prompts** — the per-iteration human clicks the objective forbids
 > (the classifier asked on compound/piped/interpreter commands; the hook asked on any command text
 > containing a push/merge verb, incl. false positives like the word "merged" in an `echo`) are gone.
-> Merge-to-main safety rests **entirely** on the headless poller's two INDEPENDENT gates (host live-gate
-> + independent fitness App, distinct identities) — plain shell, no hook, no classifier, doing every
-> autonomous merge — plus the `deny[]` hard floor in `managed-settings.json`. The "MERGE GATE / WORKING
-> WITH THE GATE / MUST NOT merge without Arthur's click" law below is **historical and no longer in force**.
+> Merge-to-main safety is preserved by THREE precise controls (none of which stops normal work):
+> (1) the `require-PR` server ruleset on `main` — nothing direct-pushes `main`; (2) the
+> `Bash(gh pr merge:*)` **deny** in `managed-settings.json` — the interactive agent cannot hand-merge a
+> PR to `main` (an AUTO-DENY, never a prompt; a precise prefix rule, so unlike the removed text-scanning
+> hook it never false-positives on "merged" in text); (3) the headless poller (plain shell — it bypasses
+> managed-settings) does every AUTONOMOUS merge under its two INDEPENDENT gates (host live-gate App +
+> fitness App, distinct identities). Net: the interactive agent is unshackled for normal work yet
+> STRUCTURALLY cannot merge to `main`. The "MERGE GATE / WORKING WITH THE GATE / MUST NOT merge without
+> Arthur's click" law below is **historical and no longer in force**.
 
 <!--FLEET-CORE-->
 
@@ -63,13 +68,15 @@ OUT:  merged `main` (on Arthur's clickable APPROVE) → CI builds → ghcr.io/os
   - NOTE [incident]: 2026-06-28 a commit in the shared `~/.local/share/fedora-dev` landed on a parallel
     box's branch, leaked into its PR, and that PR merged to `main`.
 - UNSHACKLED (P0, 2026-07-11): there is NO gate-push hook and NO auto-classifier — you run any command
-  (compound, piped, interpreter one-liners, push/merge verbs) WITHOUT a prompt. The old "WORKING WITH THE
-  GATE" command-shaping discipline (bare pushes, verb-free titles, `-F`/`--body-file` to dodge the text
-  scan) is OBSOLETE — it existed only to avoid the removed hook. NORM (not a gate): merges still flow
-  through the headless **poller** (push a branch + label the PR `live-validate` → host live-gate + fitness
-  → the poller merges) — that is the sanctioned autonomous merge path and the two-independent-gates safety;
-  do not hand-`gh pr merge` routine work. `main` still cannot be direct-pushed (the `require-PR` server
-  ruleset forces a PR). The `deny[]` list in `managed-settings.json` is the surviving hard floor.
+  (compound, piped, interpreter one-liners, feature-branch pushes, commands whose TEXT contains a
+  push/merge verb) WITHOUT a prompt. The old "WORKING WITH THE GATE" command-shaping discipline (bare
+  pushes, verb-free titles, `-F`/`--body-file` to dodge the text scan) is OBSOLETE — it existed only to
+  avoid the removed hook. TWO structural limits remain (neither stops normal work): `main` cannot be
+  direct-pushed (the `require-PR` server ruleset), and `gh pr merge` is a hard **deny** in
+  `managed-settings.json` (auto-deny, no prompt) — so you STRUCTURALLY cannot hand-merge to `main`. Merges
+  flow through the headless **poller**: push a branch + label the PR `live-validate` → host live-gate +
+  fitness → the poller merges (its two independent gates are the merge safety). The `deny[]` list also
+  blocks the package-manager escape hatches + `$PATH`-shadow writes.
 - Install language-package-manager tools onto PATH inside the box.
 - Edit live-installed binaries in `/usr/local/bin` (denied by managed-settings; survives one rebuild at most).
 

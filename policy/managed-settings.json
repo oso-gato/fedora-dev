@@ -8,7 +8,7 @@
     "allowManagedPermissionRulesOnly": true,
     "allowManagedHooksOnly": true,
     "permissions": {
-        "comment_allow": "UNSHACKLED (P0, 2026-07-11): allow ALL Bash + the file/orchestration tools and run defaultMode=default so the interactive agent executes its own commands WITHOUT prompts. The interactive gate-push PreToolUse hook AND the auto-classifier are BOTH removed — they were the per-iteration human clicks the objective forbids (the classifier asked on compound/piped/interpreter commands; the hook asked on any command whose text contained a push/merge verb, including false positives like the word 'merged' in an echo). Merge-to-main safety now rests ENTIRELY on the headless poller's two INDEPENDENT gates (host live-gate + independent fitness App, distinct identities) — the poller is plain shell, no hook, no classifier, and does every autonomous merge. The deny[] below is the surviving hard floor (deny > allow): it blocks the package-manager escape hatches and $PATH-shadow writes regardless of mode. The sole surviving ask is `gh repo delete` (never on a loop path; a stall beats an unrecoverable repo delete).",
+        "comment_allow": "UNSHACKLED (P0, 2026-07-11): allow ALL Bash + the file/orchestration tools and run defaultMode=default so the interactive agent executes its own commands WITHOUT prompts. The interactive gate-push PreToolUse hook AND the auto-classifier are BOTH removed — they were the per-iteration human clicks the objective forbids (the classifier asked on compound/piped/interpreter commands; the hook TEXT-SCANNED for push/merge verbs and false-positived, e.g. the word 'merged' inside an echo). Merge-to-main safety is preserved by THREE PRECISE controls, none of which stops normal work: (1) the `require-PR` server ruleset on main — nothing direct-pushes main; (2) the `Bash(gh pr merge:*)` DENY below — the interactive agent cannot hand-merge a PR to main; it is an AUTO-DENY (never a prompt) and a precise prefix rule (never false-positives on 'merged' in text), unlike the removed text-scanning hook; (3) the headless poller (plain shell — it bypasses THESE managed settings) does every AUTONOMOUS merge under its two INDEPENDENT gates (host live-gate App + fitness App, distinct identities). Net: the interactive agent is unshackled for normal work yet STRUCTURALLY cannot merge to main. The deny[] also blocks the package-manager escape hatches + $PATH-shadow writes. The sole surviving ask is `gh repo delete`.",
         "allow": [
             "Bash(*)",
             "Edit",
@@ -23,6 +23,7 @@
             "Bash(gh repo delete:*)"
         ],
         "deny": [
+            "Bash(gh pr merge:*)",
             "Bash(dnf copr:*)",
             "Bash(distrobox-host-exec sudo dnf install:*)",
             "Bash(distrobox-host-exec sudo dnf -y install:*)",
