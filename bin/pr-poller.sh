@@ -184,6 +184,10 @@ fi
 # ===================================================================================================
 POLLER_REPO="${POLLER_REPO:-fedora-dev}"
 SLUG="oso-gato/$POLLER_REPO"
+# ORG-WIDE (P0 uniform loop): the poller sweeps EVERY apparatus repo, not just its own — so a
+# fedora-bootstrap apparatus PR auto-merges through the SAME harness as a fedora-dev one (Arthur's
+# "same harness for the host"). Space-separated; sweep() re-sets POLLER_REPO/SLUG per repo each tick.
+POLLER_REPOS="${POLLER_REPOS:-fedora-dev fedora-bootstrap}"
 # login MUST be the GraphQL form (no `[bot]` suffix) — that is what `gh pr view --json comments`
 # returns and what auto-merge.sh matches against. REST's `.user.login` adds `[bot]`; do NOT use it.
 LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
@@ -302,7 +306,10 @@ retire_superseded(){
   done
 }
 
-sweep(){
+# ORG-WIDE wrapper (P0 uniform loop): one tick sweeps EVERY apparatus repo through the SAME harness,
+# re-setting POLLER_REPO/SLUG per repo. sweep_repo() is the original single-repo body unchanged.
+sweep(){ local _r; for _r in $POLLER_REPOS; do POLLER_REPO="$_r"; SLUG="oso-gato/$_r"; sweep_repo; done; }
+sweep_repo(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"
   retire_superseded
   # BATCHED list: ONE call yields number+ref+sha as TSV — the old per-PR headRefName/headRefOid
