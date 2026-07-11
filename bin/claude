@@ -66,9 +66,12 @@ fi
 #                          a version pin Arthur explicitly does not want.) Overridable via /model.
 #   --permission-mode auto AUTO mode, not manual — the box starts autonomous. A launch flag (not home
 #                          state), so a FRESH box reliably starts in auto (a bare box came up "manual").
-#                          Compatible with the unshackle: auto mode does not re-add the removed gate-push
-#                          prompts; it just runs autonomously (auto-allow normal work, auto-deny dangerous
-#                          self-modification). Overridable via shift+tab.
+#                          RECONCILIATION with the 2026-07-11 unshackle: that change set managed-settings
+#                          `defaultMode: default` as the NO-FLAG floor (so a non-wrapper invocation does
+#                          not silently inherit auto). This launch flag is the DELIBERATE per-box override
+#                          back to auto for the operator's own session — an explicit choice, not a silent
+#                          regression — and it does NOT re-add the removed gate-push hook/prompts.
+#                          Overridable via shift+tab.
 #   --effort ultracode     the canonical current ultracode flag (xhigh effort + dynamic workflows).
 #                          Replaces the old `--settings '{"ultracode":true}'` injection; ultracode is
 #                          session-only by design (it cannot be persisted in a settings file).
