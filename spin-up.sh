@@ -84,11 +84,31 @@ GH_APP_SECRET="${GH_APP_SECRET:-}"
 echo "── GitHub App credential for THE DEV BOX '$BOX_HOSTNAME' (fedora-dev) ──────────────" >&2
 echo "   This is the box's PR-AUTHORING identity (the 'devbox' App — Contents+Workflows R/W)." >&2
 echo "   NOT the host's App: the host (live-gate verdicts) uses its own, DIFFERENT App." >&2
+# ALREADY-PROVISIONED GUARD — mirrors the host App's guard (fedora-bootstrap setup-user.sh): if a prior
+# run already stored the credential, REUSE it silently rather than re-prompting. Without this a setup.sh
+# RE-RUN re-asks for the DEV BOX PEM every time (its own guard has no already-provisioned check), and a
+# wrong answer FATALs the whole user layer (set -e) or, declined, strips a credential that is already in
+# place. Reuse needs BOTH the podman secret AND the persisted PUBLIC ids; setting GH_APP_ID here makes the
+# `-z GH_APP_ID` prompt below skip cleanly and the COLLECT_ONLY emit re-carries the ids to the Quadlet.
+GH_APP_DEV_ENV="${GH_APP_DEV_ENV:-$HOME/.config/gh-app-dev.env}"
+if [ -z "${GH_APP_ID:-}" ] && command -v podman >/dev/null 2>&1 \
+   && podman secret exists gh_app_key 2>/dev/null && [ -r "$GH_APP_DEV_ENV" ]; then
+  # shellcheck disable=SC1090
+  . "$GH_APP_DEV_ENV"                 # restores GH_APP_ID + GH_APP_INSTALLATION_ID (public integers only)
+  GH_APP_SECRET=gh_app_key
+  echo "  -> DEV BOX App credential already provisioned (podman secret 'gh_app_key' + $GH_APP_DEV_ENV); reusing — NOT re-pasting." >&2
+fi
 if [ -z "${GH_APP_ID:-}" ] && [ "$(ask "Provision the DEV BOX ('$BOX_HOSTNAME') App credential now (paste the key)? — DEFAULT y: the autonomous loop needs it; \"n\" = fall back to gh auth login (y/n)" y)" = y ]; then
   # The paste NEEDS a terminal — fail with the remedy, not a cryptic read error.
   { : <"$SPINUP_TTY"; } 2>/dev/null || { echo "spin-up: FATAL — App provisioning needs a terminal ($SPINUP_TTY unreadable). Run interactively, or supply GH_APP_ID/GH_APP_INSTALLATION_ID/GH_APP_SECRET via env (scripted path)." >&2; exit 1; }
   prompt_github_app gh_app_key || { echo "spin-up: GitHub App provisioning failed" >&2; exit 1; }
   GH_APP_SECRET=gh_app_key
+  # Persist the PUBLIC ids (0600) so a later setup.sh re-run reuses the secret without re-pasting (guard
+  # above). Only App ID + Installation ID (public integers) are written — never the PEM (that stays in
+  # podman's secret store). Best-effort: a write failure only means the next run re-prompts.
+  mkdir -p "$(dirname "$GH_APP_DEV_ENV")" 2>/dev/null || true
+  ( umask 077; printf 'GH_APP_ID=%s\nGH_APP_INSTALLATION_ID=%s\n' "${GH_APP_ID:-}" "${GH_APP_INSTALLATION_ID:-}" >"$GH_APP_DEV_ENV" ) 2>/dev/null \
+    || echo "spin-up: warning — could not persist ids to $GH_APP_DEV_ENV (a later re-run will re-prompt)" >&2
 fi
 
 # COLLECT-ONLY: a host orchestrator (day0.sh) drives this wizard to gather fedora-dev's OWN
