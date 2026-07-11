@@ -22,11 +22,14 @@ cat > "$BIN/gh" <<'EOF'
 sub="${1:-} ${2:-}"
 case "$sub" in
   "issue view")
-    # honor --json state / -q .title / -q .body; default returns the JSON blob
     case "$*" in
-      *"-q .title"*) printf '%s' "${FAKE_TITLE:-Add a thing}";;
-      *"-q .body"*)  printf '%s' "${FAKE_BODY:-Do the thing.}";;
-      *)             printf '{"state":"%s","title":"%s","body":"%s","labels":[]}' "${FAKE_STATE:-OPEN}" "${FAKE_TITLE:-Add a thing}" "b";;
+      *"--json body"*)
+        printf '%s' "${FAKE_BODY:-Do the thing.}";;
+      *"--json state,labels,title"*)
+        # emit the three comma-operator lines dev-author reads: state, backlog(0/1), title
+        bk=0; case "${FAKE_LABELS:-backlog}" in *backlog*) bk=1;; esac
+        printf '%s\n%s\n%s\n' "${FAKE_STATE:-OPEN}" "$bk" "${FAKE_TITLE:-Add a thing}";;
+      *) printf '{}';;
     esac ;;
   "pr list")   printf '%s' "${FAKE_PRLIST:-}";;                 # empty = no existing PR
   "pr create") printf 'PRCREATE %s\n' "$*" >> "$GH_LOG"; printf 'https://github.com/oso-gato/%s/pull/999\n' "${FAKE_REPO:-fedora-dev}";;
@@ -86,7 +89,7 @@ run(){ # <desc> <env-assignments> <expect: PRCREATE|ISSUECOMMENT|NONE> <extra-gr
   env $envs PATH="$BIN:$PATH" AUTHOR_CLAUDE="claude -p" \
       FRESH_TREE="$BIN/fresh-tree.sh" VALIDATE="$BIN/validate.sh" \
       bash "$AUTHOR" fedora-dev 42 >/dev/null 2>&1 || true
-  local ok=1 log; log="$(tr '\n' '|' < "$GH_LOG")"
+  local ok=1
   case "$expect" in
     PRCREATE)     grep -q '^PRCREATE'    "$GH_LOG" || { ok=0; echo "  FAIL $desc: no PR created"; }
                   grep -q '^PRREADY'     "$GH_LOG" || { ok=0; echo "  FAIL $desc: PR not marked ready"; }
@@ -95,7 +98,9 @@ run(){ # <desc> <env-assignments> <expect: PRCREATE|ISSUECOMMENT|NONE> <extra-gr
                   grep -q '^VALIDATE'    "$GH_LOG" || { ok=0; echo "  FAIL $desc: in-box validate not run"; }
                   grep -q '^ISSUECOMMENT' "$GH_LOG" && { ok=0; echo "  FAIL $desc: unexpected BLOCKED comment"; } ;;
     ISSUECOMMENT) grep -q '^ISSUECOMMENT' "$GH_LOG" || { ok=0; echo "  FAIL $desc: no BLOCKED comment on issue"; }
-                  grep -q '^PRCREATE'    "$GH_LOG" && { ok=0; echo "  FAIL $desc: opened a PR when it should have blocked"; } ;;
+                  grep -q '^PRCREATE'    "$GH_LOG" && { ok=0; echo "  FAIL $desc: opened a PR when it should have blocked"; }
+                  # a not-DONE outcome must NEVER push a branch — the reviewer's headline assertion.
+                  grep -q '^GITPUSH'     "$GH_LOG" && { ok=0; echo "  FAIL $desc: pushed a branch on a not-DONE outcome"; } ;;
     NONE)         grep -q '^PRCREATE'    "$GH_LOG" && { ok=0; echo "  FAIL $desc: opened a PR when it should have skipped"; } ;;
   esac
   [ -n "$extra" ] && { grep -q "$extra" "$GH_LOG" || { ok=0; echo "  FAIL $desc: missing [$extra]"; }; }
@@ -113,9 +118,10 @@ run "no-commit is surfaced not shipped" "FAKE_AUTHOR=noop" ISSUECOMMENT
 
 echo "== in-box RED: author commits but validate.sh fails → surfaced, NO PR, NO push =="
 run "in-box RED blocks the push" "FAKE_AUTHOR=done FAKE_VALIDATE=RED" ISSUECOMMENT
-# and prove it did NOT push in that case:
 echo "== guard: a closed issue is never authored =="
 run "closed issue → skip" "FAKE_STATE=CLOSED FAKE_AUTHOR=done" NONE
+echo "== guard: a non-backlog-labelled issue is never authored =="
+run "non-backlog issue → skip" "FAKE_LABELS=bug FAKE_AUTHOR=done" NONE
 echo "== guard: an issue with an existing open PR is never re-authored =="
 run "existing PR → skip" "FAKE_PRLIST=17 FAKE_AUTHOR=done" NONE
 

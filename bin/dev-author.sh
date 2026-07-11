@@ -71,13 +71,16 @@ extract_sentinel(){
     | sed -E 's/^AUTHOR_(DONE|BLOCKED): */\1 /'
 }
 
-# should_author <issue-state> <has-open-pr:0|1> <marker-exists:0|1> → prints ACT | SKIP:<why>.
-# Fail-closed: only a genuinely-open, not-yet-authored, no-existing-PR issue is actioned.
+# should_author <issue-state> <has-open-pr:0|1> <marker-exists:0|1> <has-backlog-label:0|1>
+#   → prints ACT | SKIP:<why>. Fail-closed: only a genuinely-open, BACKLOG-labelled, not-yet-authored,
+#   no-existing-PR issue is actioned. The backlog-label gate is what makes the author pick up ONLY the
+#   planner's actionable feature tickets (R2) — never an arbitrary open issue.
 should_author(){
-  local st="$1" haspr="$2" marked="$3"
-  [ "$st" = OPEN ]   || { printf 'SKIP:issue-not-open(%s)' "$st"; return; }
-  [ "$marked" = 0 ]  || { printf 'SKIP:already-authored'; return; }
-  [ "$haspr" = 0 ]   || { printf 'SKIP:open-pr-exists'; return; }
+  local st="$1" haspr="$2" marked="$3" backlog="$4"
+  [ "$st" = OPEN ]    || { printf 'SKIP:issue-not-open(%s)' "$st"; return; }
+  [ "$backlog" = 1 ]  || { printf 'SKIP:not-backlog-labelled'; return; }
+  [ "$marked" = 0 ]   || { printf 'SKIP:already-authored'; return; }
+  [ "$haspr" = 0 ]    || { printf 'SKIP:open-pr-exists'; return; }
   printf 'ACT'
 }
 
@@ -98,11 +101,12 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "mid-line quote is inert"   "$(extract_sentinel 'the rule says end with AUTHOR_DONE: <x>')" ""
   ck "indented quote is inert"   "$(extract_sentinel $'  AUTHOR_DONE: indented')" ""
   ck "no token → empty"          "$(extract_sentinel 'just prose, no verdict')" ""
-  echo "== should_author (fail-closed gating) =="
-  ck "open+nopr+unmarked → ACT"  "$(should_author OPEN 0 0)" "ACT"
-  ck "closed issue → SKIP"       "$(should_author CLOSED 0 0)" "SKIP:issue-not-open(CLOSED)"
-  ck "already authored → SKIP"   "$(should_author OPEN 0 1)" "SKIP:already-authored"
-  ck "existing PR → SKIP"        "$(should_author OPEN 1 0)" "SKIP:open-pr-exists"
+  echo "== should_author (fail-closed gating; backlog-labelled required) =="
+  ck "open+backlog+nopr+unmarked → ACT" "$(should_author OPEN 0 0 1)" "ACT"
+  ck "closed issue → SKIP"        "$(should_author CLOSED 0 0 1)" "SKIP:issue-not-open(CLOSED)"
+  ck "not backlog-labelled → SKIP" "$(should_author OPEN 0 0 0)" "SKIP:not-backlog-labelled"
+  ck "already authored → SKIP"    "$(should_author OPEN 0 1 1)" "SKIP:already-authored"
+  ck "existing PR → SKIP"         "$(should_author OPEN 1 0 1)" "SKIP:open-pr-exists"
   echo; echo "dev-author selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
 fi
@@ -121,15 +125,19 @@ surface_blocked(){ # <reason>
 }
 
 # 1) GUARD — read issue state + whether a PR already references it; decide fail-closed.
-meta="$(gh issue view "$ISSUE" --repo "$SLUG" --json state,title,body,labels 2>/dev/null)" \
+# ONE structured read of state + backlog-label + title, each on its OWN line (jq comma operator; a
+# GitHub issue title carries no newline, so line-framing is safe), plus one read of the multi-line
+# body — parsed by gh's own jq, never by grep. The backlog-label gate resolves from BACKLOG_LABEL
+# (no dead knob) and is fail-closed.
+meta="$(gh issue view "$ISSUE" --repo "$SLUG" --json state,labels,title \
+  -q '.state, (if any(.labels[].name; . == "'"$BACKLOG_LABEL"'") then "1" else "0" end), .title' 2>/dev/null)" \
   || { log "cannot read $SLUG#$ISSUE (fail-closed) — aborting"; exit 2; }
-state="$(printf '%s' "$meta" | { grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4; })"
-title="$(gh issue view "$ISSUE" --repo "$SLUG" --json title -q .title 2>/dev/null)"
+{ read -r state; read -r hasbacklog; read -r title; } <<<"$meta"
 body="$(gh issue view "$ISSUE" --repo "$SLUG" --json body -q .body 2>/dev/null)"
 haspr=0
 if gh pr list --repo "$SLUG" --state open --search "$ISSUE in:body" --json number -q '.[].number' 2>/dev/null | grep -q .; then haspr=1; fi
 marked=0; [ -f "$marker" ] && marked=1
-decision="$(should_author "${state:-UNKNOWN}" "$haspr" "$marked")"
+decision="$(should_author "${state:-UNKNOWN}" "$haspr" "$marked" "${hasbacklog:-0}")"
 case "$decision" in
   ACT) : ;;
   *) log "not authoring $SLUG#$ISSUE — $decision"; exit 0 ;;
