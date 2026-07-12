@@ -166,8 +166,10 @@ if [ "${1:-}" = "--selftest" ]; then
   fc "GREEN+PASS → never a FIX"    GREEN PASS     UNKNOWN
   fc "GREEN+NONE → never a FIX"    GREEN NONE     UNKNOWN
   # every plan()=FIX route must map to a KNOWN cause — the guard against a future route silently
-  # inheriting the wrong prompt (the exact defect this fixes).
-  for h in RED GREEN; do for f in NONE PASS RETURN ESCALATE WAT; do
+  # inheriting the wrong prompt (the exact defect this fixes). The host axis spans the UNKNOWN/absent
+  # tokens too (NONE = no verdict yet, WAT = an unrecognised one), so the claim the loop prints is the
+  # claim it actually tests: no host token whatsoever can reach the fixer without a truthful cause.
+  for h in RED GREEN NONE WAT ""; do for f in NONE PASS RETURN ESCALATE WAT ""; do
     if [ "$(plan "$h" B "$f" 1)" = FIX ] && [ "$(fix_cause "$h" "$f")" = UNKNOWN ]; then
       echo "FAIL: plan($h,$f)=FIX but fix_cause=UNKNOWN — the fixer would get no truthful reason"; fail=1
     fi
@@ -436,19 +438,31 @@ sweep_repo(){
       NOOP) : ;;
       FIX)
         # R6 — FINDINGS ARE GENERATIVE. plan() routes FIX from TWO causes; derive the reason from the one
-        # that ACTUALLY fired. (Before: the reason was always scraped from a host 'VERDICT RED' comment,
-        # so a fitness RETURN — where the host is GREEN — found nothing and fell back to a canned
-        # "host live-gate RED", sending the fixer after a failure that never happened.)
+        # that ACTUALLY fired, and in BOTH cases from that gate's OWN COMMENT BODY.
+        #
+        # TRUST BOUNDARY (G2), and it holds for both arms: the VERDICT is read from LINE 1 ONLY (the
+        # machine-owned header, sha-bound — that is what routed us here and what $comments holds). The
+        # fetches below pull the gate's FULL comment body purely as PROMPT material for the fixer, bound
+        # to THIS head's sha + that gate's own login, so prose can never flip a gate — it can only say
+        # what to fix, and a stale verdict's text can never drive a fresh head.
+        #
+        # NB the reason CANNOT come from $comments: that stream is line-1-only (see the sha-binding
+        # fetch above), so grepping it yields the verdict HEADER and never the failure detail. That was
+        # the whole defect — a fitness RETURN found no host 'VERDICT RED' line at all and fell back to a
+        # canned "host live-gate RED" (sending the fixer after a build failure that never happened),
+        # while a host RED handed the fixer its own verdict token and called it "the findings".
         local cause reason; cause="$(fix_cause "$host" "$fit")"
         case "$cause" in
           HOST)
-            reason="$(printf '%s' "$comments" | grep -A3 'VERDICT RED' | tail -3)"
+            # `contains`, NOT `startswith`: the host header is markdown-bold (`**Host live-gate …**`),
+            # so a startswith("Host live-gate") match silently returns EMPTY. Verified against the live
+            # comment. The candidate log's failure detail sits at the END of the body → tail, not head.
+            reason="$(gh pr view "$pr" --repo "$SLUG" --json comments \
+                       -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | .body
+                           | select(split(\"\n\")[0] | contains(\"@ $sha\") and contains(\"VERDICT RED\"))" \
+                       2>/dev/null | tail -c 6000)"
             reason="${reason:-the host live-gate reported RED; see the host verdict comment on the PR}" ;;
           FITNESS)
-            # TRUST BOUNDARY (G2): the VERDICT is read from LINE 1 ONLY (above, sha-bound) and that is
-            # what routed us here. This fetches the reviewer's FULL comment body purely as PROMPT
-            # material for the fixer — prose can never flip a gate, it only says what to fix. Bound to
-            # this head's sha + the reviewer's login so a stale RETURN's text can't drive a fresh head.
             reason="$(gh pr view "$pr" --repo "$SLUG" --json comments \
                        -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | .body
                            | select(startswith(\"Fitness review: VERDICT RETURN\")) | select(contains(\"head $sha\"))" \
