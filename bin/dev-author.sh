@@ -175,7 +175,12 @@ RULES (hard):
 AUTHOR_EOF
 
 log "spawning bounded author (timeout ${AUTHOR_TIMEOUT}s)"
-out="$(cd "$WT" && timeout "$AUTHOR_TIMEOUT" $AUTHOR_CLAUDE "$prompt" 2>&1)"; rc=$?
+# STDIN CLOSED (`</dev/null`) — load-bearing, not hygiene: `claude -p` DRAINS whatever stdin it inherits,
+# to EOF. dev-author is driven per-issue by dev-loop, so an inherited stdin means this run (a) SWALLOWS
+# the rest of the caller's backlog — the caller's next `read` hits EOF and its pass ends after one issue —
+# and (b) feeds that list into the model's context as unasked-for input. The prompt is an ARGUMENT; the
+# run needs no stdin at all. (dev-loop also feeds its own list on FD 3: both ends of the hole are shut.)
+out="$(cd "$WT" && timeout "$AUTHOR_TIMEOUT" $AUTHOR_CLAUDE "$prompt" </dev/null 2>&1)"; rc=$?
 [ "$rc" = 124 ] && log "author run hit the ${AUTHOR_TIMEOUT}s timeout"
 sentinel="$(extract_sentinel "$out")"
 head_sha="$(git -C "$WT" rev-parse HEAD 2>/dev/null)"
