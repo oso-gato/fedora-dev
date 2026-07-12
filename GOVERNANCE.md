@@ -144,6 +144,38 @@ defects caught: two rebuild-bricks, an overclaimed safety statement, a false ver
 
 ## 6. Resolved decisions (each states DECISION vs current STATUS explicitly)
 
+**(d) MVP-FIRST SEVERITY — the maintainer's recorded enactment (2026-07-12).**
+- **DECISION (the maintainer's own words, posted from his account `oso-gato` on fedora-dev#158 —
+  https://github.com/oso-gato/fedora-dev/pull/158#issuecomment-4951654555):**
+  > CONFIRMED — MVP-first is my standing instruction. Get it to work first; where fitness
+  > finds something that could be better or improved but is not blocking, we continue to
+  > build and it is recorded as a note. Later, when we ship a finished function or feature,
+  > we revisit and close those loops. Build the minimum viable product and prove the feature
+  > first.
+  >
+  > I authorize this PR to (1) land the BLOCKING/NON-BLOCKING severity split in the fitness
+  > rubric and (2) amend policy/fleet-core.md so Q1/Q3 read as NOTE-generating rather than
+  > auto-RETURN, with a GOVERNANCE.md §6(d) ledger entry recording this decision.
+- **What it changes:** the fitness gate's Q1/Q2/Q3 are still all ASKED, but a finding BLOCKS (RETURN)
+  only if it makes the change **(a) INCORRECT**, **(b) UNSAFE**, or **(c) UNTRUE**; every other finding
+  is a **NOTE recorded on a PASS** (`## NOTES (non-blocking — follow-ups)`) and revisited after ship.
+  Supersedes §5's reading of Q1-scope-creep / Q3-mandate-violation as auto-RETURN; the operative text is
+  `policy/fleet-core.md` §"INDEPENDENT FITNESS REVIEW" (amended in the same PR as this entry).
+- **Why (recorded so the rationale survives):** an adversarial reviewer can always find something, so a
+  rubric where any shortfall RETURNs has no convergence criterion — and because each round yields a new
+  failure signature on a new head, the R13 no-progress stop can never fire. Observed 2026-07-12: SEVEN
+  review+fix rounds on one PR (#144), each a full model review AND a full model fix. An endless RETURN
+  loop over non-blocking polish burns the maintainer's budget, is itself a doctrine failure
+  (rabbit-hole), and makes the R14 unattended proof unpassable. The gate's teeth are unchanged where
+  they earned their place: every serious catch to date (the `approved`-label maintainer bypass; the
+  fail-open `cd && set +o pipefail;` shared-clone slip; doc rows asserting behaviour the code lacks)
+  still RETURNs under (a)/(b)/(c).
+- **The chain of enactment:** the rubric change first shipped WITHOUT a law amendment (#157) → the
+  fitness gate itself **ESCALATEd** it — correctly, citing the (c)-UNTRUE gap (the stamped law would
+  assert gate behaviour the gate no longer had) and the missing maintainer record — → the maintainer's
+  recorded comment above → #158 (rubric + fleet-core amendment + this entry, one motion).
+- **STATUS: ENACTED** on #158's merge; the stamped law re-carries it at the next box rebuild.
+
 **(c) ZERO-GATE — the maintainer's recorded enactment (2026-07-11).**
 - **DECISION (the maintainer's own words, posted from his account `oso-gato` on fedora-dev#139 —
   https://github.com/oso-gato/fedora-dev/pull/139#issuecomment-4945056383):**
