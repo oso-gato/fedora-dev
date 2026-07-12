@@ -5,11 +5,12 @@
 # timer. This closes the DEV-side gap — a supervised, PLAIN-SHELL (NO Claude in the loop) watcher on
 # fedora-dev that reacts to each new host verdict:
 #
-#   RED   → spawn a BOUNDED headless `claude -p` that iterates and pushes a fix to the FEATURE branch
-#           (the new head SHA re-triggers the host gate). The dev pushes fixes — NEVER the host, NEVER
-#           main; the fixer holds NO merge step. NO FIXED ITERATION CAP: it loops until GREEN or until
-#           it stops making progress (same failure signature twice / the fixer reports BLOCKED), which
-#           is SURFACED as a decision — never a quiet quit (doctrine mandate 6).
+#   RED   → spawn a BOUNDED headless `claude -p` fixer in an ISOLATED WORKTREE checked out on the PR's
+#           own gated head; the model COMMITS, the HARNESS pushes the FEATURE branch and VERIFIES the
+#           landing at ORIGIN (the new head SHA re-triggers the host gate). The dev pushes fixes —
+#           NEVER the host, NEVER main; the fixer holds NO merge step. NO FIXED ITERATION CAP: it loops
+#           until GREEN or until it stops making progress (same failure signature twice / the fixer
+#           reports BLOCKED), which is SURFACED as a decision — never a quiet quit (doctrine mandate 6).
 #   GREEN → run the independent fitness harness (bin/fitness-review.sh); then the merge decision:
 #           Tier A → present to Arthur (never auto); Tier B/C + fitness PASS → bin/auto-merge.sh.
 #
@@ -67,6 +68,8 @@
 #   POLLER_FIXER      headless fixer command (default: claude -p). Overridable for testing.
 #   FIXER_TIMEOUT     max seconds for ONE fixer run (default 1800). Bounds a single iteration, not the
 #                     count of iterations.
+#   FRESH_TREE        the isolator (default: bin/fresh-tree.sh). Every fix runs in a throwaway worktree
+#                     off the PR's own head — NEVER the shared clone (#152). Overridable for testing.
 #   RETIRE_LOOKBACK   how many of the most recently UPDATED merged PRs each sweep scans for
 #                     `Supersedes #N` declarations (default 15; sorted by update recency so a
 #                     long-parked PR that merges late still enters the window; each merged PR is
@@ -124,6 +127,24 @@ plan(){
   esac
 }
 
+# fix_outcome <blocked:0|1> <gated-sha> <worktree-head> <push-rc> <origin-head>
+#   -> BLOCKED | NO_COMMIT | PUSH_FAILED | NOT_LANDED | LANDED
+# The fixer's TRUTHFUL outcome — this retires the old `new head (if pushed) will re-gate` shrug, which
+# never checked anything: a fixer that pushed NOTHING was indistinguishable from one that succeeded, so
+# the next sweep's no-progress stop parked the PR on a FALSE 'blocked' (and, on 2026-07-12, cost a human
+# an hour concluding the fixer had landed nothing when it had landed correctly twice).
+# A push rc of 0 is NOT proof of landing (a no-op push, a swallowed rejection, a hook that ate it) — a
+# local commit that never reached origin is not progress. So LANDED requires ORIGIN's ref to actually
+# hold the commit we made: origin-head == worktree-head, and the worktree-head moved past the gated sha.
+fix_outcome(){
+  local blocked="$1" base="$2" head="$3" prc="$4" remote="$5"
+  [ "$blocked" = 1 ] && { printf 'BLOCKED'; return; }                     # model declared it cannot fix
+  [ -n "$head" ] && [ "$head" != "$base" ] || { printf 'NO_COMMIT'; return; }  # nothing to push
+  [ "$prc" = 0 ] || { printf 'PUSH_FAILED'; return; }                     # push itself errored
+  [ "$remote" = "$head" ] || { printf 'NOT_LANDED'; return; }             # rc 0 but origin never moved
+  printf 'LANDED'
+}
+
 # fix_cause <host> <fitness> -> HOST | FITNESS | UNKNOWN
 # WHICH gate sent this PR to the fixer. plan() returns FIX from TWO different routes — host RED and
 # fitness RETURN — and the fixer is a bounded `claude -p` that can only fix what it is TOLD. Feeding a
@@ -175,6 +196,16 @@ if [ "${1:-}" = "--selftest" ]; then
     fi
   done; done
   echo "ok: every FIX route has a known cause"
+  # #152 — the fixer's outcome is DETERMINED, never assumed. The landing is verified against ORIGIN, so
+  # rc-0-but-nothing-landed ("push lied") and origin-unreadable are FAILURES, not silent successes.
+  fo(){ local got; got="$(fix_outcome "$2" "$3" "$4" "$5" "$6")"; [ "$got" = "$7" ] && echo "ok: $1" || { echo "FAIL: $1 — fix_outcome($2,$3,$4,$5,$6)=$got want $7"; fail=1; }; }
+  fo "blocked beats everything"  1 aaa bbb 0 bbb  BLOCKED
+  fo "no commit (head unmoved)"  0 aaa aaa 0 aaa  NO_COMMIT
+  fo "no commit (no head)"       0 aaa ""  0 ""   NO_COMMIT
+  fo "push errored"              0 aaa bbb 1 aaa  PUSH_FAILED
+  fo "push rc0 but origin stale" 0 aaa bbb 0 aaa  NOT_LANDED
+  fo "origin unreadable"         0 aaa bbb 0 ""   NOT_LANDED
+  fo "landed (origin holds it)"  0 aaa bbb 0 bbb  LANDED
   vg(){ local got; got="$(printf '%s' "$2" | host_verdict)"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
   vg "host green"  'Host live-gate (Gate B): VERDICT GREEN'                                 GREEN
   vg "host latest" $'…VERDICT RED\nHost live-gate (Gate B): VERDICT GREEN'                   GREEN
@@ -240,6 +271,8 @@ POLL_INTERVAL="${POLL_INTERVAL:-10}"
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
 FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
+# the isolator the fixer runs in (#152). Overridable so poller-fixer.test.sh can drive the REAL sweep.
+FRESH_TREE="${FRESH_TREE:-$HERE/fresh-tree.sh}"
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
@@ -257,9 +290,44 @@ surface(){ # <pr> <sha> <kind> <message>
   gh pr comment "$pr" --repo "$SLUG" --body "**Poller → Arthur [$kind]:** $msg"$'\n\n<sub>dev-side poller (Step 5); no merge taken — needs your decision.</sub>' >/dev/null 2>&1 && : > "$m"
 }
 
+# Resolve the PERSISTENT clone a throwaway worktree bolts off. `~/repos/<repo>` is the fleet convention
+# (what fresh-tree.sh + dev-author.sh use); `~/.local/share/<repo>` is fedora-dev's LIVE spec clone, kept
+# as a fallback so a box carrying only that clone still fixes. FAIL-CLOSED (rc 1) when neither exists —
+# never a cwd guess. NB the pre-#152 code hard-coded `cd $HOME/.local/share/$POLLER_REPO`, which exists
+# ONLY for fedora-dev: on the other two swept repos the cd failed, the `&&` short-circuited, the fixer
+# NEVER RAN — and the poller still logged its cheerful "new head (if pushed)".
+clone_for(){ # <repo> → clone path on stdout, or rc 1
+  local c
+  for c in "$HOME/repos/$1" "$HOME/.local/share/$1"; do
+    [ -d "$c/.git" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+
+# Reap a throwaway fixer worktree — Principle 10: the tree is DISPOSABLE and EVERY path reaps it.
+# A kill -9 can still leak one; fresh-tree.sh force-removes a stale same-named worktree before
+# recreating it (its path is deterministic per repo+branch), so the next fix on that branch self-heals.
+reap_tree(){ # <clone> <worktree>
+  [ -n "${2:-}" ] || return 0
+  git -C "$1" worktree remove --force "$2" >/dev/null 2>&1 || rm -rf "$2"
+  git -C "$1" worktree prune >/dev/null 2>&1 || true
+}
+
 # Spawn ONE bounded fixer iteration on a RED (or fitness-RETURN) PR. Feature-branch only, no merge.
 # <cause> is HOST|FITNESS (from fix_cause) and <reason> is that gate's OWN text — the fixer is told the
 # truth about which gate failed and is given the findings it must actually address (R6).
+#
+# #152 — ISOLATION IS GUARANTEED, NOT HOPED FOR, AND THE HARNESS OWNS GIT. The model gets a FRESH
+# WORKTREE checked out on the PR's own gated head; it COMMITS and does nothing else. The SHELL pushes
+# (scoped explicitly to the feature ref) and VERIFIES the landing against ORIGIN. Previously the model
+# was handed the SHARED LIVE CLONE (checked out on main — the very tree the poller executes from) and
+# was told to push: `policy/CLAUDE.md` forbids exactly that ("MUST NOT run PR git in a working tree
+# another box or process may be mutating concurrently… use a dedicated git worktree/clone" — the
+# 2026-06-28 incident, where a commit in the shared clone landed on a parallel box's branch and merged
+# to main). Two live fixers happened to make their own scratch worktrees, but that was the MODEL'S
+# discretion; a run that instead did `git checkout -b` in the shared clone would move the live clone's
+# HEAD off main underneath the running poller. Now the harness guarantees it — mirroring dev-author.sh,
+# the proven pattern (isolate via fresh-tree.sh → model commits, never pushes → harness owns git).
 run_fixer(){ # <pr> <headref> <sha> <cause:HOST|FITNESS> <reason>
   local pr="$1" ref="$2" sha="$3" cause="$4" reason="$5"
   # Signature spans BOTH cause and reason: a host RED and a fitness RETURN on the same head are
@@ -273,8 +341,48 @@ run_fixer(){ # <pr> <headref> <sha> <cause:HOST|FITNESS> <reason>
     surface "$pr" "$sha" "blocked" "the same failure persists after a fix attempt (no progress) — a human decision is needed. Failing gate: ${cause}. Detail: ${reason:0:400}"
     return 0
   fi
+
+  # 1) ISOLATE — FAIL-CLOSED. No clone / no worktree ⇒ NO fix is attempted. There is deliberately NO
+  # shared-clone fallback: running the model in a tree the poller itself executes from is the hazard
+  # this exists to remove, so "could not isolate" must surface, never degrade into it.
+  local clone wt
+  clone="$(clone_for "$POLLER_REPO")" || {
+    log "FIX $SLUG#$pr @ ${sha:0:7} — NO CLONE of $POLLER_REPO to isolate from (fail-closed: no fix attempted)"
+    surface "$pr" "$sha" "blocked" "the fixer cannot run: no local clone of \`$POLLER_REPO\` to bolt an isolated worktree off. No fix was attempted — the fixer never runs in a shared tree."
+    return 0
+  }
+  # the worktree is checked out on the PR's OWN head (FD_BASE_REF=origin/<ref>), not origin/main:
+  # a fix iterates the PR's branch, so its base is that branch as ORIGIN currently holds it.
+  wt="$(FD_BASE_REF="origin/$ref" "$FRESH_TREE" "$clone" "$ref" 2>>"$LOG")"
+  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+    log "FIX $SLUG#$pr @ ${sha:0:7} — FRESH-TREE FAILED for origin/$ref (fail-closed: no fix attempted)"
+    surface "$pr" "$sha" "blocked" "could not create an isolated worktree on \`$ref\` — no fix was attempted (the fixer must never run in the shared clone). A maintainer should check the repo clone."
+    return 0
+  fi
+
+  # 2) DO NOT FIX AN UN-GATED HEAD. fresh-tree.sh just fetched origin; if the branch moved between the
+  # sweep reading $sha and this checkout, the findings we hold describe a head that no longer exists.
+  # Skip — the new head carries no verdict yet and re-gates on its own.
+  local base; base="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
+  if [ "$base" != "$sha" ]; then
+    log "FIX $SLUG#$pr — BRANCH MOVED (gated ${sha:0:7} ≠ origin/$ref ${base:0:7}) — skipping; the new head re-gates itself"
+    reap_tree "$clone" "$wt"
+    return 0
+  fi
+
+  # markers are written only HERE — once a fix is genuinely being ATTEMPTED on this head. Writing them
+  # before the isolation would park a NEVER-ATTEMPTED fix on a false "no progress" on the next sweep.
   printf '%s' "$sig" > "$sigfile"; printf '%s' "$sha" > "$lastfixed"
-  log "FIX $SLUG#$pr @ ${sha:0:7} ref=$ref cause=$cause — spawning bounded fixer (timeout ${FIXER_TIMEOUT}s)"
+  log "FIX $SLUG#$pr @ ${sha:0:7} ref=$ref cause=$cause — isolated worktree $wt; spawning bounded fixer (timeout ${FIXER_TIMEOUT}s)"
+  fix_in_tree "$pr" "$ref" "$sha" "$cause" "$reason" "$wt"
+  # 6) THROWAWAY DISCIPLINE — every path through fix_in_tree returns here, so the tree is always reaped.
+  reap_tree "$clone" "$wt"
+}
+
+# The bounded fix ITSELF, inside the isolated worktree: model commits → harness pushes → harness verifies
+# the landing at ORIGIN → reports the TRUTH. Split out so run_fixer's single reap_tree covers every exit.
+fix_in_tree(){ # <pr> <ref> <sha> <cause> <reason> <worktree>
+  local pr="$1" ref="$2" sha="$3" cause="$4" reason="$5" wt="$6"
   # The prompt must be TRUTHFUL about which gate failed. Telling a fitness-RETURNed PR that "the host
   # live-gate returned a problem" sent the fixer hunting a build failure that does not exist (the build
   # is GREEN on a RETURN) — it could not progress, and the PR parked on a false 'blocked'.
@@ -291,24 +399,53 @@ Address the failure below."
   fi
   local prompt
   read -r -d '' prompt <<FIX_EOF || true
-You are the fedora-dev fix iteration for PR $SLUG#$pr (branch: $ref). $what
+You are the fedora-dev fix iteration for PR $SLUG#$pr. You are working ONLY in the current directory: an
+ISOLATED git worktree, already checked out on the PR's own branch '$ref' at exactly the head the gate
+judged. $what
 
-Your ONE job: make a MINIMAL, correct fix and push it to the FEATURE branch '$ref' so the gates re-run.
-HARD RULES: work only on '$ref'; NEVER merge, NEVER push or target main, NEVER touch the merge gate. If you
-cannot fix it (need a decision, missing access, or the approach is wrong), do NOT guess — end your reply
-with a line 'FIXER_BLOCKED: <one-line reason>' and push nothing. Otherwise fix, commit, and push to '$ref'.
+Your ONE job: make a MINIMAL, correct fix and COMMIT it here, so the gates re-run on the new head.
+HARD RULES: the HARNESS owns git — you COMMIT (one or more commits, clear messages) and nothing more.
+Do NOT 'git push': the harness pushes '$ref' for you and verifies it landed at origin. Do NOT open a PR,
+do NOT merge, NEVER touch main or the merge gate, and never work outside this worktree. If you cannot fix
+it (need a decision, missing access, or the approach is wrong), do NOT guess or commit half-work — end
+your reply with a line 'FIXER_BLOCKED: <one-line reason>' and commit nothing.
 
 The findings you must address (from the ${cause} gate):
 
 $reason
 FIX_EOF
-  local out; out="$(cd "$HOME/.local/share/$POLLER_REPO" 2>/dev/null && timeout "$FIXER_TIMEOUT" $POLLER_FIXER "$prompt" 2>&1)"
-  local blocked; blocked="$(printf '%s' "$out" | grep -oE '^FIXER_BLOCKED:.*' | head -1)"
-  if [ -n "$blocked" ]; then
-    surface "$pr" "$sha" "blocked" "fixer reported BLOCKED — ${blocked#FIXER_BLOCKED:}"
-  else
-    log "fixer finished for $SLUG#$pr — new head (if pushed) will re-gate on the host's next sweep"
+  local out; out="$(cd "$wt" && timeout "$FIXER_TIMEOUT" $POLLER_FIXER "$prompt" 2>&1)"
+  local blocked bflag=0
+  blocked="$(printf '%s' "$out" | grep -aoE '^FIXER_BLOCKED:.*' | head -1)"; [ -n "$blocked" ] && bflag=1
+
+  # 3) THE HARNESS PUSHES — and only when the model actually committed and did not declare BLOCKED. The
+  # refspec is EXPLICIT (HEAD:refs/heads/<ref>): this push can name no destination but the feature ref,
+  # least of all main. Then VERIFY AT ORIGIN — the push's exit code is not evidence the fix landed.
+  local head prc=0 remote=""
+  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
+  if [ "$bflag" = 0 ] && [ -n "$head" ] && [ "$head" != "$sha" ]; then
+    git -C "$wt" push -q origin "HEAD:refs/heads/$ref" >/dev/null 2>&1 || prc=1
+    remote="$(git -C "$wt" ls-remote origin "refs/heads/$ref" 2>/dev/null | awk 'NR==1{print $1}')"
   fi
+
+  # 4) REPORT THE TRUTH — every outcome is distinct in the log, and every NON-landing one surfaces
+  # honestly and pushed nothing. No more "(if pushed)".
+  case "$(fix_outcome "$bflag" "$sha" "$head" "$prc" "$remote")" in
+    BLOCKED)
+      log "FIXER BLOCKED $SLUG#$pr @ ${sha:0:7} — model declared it cannot fix this; nothing pushed"
+      surface "$pr" "$sha" "blocked" "fixer reported BLOCKED — ${blocked#FIXER_BLOCKED:}" ;;
+    NO_COMMIT)
+      log "FIXER NO-COMMIT $SLUG#$pr @ ${sha:0:7} — the fixer committed nothing (timeout / no progress); nothing pushed"
+      surface "$pr" "$sha" "blocked" "the fixer run finished without committing anything (it timed out, or could not make progress) — nothing was pushed and the head is unchanged. Failing gate: ${cause}. A human decision is needed." ;;
+    PUSH_FAILED)
+      log "FIXER PUSH FAILED $SLUG#$pr — committed ${head:0:7} but the push to $ref errored; the fix did NOT land"
+      surface "$pr" "$sha" "blocked" "the fixer committed a fix but \`git push\` to \`$ref\` FAILED — the fix did NOT land (check credentials / branch protection). Nothing was merged." ;;
+    NOT_LANDED)
+      log "FIXER DID NOT LAND $SLUG#$pr — push reported success but origin/$ref holds ${remote:0:7}, not the fix ${head:0:7}"
+      surface "$pr" "$sha" "blocked" "the fixer committed \`${head:0:7}\` and the push reported SUCCESS, but \`origin/$ref\` did not advance to it — the fix did NOT land. A human should check the remote / branch protection." ;;
+    LANDED)
+      log "FIXER LANDED $SLUG#$pr — ${sha:0:7} → ${head:0:7} pushed to $ref and VERIFIED at origin; the new head re-gates on the host's next sweep" ;;
+  esac
 }
 
 # Retire superseded PRs (see header RETIRE). Trust anchor: only MERGED superseders are scanned (their
