@@ -11,6 +11,15 @@
 # surface_blocked() does (same machine-owned line-1 anchor, same App identity), and `gh issue list` serves
 # each issue's NEWEST comment back to the driver. A stub that just answered "parked: yes/no" would prove
 # nothing about the derivation — this one makes the driver re-read its own question off the bus.
+#
+# …AND IT DRAINS STDIN, BECAUSE THE REAL AUTHOR DOES. This is the lesson that cost this branch a review:
+# the real dev-author spawns a bounded `claude -p`, which reads whatever stdin it INHERITS to EOF. Driven
+# from a plain `while read … done <<<"$nums"`, the first author therefore SWALLOWED THE REST OF THE
+# BACKLOG — the next `read` hit EOF and the pass ended after ONE issue, still logging a tidy "1 author
+# run(s) spawned". Every row below passed anyway, because the mock was the one thing in the system that
+# did not touch stdin. It does now (`cat >/dev/null`), so each row runs against an author that behaves
+# like the real one, and every one of them FAILS against the pre-fix driver (authoring only issue 3).
+# A mock is only evidence where it is faithful on the axis under test.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOOP="$HERE/bin/dev-loop.sh"
@@ -70,6 +79,7 @@ EOF
 #   otherwise             → AUTHORED: rc 0 + the PR URL on stdout (its only stdout emission)
 cat > "$BIN/dev-author.sh" <<'EOF'
 #!/usr/bin/env bash
+cat >/dev/null            # FAITHFUL: the real author's `claude -p` drains any stdin it inherits, to EOF
 printf 'AUTHOR %s %s\n' "$1" "$2" >> "$AUTHOR_LOG"
 post_question(){   # what surface_blocked() does: one comment, line 1 = the machine-owned anchor
   [ -n "${FAKE_POST_FAILS:-}" ] && return 0
@@ -109,9 +119,40 @@ drive(){ # <desc> <expected-author-invocations, space-separated>
   ck "$desc" "$got" "$want"
 }
 
-echo "== one pass authors every backlog issue, in order =="
+echo "== one pass authors every backlog issue, in order — against a stdin-DRAINING author =="
 fresh; FAKE_BACKLOG=$'7\n3\n12'
 drive "drains the backlog" "3 7 12"
+# The truncation this closes is silent and unbounded: the LONGER the backlog, the more work vanishes.
+fresh; FAKE_BACKLOG=$'3\n7\n12\n20\n31'
+drive "a 5-issue backlog is authored in full (pre-fix: only '3')" "3 7 12 20 31"
+
+# --- THE TWO STRUCTURAL PINS behind those rows. Both are cheap to delete by accident and neither has a
+# --- visible symptom until a backlog silently truncates in production, so they are asserted directly:
+# --- the driver must feed its list on FD 3 (not stdin), and the author must run its model with stdin shut.
+echo "== the author's model run inherits NO stdin, and the driver's list does not ride stdin =="
+grep -qF 'done 3<<<"$nums"' "$LOOP" \
+  && ck "bin/dev-loop.sh feeds the issue list on FD 3, not stdin" yes yes \
+  || ck "bin/dev-loop.sh feeds the issue list on FD 3, not stdin" no yes
+grep -qF '"$DEV_AUTHOR" "$repo" "$n" </dev/null' "$LOOP" \
+  && ck "bin/dev-loop.sh runs dev-author with stdin closed" yes yes \
+  || ck "bin/dev-loop.sh runs dev-author with stdin closed" no yes
+if [ -f "$AUTHOR" ]; then
+  grep -qE '\$AUTHOR_CLAUDE .*</dev/null' "$AUTHOR" \
+    && ck "bin/dev-author.sh runs its bounded claude with stdin closed" yes yes \
+    || ck "bin/dev-author.sh runs its bounded claude with stdin closed" no yes
+fi
+
+# --- R9 HALT (#151): no box implements the HALT switch spec #135 requires, and `--watch` is the only way
+# --- this script could spawn bounded model runs on a clock with nothing able to stop them mid-sweep. It
+# --- REFUSES until HALT exists — a real interlock, not a comment saying one is missing.
+echo "== --watch REFUSES until the R9 HALT switch exists (#151) =="
+fresh; FAKE_BACKLOG=$'3\n7'
+# `timeout 10` is the point of the row, not decoration: if the refusal ever regresses, --watch is an
+# INFINITE author-spawning loop, and an unbounded call here would HANG the suite instead of failing it
+# (it did exactly that against the pre-fix script). rc 124 ≠ 2 ⇒ a loud FAIL in ten seconds.
+PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" timeout 10 bash "$LOOP" --watch fedora-dev >/dev/null 2>&1
+ck "--watch exits 2 (refused; a regression would loop forever → rc 124)" "$?" "2"
+ck "…and it spawns no author run at all" "$(wc -l < "$AUTHOR_LOG" | tr -d ' ')" "0"
 
 echo "== a stuck (non-zero) author does NOT wedge the rest =="
 fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_FAIL=7

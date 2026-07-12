@@ -73,6 +73,8 @@ EOF
 # and "did it re-spend one?" is exactly what the idempotency rows must be able to assert.
 cat > "$BIN/claude" <<'EOF'
 #!/usr/bin/env bash
+cat >/dev/null                              # FAITHFUL: the real `claude -p` drains inherited stdin to EOF
+printf '%s' "${!#}" > "${PROMPT_LOG:-/dev/null}"   # the prompt is the LAST arg — rows below assert on it
 printf 'CLAUDE plan=%s\n' "${FAKE_PLAN:-two}" >> "$GH_LOG"
 case "${FAKE_PLAN:-two}" in
   two)     printf '# Feature one\nbody one\n' > feat-01.md
@@ -95,6 +97,7 @@ run(){ # <desc> <envs> <expect: CREATE|RECOVER|TRUNC|DEFER|COMMENT-ONLY|NONE> <e
   # The action log lives OUTSIDE $HOME — $HOME must end every run EMPTY (asserted below), so nothing the
   # harness itself writes may sit in it.
   export GH_LOG="$ROOT/act-$RANDOM.log"; : > "$GH_LOG"
+  export PROMPT_LOG="$ROOT/prompt-$RANDOM.txt"; : > "$PROMPT_LOG"
   # The BUS (GitHub) is likewise OUTSIDE $HOME: every run() gets a WIPED box, so anything that survives
   # across runs survived on the bus alone — which is the whole point of the derivation.
   export BUS="${KEEP_BUS:+$BUS}"; [ -n "$BUS" ] || { export BUS="$ROOT/bus-$RANDOM"; : > "$BUS"; }
@@ -131,7 +134,7 @@ run(){ # <desc> <envs> <expect: CREATE|RECOVER|TRUNC|DEFER|COMMENT-ONLY|NONE> <e
   local leaked; leaked="$(find "$HOME" -mindepth 1 2>/dev/null | head -3 | tr '\n' ' ')"
   [ -z "$leaked" ] || { ok=0; echo "  FAIL $desc: left LOCAL STATE behind ($leaked) — every fact must live on the bus"; }
   if [ "$ok" = 1 ]; then pass=$((pass+1)); printf '  ok   %s\n' "$desc"; else fail=$((fail+1)); fi
-  LAST_LOG="$GH_LOG"
+  LAST_LOG="$GH_LOG"; LAST_PROMPT="$PROMPT_LOG"
 }
 
 # Assert on the PREVIOUS run's gh log — used to prove the confirmation gate actually EVALUATED a comment
@@ -145,6 +148,15 @@ ck_log(){ # <desc> <present|absent> <pattern>
     [ "$want" = absent ] && { pass=$((pass+1)); printf '  ok   %s\n' "$desc"; return; }
     fail=$((fail+1)); echo "  FAIL $desc: '$pat' NOT found — the gate never evaluated the comment"
   fi
+}
+
+# Assert on the PROMPT the previous run handed the bounded planner — the model run is the one place the
+# already-filed titles can change the plan, so "did it know?" has to be read off the prompt itself.
+ck_prompt(){ # <desc> <present|absent> <literal>
+  local desc="$1" want="$2" pat="$3" have=absent
+  grep -qF -- "$pat" "$LAST_PROMPT" 2>/dev/null && have=present
+  if [ "$have" = "$want" ]; then pass=$((pass+1)); printf '  ok   %s\n' "$desc"
+  else fail=$((fail+1)); printf '  FAIL %s: the planner prompt has it %s, want %s\n' "$desc" "$have" "$want"; fi
 }
 
 echo "== confirmed (MAINTAINER-applied approved label) + planner writes 2 → 2 backlog issues + summary =="
@@ -244,6 +256,21 @@ FAKE_EXISTING='Feature one' run "dedup skips already-filed" "FAKE_APPROVED=1 FAK
 echo "== an ALL-DEDUPED recovery run is a COMPLETE plan → it still records 'planned:' on the bus =="
 FAKE_EXISTING=$'Feature one\nFeature two' run "a complete plan always leaves its tombstone" "FAKE_APPROVED=1 FAKE_PLAN=two" RECOVER
 ck_log "  └─ and the summary says nothing new was filed" present 'COMMENT.*already filed'
+
+# --- EVERY DEFER PATH RECOVERS BY RE-PLANNING (cap overflow 8, partial create 6, un-postable summary 9
+# --- each leave the spec UNPLANNED with some of its features ALREADY FILED) — and the harness's only dedup
+# --- is an EXACT-title match. A planner BLIND to what it already filed re-words those features, the dedup
+# --- sails straight past them, and the recovery run files near-duplicates that dev-loop then authors into
+# --- duplicate PRs. So the already-filed titles ride INTO the prompt. An instruction to a non-deterministic
+# --- model is not a guarantee (the cap comment now says that residual out loud) — but a BLIND re-plan
+# --- duplicates BY CONSTRUCTION, and these rows pin that it is not blind. Read off the run just above.
+echo "== that re-plan was TOLD what is already filed — the exact-title dedup depends on it =="
+ck_prompt "  └─ its planner prompt carried the already-filed titles" present 'Feature one'
+ck_prompt "  └─ …and told it to REUSE THEM VERBATIM (what an exact-title dedup needs to bite)" present 'REUSE ITS TITLE VERBATIM'
+# DISCRIMINATOR — those two rows must be reading an INJECTION, not boilerplate every prompt carries: with
+# nothing filed yet, the prompt must carry no ALREADY-FILED block at all.
+FAKE_EXISTING='' run "a FIRST plan of a fresh spec files both features" "FAKE_APPROVED=1 FAKE_PLAN=two" CREATE 2
+ck_prompt "  └─ and ITS prompt carries no already-filed block" absent 'ALREADY FILED'
 
 # --- TOTAL create failure is NOT a transient blip: a repo with no `backlog` label or no issue-write fails
 # --- EVERY create identically. Deferring that silently spins forever with nobody ever told — so it must

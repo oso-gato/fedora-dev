@@ -271,6 +271,27 @@ fi
 
 # 2) PLAN — ONE bounded claude -p decomposes the confirmed objective, WRITING each feature to a file.
 OUTDIR="$(mktemp -d)"; trap 'rm -rf "$OUTDIR"' EXIT
+
+# THE ALREADY-FILED TITLES RIDE INTO THE PROMPT — this is what makes the DEFER paths recoverable rather
+# than duplicative. Every deferred exit (cap overflow 8, partial create 6, un-postable summary 9) leaves
+# the spec UNPLANNED with some of its features ALREADY FILED, so the recovery run RE-PLANS — and the only
+# dedup the harness has is an EXACT-title match (`grep -qxF`, below). A fresh model run is
+# non-deterministic: left BLIND to the bus it re-words the features it already filed, the exact-title
+# dedup sails straight past them, and it files near-duplicates of live backlog issues that dev-loop then
+# authors into duplicate PRs. So the planner is TOLD what is already filed and told to reuse those titles
+# verbatim. The harness still owns the dedup, and this is an INSTRUCTION to a model, not a guarantee — a
+# re-worded title can still slip through, which is exactly what the cap-overflow comment now says out
+# loud instead of implying the dedup is airtight. Best-effort read: unreadable ⇒ no block in the prompt
+# (the FAIL-CLOSED dedup fetch after the plan is the actual gate on filing).
+prior="$(gh issue list --repo "$SLUG" --label "$BACKLOG_LABEL" --state all --limit 200 \
+           --json title -q '.[].title' 2>/dev/null)"
+prior_block=""
+[ -n "$prior" ] && prior_block="ALREADY FILED — these features are already \`$BACKLOG_LABEL\` issues in $SLUG:
+$(printf '%s\n' "$prior" | sed 's/^/  - /')
+If a feature you plan is one of those, REUSE ITS TITLE VERBATIM — the harness dedups by EXACT title and
+will skip it. NEVER re-word an already-filed feature into a near-duplicate.
+"
+
 read -r -d '' prompt <<PLAN_EOF || true
 You are the fedora-dev autonomous PLANNER. Decompose the CONFIRMED objective in issue $SLUG#$SPEC into a
 small set of INDEPENDENT, buildable FEATURES — each one a self-contained change the feature-author can
@@ -281,6 +302,7 @@ OBJECTIVE (issue #$SPEC): $title
 
 $body
 
+$prior_block
 For EACH feature, WRITE a file named '$OUTDIR/feat-NN.md' (NN = 01, 02, …), where:
   - line 1 is '# <concise imperative feature title>'
   - the rest is the feature spec: what to build, acceptance criteria, and which existing files it touches.
@@ -292,7 +314,10 @@ If the objective is too vague or cannot be planned, write no files and end with:
 PLAN_EOF
 
 log "planning $SLUG#$SPEC '$title' (bounded ${PLAN_TIMEOUT}s)…"
-out="$(cd "$OUTDIR" && timeout "$PLAN_TIMEOUT" $PLAN_CLAUDE "$prompt" 2>&1)"
+# STDIN CLOSED, for the same reason dev-author's run is (see there): `claude -p` drains any stdin it
+# inherits. The planner is a leaf today, but a caller that ever drives it from a loop must not lose its
+# list to this run — the prompt is an argument, the run needs no stdin.
+out="$(cd "$OUTDIR" && timeout "$PLAN_TIMEOUT" $PLAN_CLAUDE "$prompt" </dev/null 2>&1)"
 sentinel="$(extract_plan_sentinel "$out")"
 case "$sentinel" in
   BLOCKED*)
@@ -389,7 +414,7 @@ fi
 # PARTIAL failure → DEFER, spec NOT marked planned (defers, never drops): the next run re-plans and the
 # title dedup above re-files only what is missing. No comment — a partial blip is transient, needs no human.
 if [ "$failed" -gt 0 ]; then
-  log "$failed feature create(s) failed — DEFERRED, spec NOT marked planned (${#created[@]} filed this run will be dedup-skipped on retry)"
+  log "$failed feature create(s) failed — DEFERRED, spec NOT marked planned (the ${#created[@]} filed this run are handed to the retry's planner by title and dedup-skipped on an exact match)"
   exit 6
 fi
 
@@ -398,7 +423,7 @@ fi
 # The dropped TITLES ride the comment, so the work survives $OUTDIR's teardown even if nobody re-runs.
 if [ "${#dropped[@]}" -gt 0 ]; then
   log "cap overflow: ${#dropped[@]} feature(s) deferred — reporting on $SLUG#$SPEC, spec left UNPLANNED"
-  ask_once "$CAPPED_ANCHOR" "**dev-plan → needs a decision (BLOCKED, plan exceeded MAX_FEATURES):** this objective decomposed into $(( ${#created[@]} + ${#dropped[@]} )) features, but \`MAX_FEATURES=$MAX_FEATURES\` caps one plan. The first $MAX_FEATURES were filed as \`$BACKLOG_LABEL\` issues; the remaining ${#dropped[@]} were **not** filed and are listed here so none is lost:"$'\n'"$(drop_report "${dropped[@]}")"$'\n'"A maintainer should either raise \`MAX_FEATURES\` and re-run \`dev-plan\` (the already-filed features are dedup-skipped by title; the re-plan may word the deferred ones differently), or split this objective into smaller specs. **This spec is deliberately NOT marked planned** — the cap defers, it never drops."$'\n\n<sub>autonomous planner (R2). A dev-task question, not an approval request.</sub>'
+  ask_once "$CAPPED_ANCHOR" "**dev-plan → needs a decision (BLOCKED, plan exceeded MAX_FEATURES):** this objective decomposed into $(( ${#created[@]} + ${#dropped[@]} )) features, but \`MAX_FEATURES=$MAX_FEATURES\` caps one plan. The first $MAX_FEATURES were filed as \`$BACKLOG_LABEL\` issues; the remaining ${#dropped[@]} were **not** filed and are listed here so none is lost:"$'\n'"$(drop_report "${dropped[@]}")"$'\n'"A maintainer should either raise \`MAX_FEATURES\` and re-run \`dev-plan\`, or split this objective into smaller specs. On a re-run the planner is handed the titles already filed above and told to reuse them verbatim, so they dedup-skip on an exact-title match — but that is an instruction to a non-deterministic model, not a guarantee: **if it re-words one, the re-run can file a near-duplicate of an already-filed feature** (and it may word the deferred ones differently too). Skim the backlog after re-running. **This spec is deliberately NOT marked planned** — the cap defers, it never drops."$'\n\n<sub>autonomous planner (R2). A dev-task question, not an approval request.</sub>'
   if [ "${#created[@]}" -gt 0 ]; then printf '%s\n' "${created[@]}"; fi
   exit 8
 fi

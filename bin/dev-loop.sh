@@ -58,18 +58,21 @@
 # about. (This is strictly better than the marker it replaces: a marker parked the issue even when the
 # question had FAILED to post — silently dropping the feature with no human ever told.)
 #
-# NOT YET WIRED — R9 HALT (tracked in fedora-dev#151, a pre-existing fleet-wide gap): spec #135 requires a
-# HALT switch that freezes every poller within one sweep, and P3 lists a HALT check in every sweep. NO box
-# implements one today (not pr-poller, not the host watcher, not this driver). This sweeper spawns bounded
-# model runs on a timer, so it is the loudest argument for building it; it is a precondition for arming
-# `--watch`, and #151 carries the design questions (signal on the bus, maintainer binding, fail-CLOSED).
+# `--watch` IS REFUSED UNTIL R9 HALT EXISTS (fedora-dev#151). Spec #135 R9 requires a HALT switch that
+# freezes every poller within one sweep, and P3 lists a HALT check in every sweep; NO box implements one
+# today (not pr-poller, not the host watcher, not this driver). A timer-driven `--watch` is the ONE thing
+# in this script that would spawn bounded model runs unattended, on a clock, with nothing able to stop
+# them mid-sweep — and an interlock that ships as a CODE COMMENT is not an interlock. So `--watch`
+# HARD-REFUSES (exit 2) until #151 lands: what ships here is a single pass, driven one at a time by a
+# caller that stops it by not calling it again. #151 carries the HALT design (signal on the bus,
+# maintainer binding, fail-CLOSED); wiring it back on is then a few lines.
 #
-#   dev-loop.sh <repo> [--once]   drive the backlog for <repo> (default: one full pass, then exit)
-#   dev-loop.sh --watch <repo>    keep draining the backlog on an interval (LOOP_INTERVAL, default 300s)
+#   dev-loop.sh <repo> [--once]   drive the backlog for <repo> — ONE full pass, then exit (the only mode)
+#   dev-loop.sh --watch <repo>    REFUSED until the R9 HALT switch exists (#151)
 #   dev-loop.sh --selftest        exercise the pure helpers (no gh / author / network)
 #
 # ENV: ORG (default oso-gato); BACKLOG_LABEL (default backlog); DEV_AUTHOR (default the sibling
-#      bin/dev-author.sh, overridable for the mock test); LOOP_INTERVAL (--watch cadence, default 300);
+#      bin/dev-author.sh, overridable for the mock test);
 #      MAX_PER_PASS (safety cap on author RUNS SPAWNED per pass, default 5 — a runaway-planner backstop;
 #      skips and parked issues cost no slot); DEV_LOGIN (the dev box's App identity, whose questions the
 #      park gate trusts — default oso-gato-nox-claudebox, the same bare comment-author form the poller's
@@ -78,7 +81,6 @@ set -uo pipefail
 
 ORG="${ORG:-oso-gato}"
 BACKLOG_LABEL="${BACKLOG_LABEL:-backlog}"
-LOOP_INTERVAL="${LOOP_INTERVAL:-300}"
 MAX_PER_PASS="${MAX_PER_PASS:-5}"
 DEV_LOGIN="${DEV_LOGIN-oso-gato-nox-claudebox}"
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -200,8 +202,17 @@ one_pass(){ # <repo>
   local nums; nums="$(parse_backlog "$(printf '%s\n' "${!who[@]}")")"
   [ -n "$nums" ] || { log "$slug backlog is empty — nothing to author"; return 0; }
 
+  # THE NUMBERS RIDE FD 3, NOT STDIN (the pr-poller.sh idiom, adopted here for the same reason it exists
+  # there): the loop body spawns `dev-author`, which spawns a bounded `claude -p` — and `claude -p` DRAINS
+  # whatever stdin it inherits, to EOF. Fed off FD 0, this loop hands it THE REST OF THE BACKLOG: the
+  # author swallows it, the next `read` sees EOF, and the pass ends after ONE issue while still logging a
+  # tidy "1 author run(s) spawned" — a silent truncation of a maintainer's confirmed work-list (proven:
+  # against a stdin-faithful author, a 4-issue backlog authored only its first). FD 3 is free (FD 9 is the
+  # poller's flock). Belt AND braces: the author is ALSO run with stdin CLOSED below, because no child of
+  # this driver has any business reading the driver's stdin — and a future child that does must not be
+  # able to re-open this hole.
   local n rc out spawned=0 authored=0 asked=0 skipped=0 parked=0
-  while IFS= read -r n; do
+  while IFS= read -r n <&3; do
     [ -n "$n" ] || continue
     if [ "$spawned" -ge "$MAX_PER_PASS" ]; then
       log "MAX_PER_PASS=$MAX_PER_PASS author run(s) spawned — the REST of the backlog is DEFERRED to the next pass"
@@ -216,7 +227,10 @@ one_pass(){ # <repo>
     # dev-author is fail-closed + idempotent: already-authored / non-backlog / has-PR issues no-op inside
     # it, so the driver need not track that state. Any non-zero exit is logged and the loop CONTINUES —
     # one stuck feature must never wedge the rest.
-    out="$("$DEV_AUTHOR" "$repo" "$n" 2>/dev/null)"; rc=$?
+    # </dev/null: the model run must inherit no stdin (see FD 3, above). Its stderr is NOT discarded —
+    # dev-author's log lines are the only trace of what a spawned run did, and swallowing them is what
+    # would have made the truncation above invisible in production.
+    out="$("$DEV_AUTHOR" "$repo" "$n" </dev/null)"; rc=$?
     case "$(run_class "$rc" "$out")" in
       AUTHORED)
         spawned=$((spawned+1)); authored=$((authored+1))
@@ -234,20 +248,22 @@ one_pass(){ # <repo>
         spawned=$((spawned+1))
         log "  dev-author rc=$rc for $slug#$n (environmental — no question posted) — retrying next pass" ;;
     esac
-  done <<<"$nums"
+  done 3<<<"$nums"
   log "$slug pass complete — $spawned author run(s) spawned: $authored PR(s) opened, $asked question(s) surfaced; $skipped in-flight skip(s), $parked parked"
 }
 
 # ---- ENTRY -----------------------------------------------------------------------------------------
 if [ "${1:-}" = "--watch" ]; then
-  REPO="${2:?usage: dev-loop.sh --watch <repo>}"
-  log "watch mode: draining $ORG/$REPO backlog every ${LOOP_INTERVAL}s"
-  while :; do one_pass "$REPO"; sleep "$LOOP_INTERVAL"; done
-else
-  REPO="${1:?usage: dev-loop.sh <repo> [--once] | --watch <repo> | --selftest}"
-  case "${2:-}" in
-    ''|--once) : ;;  # one pass IS the default; --once names it explicitly (timer-unit friendliness)
-    *) log "unknown argument '$2' (usage: dev-loop.sh <repo> [--once] | --watch <repo> | --selftest)"; exit 2 ;;
-  esac
-  one_pass "$REPO"
+  # REFUSED, structurally — not warned about in a comment (see the R9 HALT note at the top). A clock that
+  # spawns bounded model runs with no HALT switch to stop them mid-sweep is precisely what spec #135 R9
+  # forbids, and this flag is the only way this script could become one.
+  log "REFUSED: --watch needs the R9 HALT switch, which NO box implements yet (fedora-dev#151)."
+  log "         Until #151 lands, drive one pass at a time: dev-loop.sh <repo> [--once]."
+  exit 2
 fi
+REPO="${1:?usage: dev-loop.sh <repo> [--once] | --selftest}"
+case "${2:-}" in
+  ''|--once) : ;;  # one pass IS the default; --once names it explicitly (caller-friendliness)
+  *) log "unknown argument '$2' (usage: dev-loop.sh <repo> [--once] | --selftest)"; exit 2 ;;
+esac
+one_pass "$REPO"
