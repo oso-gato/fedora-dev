@@ -202,6 +202,13 @@ esac
 # 3) FILE — deterministic harness: one backlog issue per feature file (the model created none).
 shopt -s nullglob
 files=("$OUTDIR"/feat-*.md)
+# ENFORCE the cap HERE, not in the prompt. MAX_FEATURES is documented as a cap, and a prompt line is a
+# request, not a bound — the model can write any number of feat-*.md files. The harness owns every write
+# to GitHub, so it owns the cap too. Never silently: the drop is logged.
+if [ "${#files[@]}" -gt "$MAX_FEATURES" ]; then
+  log "planner wrote ${#files[@]} feature file(s) > MAX_FEATURES=$MAX_FEATURES — filing the first $MAX_FEATURES, DROPPING $(( ${#files[@]} - MAX_FEATURES )) (re-run with a higher MAX_FEATURES to file the rest)"
+  files=("${files[@]:0:$MAX_FEATURES}")
+fi
 if [ "${#files[@]}" -eq 0 ]; then
   log "planner claimed PLAN_DONE but wrote no feature files — surfacing as no-progress"
   gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → needs a decision (BLOCKED):** the planner produced no features (unable to decompose). A maintainer should sharpen the objective." >/dev/null 2>&1 || true

@@ -67,6 +67,8 @@ case "${FAKE_PLAN:-two}" in
   blocked) echo "PLAN_BLOCKED: objective too vague";;
   noop)    echo "hmm, wrote nothing";;
   partial) printf '# Feature one\nbody one\n' > feat-01.md;;
+  many)    for i in 1 2 3 4 5; do printf '# Feature %s\nbody %s\n' "$i" "$i" > "feat-0$i.md"; done
+           echo "PLAN_DONE: 5 features written";;
 esac
 exit 0
 EOF
@@ -120,6 +122,13 @@ ck_log(){ # <desc> <present|absent> <pattern>
 
 echo "== confirmed (MAINTAINER-applied approved label) + planner writes 2 → 2 backlog issues + summary =="
 run "plans a confirmed objective" "FAKE_APPROVED=1 FAKE_PLAN=two" CREATE 2 marker
+
+# MAX_FEATURES is DOCUMENTED as a cap, but a prompt line is a request, not a bound — the model can write
+# any number of feat-*.md files. The HARNESS owns every write to GitHub, so it must own the cap. Without
+# enforcement this row files 5 (DISCRIMINATOR: fails against the pre-fix script, which filed all 5).
+echo "== MAX_FEATURES is a CAP the harness enforces, not advice in the prompt =="
+run "a 5-feature plan under MAX_FEATURES=3 files only 3" "FAKE_APPROVED=1 FAKE_PLAN=many MAX_FEATURES=3" CREATE 3 marker
+ck_log "  └─ and the DROP is logged, never silent" absent 'CREATE .*Feature 5'
 # DISCRIMINATOR: the label was not merely SEEN — the gate resolved WHO applied it and role-checked him.
 ck_log "  └─ and it resolved WHO applied the label (timeline)" present 'API .*issues/500/timeline'
 ck_log "  └─ and it role-checked that applier" present 'API .*collaborators/arthur/permission'

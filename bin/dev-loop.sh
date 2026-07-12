@@ -63,16 +63,19 @@ parse_backlog(){
 #   SKIPPED   rc 0, no URL      → its guard no-op'd (already authored / an open PR exists / not backlog-
 #                                 labelled). NO model run was spawned ⇒ NO cap slot: an in-flight feature
 #                                 must never crowd the tail of the backlog out (the starvation above).
-#   QUESTION  rc 4|5|6          → the run spawned but could not finish (BLOCKED / no-progress / in-box
-#                                 RED) and posted a dev-task question on the issue. Slot + PARK it.
-#   RETRY     any other rc      → environmental, no question posted (2 unreadable issue, 3 worktree,
-#                                 7 push, 8 PR-create). Retried next pass; still takes a slot, so a
-#                                 broken environment cannot spin the whole backlog in one pass.
+#   QUESTION  rc 3|4|5|6|7|8    → the run spawned but could not finish, and dev-author POSTED a dev-task
+#                                 question on the issue — EVERY one of these paths calls its
+#                                 surface_blocked() (3 worktree, 4 BLOCKED, 5 no-progress, 6 in-box RED,
+#                                 7 push, 8 PR-create). Slot + PARK it: a stuck ticket must never
+#                                 re-spend a bounded model run or re-ask the identical question each pass.
+#   RETRY     any other rc      → dev-author posted NOTHING (rc 2 — it could not even read the issue, so
+#                                 it fails closed BEFORE it can comment). Retried next pass; still takes a
+#                                 slot, so a broken environment cannot spin the whole backlog in one pass.
 run_class(){
   case "$1" in
-    0)     case "$2" in https://*) printf 'AUTHORED';; *) printf 'SKIPPED';; esac ;;
-    4|5|6) printf 'QUESTION' ;;
-    *)     printf 'RETRY' ;;
+    0)           case "$2" in https://*) printf 'AUTHORED';; *) printf 'SKIPPED';; esac ;;
+    3|4|5|6|7|8) printf 'QUESTION' ;;
+    *)           printf 'RETRY' ;;
   esac
 }
 
@@ -103,8 +106,12 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "rc4 BLOCKED → QUESTION"  "$(run_class 4 '')" "QUESTION"
   ck "rc5 no-progress → QUESTION" "$(run_class 5 '')" "QUESTION"
   ck "rc6 in-box RED → QUESTION"  "$(run_class 6 '')" "QUESTION"
-  ck "rc7 push fail → RETRY"   "$(run_class 7 '')" "RETRY"
-  ck "rc2 unreadable → RETRY"  "$(run_class 2 '')" "RETRY"
+  # 3|7|8 ALSO call dev-author's surface_blocked() — a question IS on the issue, so they must PARK like
+  # any other surfaced question, never spin as RETRY (which re-spends a model run + re-asks every pass).
+  ck "rc3 worktree → QUESTION"    "$(run_class 3 '')" "QUESTION"
+  ck "rc7 push fail → QUESTION"   "$(run_class 7 '')" "QUESTION"
+  ck "rc8 PR-create → QUESTION"   "$(run_class 8 '')" "QUESTION"
+  ck "rc2 unreadable (posts nothing) → RETRY"  "$(run_class 2 '')" "RETRY"
   echo "== park_state (a surfaced question parks the issue until a human touches it) =="
   ck "untouched since the question → PARKED" "$(park_state 2026-07-12T10:00:00Z 2026-07-12T10:00:00Z)" "PARKED"
   ck "older touch → PARKED"                  "$(park_state 2026-07-12T10:00:00Z 2026-07-12T09:00:00Z)" "PARKED"

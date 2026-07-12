@@ -33,11 +33,19 @@ EOF
 # dev-author stub — mirrors the REAL (rc, stdout) contract the driver classifies on:
 #   FAKE_AUTHOR_SKIP list → guard no-op: rc 0, NOTHING on stdout (already authored / a PR is in flight)
 #   FAKE_AUTHOR_FAIL      → rc 4: BLOCKED, a dev-task question was posted on the issue
+#   FAKE_AUTHOR_RC=<n>:<rc> → issue <n> exits <rc>. The REAL dev-author calls surface_blocked() — i.e. it
+#                           POSTS a question on the issue — on rc 3 (worktree), 7 (push) and 8 (PR-create)
+#                           too, not just 4|5|6. Only rc 2 (unreadable issue) posts nothing. The stub must
+#                           be able to emit those codes or the park gate can never see the ones that
+#                           break it.
 #   otherwise             → AUTHORED: rc 0 + the PR URL on stdout (its only stdout emission)
 cat > "$BIN/dev-author.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'AUTHOR %s %s\n' "$1" "$2" >> "$AUTHOR_LOG"
 for s in ${FAKE_AUTHOR_SKIP:-}; do [ "$2" = "$s" ] && exit 0; done
+for m in ${FAKE_AUTHOR_RC:-}; do
+  [ "$2" = "${m%%:*}" ] && exit "${m##*:}"
+done
 [ "$2" = "${FAKE_AUTHOR_FAIL:-}" ] && exit 4
 printf 'https://github.com/oso-gato/fedora-dev/pull/%s\n' "$((900 + $2))"
 exit 0
@@ -49,7 +57,7 @@ pass=0; fail=0
 fresh(){
   export AUTHOR_LOG="$ROOT/author-$RANDOM.log"; : > "$AUTHOR_LOG"
   export DEV_LOOP_STATE="$ROOT/state-$RANDOM"; rm -rf "$DEV_LOOP_STATE"
-  export FAKE_BACKLOG="" FAKE_AUTHOR_FAIL="" FAKE_AUTHOR_SKIP=""
+  export FAKE_BACKLOG="" FAKE_AUTHOR_FAIL="" FAKE_AUTHOR_SKIP="" FAKE_AUTHOR_RC=""
   export FAKE_UPDATED="2026-07-12T00:00:00Z" FAKE_PARK_STAMP="2026-07-12T00:00:01Z"
   unset MAX_PER_PASS
 }
@@ -101,6 +109,27 @@ drive "pass 2: 7 is PARKED — not re-invoked" "3 12"
 echo "== a human touching the issue AFTER the question UN-parks it (defers, never drops) =="
 FAKE_UPDATED="2026-07-13T00:00:00Z"   # later than the park stamp = someone answered/refined the issue
 drive "pass 3: 7 is re-offered" "3 7 12"
+
+# --- THE rc-3/7/8 BLIND SPOT: dev-author ALSO posts a question (surface_blocked) when the worktree (3),
+# --- the push (7) or the PR create (8) fails — and because it writes its .done marker only AFTER a
+# --- successful PR create, such an issue stays open, unmarked and PR-less, so its guard says ACT again.
+# --- Classified as RETRY (the pre-fix code), a persistent push/PR-create failure — lost credential,
+# --- branch protection, issues disabled — re-spends a full bounded `claude -p` run and re-posts the
+# --- IDENTICAL question every LOOP_INTERVAL, forever. These rows PARK them like any other question.
+# --- DISCRIMINATOR: against the pre-fix run_class each of these re-invokes the author on pass 2.
+echo "== rc 3|7|8 ALSO post a question (surface_blocked) — they PARK too, they do not spin =="
+for rc in 3 7 8; do
+  fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_RC="7:$rc"
+  drive "rc$rc pass 1: 7 surfaces a question → parked" "3 7 12"
+  drive "rc$rc pass 2: 7 is PARKED — no model run re-spent, no question re-asked" "3 12"
+done
+
+# --- rc 2 is the ONE code that posts NOTHING (dev-author cannot even read the issue → fail-closed before
+# --- it can comment). Parking it would strand a ticket nobody was ever told about, so it must RETRY.
+echo "== rc 2 posts no question — it must RETRY (parking it would strand a silent ticket) =="
+fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_RC="7:2"
+drive "rc2 pass 1: 7 is attempted" "3 7 12"
+drive "rc2 pass 2: 7 is retried, NOT parked" "3 7 12"
 
 echo
 echo "dev-loop-dryrun: $pass passed, $fail failed"
