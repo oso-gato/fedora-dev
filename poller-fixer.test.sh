@@ -255,6 +255,10 @@ done_case
 #     first (`git -C` cannot read an unenterable tree either), so it parked the PR on a bogus "the
 #     branch moved" and surfaced NOTHING — safe, but lying about why. `notlogs 'BRANCH MOVED'` +
 #     `surfaced` are the discriminators: the pre-fix script fails both.
+#   * and the tree must still be REAPED. Refusing to USE a worktree is not a licence to LEAVE it on the
+#     home volume: "reaped on EVERY path" (Principle 10) has no exception for the paths that refuse.
+#     The first cut of this refusal returned before the reap — it leaked one tree per unenterable head,
+#     forever, while the file above still claimed every path reaps. Asserted, not claimed.
 echo "== WORKTREE UNENTERABLE: refuse by name — no model, no push, and the TRUE cause reported =="
 DESC="a worktree that exists but cannot be entered runs NO model and is refused by its real cause"; OK=1
 setup_case feat/x; FAKE_REF=feat/x
@@ -273,7 +277,8 @@ else
   logs 'FRESH-TREE FAILED'                       # refused for what it IS: no usable isolated worktree
   notlogs 'BRANCH MOVED'                         # …not for what it merely LOOKS like from `git -C`
   notlogs 'FIXER NO-COMMIT'; notlogs 'FIXER LANDED'
-  chmod 755 "$BADWT"
+  ck "$([ ! -d "$BADWT" ] && echo 1 || echo 0)" "the REFUSED worktree was left behind — every path reaps (Principle 10), including the ones that refuse to use the tree"
+  chmod 755 "$BADWT" 2>/dev/null || true         # (a reaped tree is gone; this only matters if it leaked)
   done_case
 fi
 

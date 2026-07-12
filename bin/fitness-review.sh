@@ -43,9 +43,15 @@
 #   1  a PRECONDITION refused the review (not host-GREEN, no diff, SoD/config, post failed). RETRYABLE:
 #      the state may change on its own, so the caller may simply try again next sweep.
 #   3  THE REVIEWER COULD NOT BE RUN, or ran and produced no sanctioned verdict, FOR THIS HEAD. NOT a
-#      governance judgment and NOT self-healing — the caller MUST SURFACE it (a question) rather than
-#      re-spin at sweep cadence with no signal (#155 R4; the silent-spin class of #150). Nothing is
-#      posted either way, so the gate stays NONE ⇒ auto-merge REFUSEs (fail-closed).
+#      governance judgment. Its cause may be PERMANENT (E2BIG, missing binary, bad credential) or
+#      TRANSIENT (model API 5xx, rate limit, timeout, a killed run) and THIS HARNESS CANNOT TELL THEM
+#      APART — the reviewer's own stderr is reported so a human can, but the rc alone cannot. So the
+#      caller must do NEITHER extreme: not re-spin at sweep cadence with no signal (#155 R4; the
+#      silent-spin class of #150), and not park a host-GREEN PR on the FIRST one (a single blip would
+#      then strand it forever — nothing else re-reviews it; #156). It must retry a BOUNDED, SPACED number
+#      of times and SURFACE only when the failure survives them — which is exactly what bin/pr-poller.sh's
+#      REVIEW arm does (FITNESS_REVIEW_TRIES × FITNESS_RETRY_BACKOFF → a question carrying this stderr).
+#      Nothing is posted either way, so the gate stays NONE ⇒ auto-merge REFUSEs (fail-closed).
 #
 # Usage:
 #   fitness-review.sh <repo> <pr>              # dry-run: run the review, print the verdict, post nothing
@@ -241,7 +247,12 @@ if [ "$rc" -ne 0 ]; then
   # because it never got to. Say THAT, with its own stderr; never "the reviewer produced no verdict".
   log "reviewer FAILED TO RUN: '$FITNESS_CLAUDE' exited $rc — it was never able to judge $SLUG#$PR @ ${head_sha:0:7}. This is an INFRASTRUCTURE failure, not a verdict."
   say_stderr
-  log "posting nothing (fail-closed); merge stays blocked. Surface this — re-running it unchanged will fail identically."
+  # DO NOT ASSERT WHICH CLASS THIS IS. An E2BIG or a missing binary fails identically forever; an API
+  # 5xx or a timeout clears on its own. The rc cannot tell them apart (the stderr above can — for a
+  # human), so the CALLER bounds its retries and surfaces what survives them. Claiming "re-running this
+  # will fail identically" here was exactly the kind of asserted-not-proven line this harness exists to
+  # stop telling — and it made the poller park a GREEN PR on a single blip (#156).
+  log "posting nothing (fail-closed); merge stays blocked. rc 3 — the caller must retry this a BOUNDED number of times and surface the cause if it persists."
   exit 3
 fi
 verdict="$(printf '%s' "$review" | extract_verdict)"

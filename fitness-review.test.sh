@@ -20,10 +20,14 @@
 #   * The three failure events (could-not-exec / non-zero exit / ran-but-no-verdict) are asserted to
 #     produce THREE DIFFERENT log lines, each carrying the reviewer's own stderr — a harness that says
 #     "the reviewer produced no verdict" when the reviewer never ran is lying to its operator.
-#   * The poller's REVIEW arm is driven for real (bin/pr-poller.sh --once, twice) against a scripted
-#     reviewer outcome: rc 3 must SURFACE the cause and PARK the head; rc 1 (a retryable precondition)
-#     must do NEITHER — the discriminator that proves the park is bound to the un-runnable reviewer and
-#     not to "any failure".
+#   * The poller's REVIEW arm is driven for real (bin/pr-poller.sh --once, repeatedly) against a scripted
+#     reviewer outcome. rc 3 says "no verdict for this head" and CANNOT say whether the cause is permanent
+#     (E2BIG) or transient (an API 5xx), so the arm must do neither wrong thing (#156): it retries a
+#     BOUNDED, SPACED number of times — a transient failure that clears is reviewed and NEVER surfaces —
+#     and only a failure that SURVIVES them surfaces the real cause, ONCE, and stops re-running the
+#     reviewer on that head. A parked head is NOT acted-marker-parked: the remediation the question prints
+#     (re-run the harness by hand) posts a verdict the poller then ACTS on — proven by driving it. rc 1 (a
+#     retryable precondition) is the discriminator: it neither surfaces nor stops.
 #
 # Run:  bash fitness-review.test.sh   → exit 0 = all rows pass
 set -uo pipefail
@@ -189,7 +193,8 @@ ck "$(grep -qx "Fitness review: VERDICT PASS — head $SHA" "$CASE/out.log" && e
 done_case
 
 # ===================================================================================================
-# The poller's REVIEW arm: a reviewer that cannot run must SURFACE, not spin (#155 R4 / #150 R4).
+# The poller's REVIEW arm: a reviewer that cannot run must not SPIN (#155 R4 / #150 R4) — and must not
+# STRAND a host-GREEN PR on one transient blip either (#156). Bounded retry, then a question.
 # ===================================================================================================
 cat > "$BIN/gh-poller" <<'EOF'
 #!/usr/bin/env bash
@@ -202,7 +207,9 @@ case "${1:-} ${2:-}" in
   "pr view")
     case "$*" in
       *host-bot*)        printf '**Host live-gate (Gate B): VERDICT GREEN** — fedora-dev @ %s\n' "$FAKE_SHA";;
-      *fit-bot*)         : ;;                               # no fitness verdict yet → plan()=REVIEW
+      # FAKE_FIT empty → no fitness verdict yet → plan()=REVIEW. Set it to simulate a verdict that
+      # exists on the PR — e.g. the one an operator posts BY HAND after fixing a broken reviewer.
+      *fit-bot*)         [ -n "${FAKE_FIT:-}" ] && printf 'Fitness review: VERDICT %s — head %s\n' "$FAKE_FIT" "$FAKE_SHA"; : ;;
       *"--json files"*)  printf 'README.md\n';;
     esac ;;
   # flattened to ONE line: a surfaced question is multi-line (it quotes the reviewer's stderr), and the
@@ -220,31 +227,68 @@ exit "${FAKE_FITRC:-3}"
 EOF
 chmod +x "$BIN"/*
 
-poller_sweep(){ # runs one --once sweep against the same fake HOME (state persists across sweeps)
-  env PATH="$BIN:$PATH" HOME="$CASE/home" ACT_LOG="$ACT_LOG" FAKE_SHA="$SHA" \
+# TRIES/BACKOFF are the knobs under test — each row sets them explicitly; BACKOFF=0 makes the retry
+# schedule deterministic without sleeping, and one row pins the backoff itself.
+TRIES=3; BACKOFF=0; FITV=""
+poller_sweep(){ # <fitness-harness rc> — one --once sweep against the same fake HOME (state persists)
+  env PATH="$BIN:$PATH" HOME="$CASE/home" ACT_LOG="$ACT_LOG" FAKE_SHA="$SHA" FAKE_FIT="$FITV" \
       POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 \
       LG_HOST_LOGIN=host-bot FITNESS_LOGIN=fit-bot FITNESS_REVIEW="$BIN/fitness-stub" \
+      FITNESS_REVIEW_TRIES="$TRIES" FITNESS_RETRY_BACKOFF="$BACKOFF" \
       FAKE_FITRC="$1" bash "$POLLER" --once >> "$CASE/out.log" 2>&1
 }
-setup_poller_case(){ setup_case; cp "$BIN/gh-poller" "$BIN/gh"; }
-restore_gh(){ :; }   # each case re-copies the stub it needs
+setup_poller_case(){ setup_case; cp "$BIN/gh-poller" "$BIN/gh"; TRIES=3; BACKOFF=0; FITV=""; }
 runs(){ grep -c '^FITNESSRUN' "$ACT_LOG" 2>/dev/null || true; }
+asks(){ grep -c '^SURFACE.*could not produce a verdict' "$ACT_LOG" 2>/dev/null || true; }
 
-echo "== R4: a reviewer that cannot run SURFACES the real cause — ONCE — and the head is PARKED =="
-DESC="an un-runnable review surfaces and stops; it does not re-spin every sweep"; OK=1
-setup_poller_case
-poller_sweep 3
-poller_sweep 3                                        # a second sweep: the silent-spin the defect caused
+echo "== R4: a PERSISTENT failure is retried a BOUNDED number of times, then surfaced ONCE and stopped =="
+DESC="an un-runnable review surfaces its real cause once and stops; it never re-spins per sweep"; OK=1
+setup_poller_case; TRIES=2
+poller_sweep 3                                        # attempt 1/2 — no question yet: it may be a blip
+poller_sweep 3                                        # attempt 2/2 — exhausted: NOW it is a real failure
+poller_sweep 3                                        # the silent-spin the defect caused: must not re-run
+ck "$([ "$(runs)" -eq 2 ] && echo 1 || echo 0)" "the reviewer ran $(runs) times, want 2 (=FITNESS_REVIEW_TRIES) — the retry is not bounded by the try count"
 ck "$(grep -q '^SURFACE.*could not produce a verdict' "$ACT_LOG" && echo 1 || echo 0)" "the poller never surfaced the failed review — it would spin at sweep cadence with no signal"
 ck "$(grep -q '^SURFACE.*Argument list too long' "$ACT_LOG" && echo 1 || echo 0)" "the surfaced question does not carry the reviewer's REAL cause (its stderr)"
-ck "$([ "$(grep -c '^SURFACE' "$ACT_LOG")" -eq 1 ] && echo 1 || echo 0)" "the poller surfaced $(grep -c '^SURFACE' "$ACT_LOG") times — a question must be asked once per head, not per sweep"
-ck "$([ "$(runs)" -eq 1 ] && echo 1 || echo 0)" "the reviewer was re-run $(runs) times — an un-runnable review must NOT re-spend a bounded model run every sweep"
-ck "$(grep -q 'acted, parked' "$CASE/out.log" && echo 1 || echo 0)" "the head was not parked after the question was surfaced"
+ck "$([ "$(asks)" -eq 1 ] && echo 1 || echo 0)" "the poller asked $(asks) times — a question must be asked once per head, not per sweep"
+ck "$(grep -q 'PARKED' "$CASE/out.log" && echo 1 || echo 0)" "the review was not parked after the question was surfaced"
 done_case
 
-echo "== DISCRIMINATOR: a RETRYABLE precondition (rc 1) neither surfaces NOR parks — it retries =="
-DESC="the park is bound to the un-runnable reviewer (rc 3), not to 'any failure'"; OK=1
-setup_poller_case
+echo "== #156: a TRANSIENT failure that clears is REVIEWED — it never surfaces, and never strands the PR =="
+DESC="one model-API blip does not strand a host-GREEN PR (park-on-first-rc-3 did exactly that)"; OK=1
+setup_poller_case                                     # TRIES=3
+poller_sweep 3                                        # the blip: attempt 1/3, no question, not parked
+poller_sweep 0                                        # it clears — the reviewer runs and posts a verdict
+ck "$([ "$(runs)" -eq 2 ] && echo 1 || echo 0)" "the reviewer ran $(runs) times, want 2 — after ONE rc 3 the review must be retried, not abandoned"
+ck "$([ "$(asks)" -eq 0 ] && echo 1 || echo 0)" "a single transient failure asked a human a question — that is noise, and it strands the PR"
+ck "$(grep -q 'fitness posted' "$CASE/out.log" && echo 1 || echo 0)" "the recovered review never posted its verdict — the PR can never merge on this head"
+ck "$(grep -q 'acted, parked' "$CASE/out.log" && echo 0 || echo 1)" "the head was parked on the ACTED marker by a transient blip — nothing would ever re-review or merge it"
+done_case
+
+echo "== #156: the retries are SPACED — a backoff that has not elapsed spends no model run =="
+DESC="the bounded retry is spaced, so a 10s sweep cadence cannot burn the try budget in 30s"; OK=1
+setup_poller_case; TRIES=3; BACKOFF=9999
+poller_sweep 3                                        # attempt 1/3
+poller_sweep 3                                        # inside the backoff → must WAIT, not re-run
+ck "$([ "$(runs)" -eq 1 ] && echo 1 || echo 0)" "the reviewer ran $(runs) times, want 1 — the second attempt fired INSIDE the backoff window"
+ck "$([ "$(asks)" -eq 0 ] && echo 1 || echo 0)" "a question was asked while retries remain — the failure has not been shown to persist yet"
+ck "$(grep -q 'backing off' "$CASE/out.log" && echo 1 || echo 0)" "the sweep never said it was backing off — a waiting loop that says nothing is a silent one"
+done_case
+
+echo "== #156: the remediation the question prints is one the harness HONOURS =="
+DESC="a parked head still acts on a verdict posted BY HAND — it is not acted-marker-parked"; OK=1
+setup_poller_case; TRIES=1
+poller_sweep 3                                        # exhausted at once → question asked, review parked
+ck "$([ "$(asks)" -eq 1 ] && echo 1 || echo 0)" "the exhausted review did not ask its question"
+FITV=PASS                                             # the operator fixes the cause and re-runs the harness
+poller_sweep 3                                        # …its PASS is on the PR now. The poller must ACT.
+ck "$([ "$(runs)" -eq 1 ] && echo 1 || echo 0)" "the reviewer re-ran ($(runs) runs) on a parked head — the model spend must stay stopped"
+ck "$(grep -q 'fitness=PASS ⇒ MERGE' "$CASE/out.log" && echo 1 || echo 0)" "the hand-posted PASS was never routed — the poller printed a remediation it then refuses to honour (the head was parked on the acted marker)"
+done_case
+
+echo "== DISCRIMINATOR: a RETRYABLE precondition (rc 1) neither surfaces NOR stops — it retries =="
+DESC="the question is bound to the un-runnable reviewer (rc 3), not to 'any failure'"; OK=1
+setup_poller_case; TRIES=1                            # even with ONE try, rc 1 must not consume it
 poller_sweep 1
 poller_sweep 1
 ck "$(grep -q '^SURFACE' "$ACT_LOG" && echo 0 || echo 1)" "a retryable precondition surfaced a question to a human — that is noise, not signal"
