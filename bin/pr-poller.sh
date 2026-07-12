@@ -124,6 +124,22 @@ plan(){
   esac
 }
 
+# fix_cause <host> <fitness> -> HOST | FITNESS | UNKNOWN
+# WHICH gate sent this PR to the fixer. plan() returns FIX from TWO different routes — host RED and
+# fitness RETURN — and the fixer is a bounded `claude -p` that can only fix what it is TOLD. Feeding a
+# fitness RETURN the canned "host live-gate RED" line made it chase a build failure that never happened
+# (the build is GREEN on a RETURN), so it could never make progress and the PR parked on a FALSE
+# "blocked — host live-gate RED" surface. This is R6: "findings are generative — RETURN reasons feed
+# the fixer's next iteration". PURE + selftested, so a future plan() route cannot silently inherit the
+# wrong prompt: an unrecognised pairing is UNKNOWN, and the caller then refuses to guess.
+fix_cause(){
+  case "$1:$2" in
+    RED:*)    printf 'HOST';;                          # host verdict RED (fitness is not even read yet)
+    *:RETURN) printf 'FITNESS';;                       # host GREEN, reviewer wants rework
+    *)        printf 'UNKNOWN';;                       # not a FIX route → never guess a reason
+  esac
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -141,6 +157,24 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "green B escalate"   GREEN B   ESCALATE 1 PRESENT
   ck "green unknown tier" GREEN ""  PASS 1 MERGE          # ZERO-GATE: unknown tier no longer gates
   ck "green unknown fit"  GREEN B   WAT  1 PRESENT
+  # R6 — the fixer must be told WHICH gate failed. plan() returns FIX from two routes; fix_cause pins
+  # the mapping so a fitness RETURN can never again be handed a canned "host live-gate RED" prompt.
+  fc(){ local got; got="$(fix_cause "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — fix_cause($2,$3)=$got want $4"; fail=1; }; }
+  fc "RED → HOST"                  RED   NONE     HOST
+  fc "RED before fitness is read"  RED   ""       HOST
+  fc "GREEN+RETURN → FITNESS"      GREEN RETURN   FITNESS
+  fc "GREEN+PASS → never a FIX"    GREEN PASS     UNKNOWN
+  fc "GREEN+NONE → never a FIX"    GREEN NONE     UNKNOWN
+  # every plan()=FIX route must map to a KNOWN cause — the guard against a future route silently
+  # inheriting the wrong prompt (the exact defect this fixes). The host axis spans the UNKNOWN/absent
+  # tokens too (NONE = no verdict yet, WAT = an unrecognised one), so the claim the loop prints is the
+  # claim it actually tests: no host token whatsoever can reach the fixer without a truthful cause.
+  for h in RED GREEN NONE WAT ""; do for f in NONE PASS RETURN ESCALATE WAT ""; do
+    if [ "$(plan "$h" B "$f" 1)" = FIX ] && [ "$(fix_cause "$h" "$f")" = UNKNOWN ]; then
+      echo "FAIL: plan($h,$f)=FIX but fix_cause=UNKNOWN — the fixer would get no truthful reason"; fail=1
+    fi
+  done; done
+  echo "ok: every FIX route has a known cause"
   vg(){ local got; got="$(printf '%s' "$2" | host_verdict)"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
   vg "host green"  'Host live-gate (Gate B): VERDICT GREEN'                                 GREEN
   vg "host latest" $'…VERDICT RED\nHost live-gate (Gate B): VERDICT GREEN'                   GREEN
@@ -224,27 +258,47 @@ surface(){ # <pr> <sha> <kind> <message>
 }
 
 # Spawn ONE bounded fixer iteration on a RED (or fitness-RETURN) PR. Feature-branch only, no merge.
-run_fixer(){ # <pr> <headref> <sha> <reason>
-  local pr="$1" ref="$2" sha="$3" reason="$4"
-  local sig; sig="$(printf '%s' "$reason" | tr -cd '[:alnum:]' | tail -c 40)"
+# <cause> is HOST|FITNESS (from fix_cause) and <reason> is that gate's OWN text — the fixer is told the
+# truth about which gate failed and is given the findings it must actually address (R6).
+run_fixer(){ # <pr> <headref> <sha> <cause:HOST|FITNESS> <reason>
+  local pr="$1" ref="$2" sha="$3" cause="$4" reason="$5"
+  # Signature spans BOTH cause and reason: a host RED and a fitness RETURN on the same head are
+  # DIFFERENT failures and must not collide onto one no-progress signature.
+  local sig; sig="$(printf '%s%s' "$cause" "$reason" | tr -cd '[:alnum:]' | tail -c 40)"
   local sigfile="$STATE/fixsig-${pr}.last" prev=""; [ -f "$sigfile" ] && prev="$(cat "$sigfile")"
   # PROGRESS-BASED STOP (not a count cap): if we already ran a fixer for THIS exact failure signature
   # and the head has NOT advanced past what we fixed, we are not making progress → surface, don't churn.
   local lastfixed="$STATE/fixed-${pr}.sha"; local lf=""; [ -f "$lastfixed" ] && lf="$(cat "$lastfixed")"
   if [ "$sig" = "$prev" ] && [ "$sha" = "$lf" ]; then
-    surface "$pr" "$sha" "blocked" "the same failure persists after a fix attempt (no progress) — a human decision is needed. Reason: ${reason:0:400}"
+    surface "$pr" "$sha" "blocked" "the same failure persists after a fix attempt (no progress) — a human decision is needed. Failing gate: ${cause}. Detail: ${reason:0:400}"
     return 0
   fi
   printf '%s' "$sig" > "$sigfile"; printf '%s' "$sha" > "$lastfixed"
-  log "FIX $SLUG#$pr @ ${sha:0:7} ref=$ref — spawning bounded fixer (timeout ${FIXER_TIMEOUT}s)"
+  log "FIX $SLUG#$pr @ ${sha:0:7} ref=$ref cause=$cause — spawning bounded fixer (timeout ${FIXER_TIMEOUT}s)"
+  # The prompt must be TRUTHFUL about which gate failed. Telling a fitness-RETURNed PR that "the host
+  # live-gate returned a problem" sent the fixer hunting a build failure that does not exist (the build
+  # is GREEN on a RETURN) — it could not progress, and the PR parked on a false 'blocked'.
+  local what
+  if [ "$cause" = FITNESS ]; then
+    what="The build is GREEN. The INDEPENDENT FITNESS REVIEWER returned this head for rework — do NOT go
+looking for a build or live-gate failure; there isn't one. Address the reviewer's findings below. They are
+the reviewer's PROSE (advisory, not a machine signal): treat them as the requirements to satisfy, use your
+own judgment on HOW, and if you believe a finding is wrong, say so via FIXER_BLOCKED rather than
+half-fixing it."
+  else
+    what="The HOST LIVE-GATE returned RED — the candidate failed to build or failed its live probes.
+Address the failure below."
+  fi
   local prompt
   read -r -d '' prompt <<FIX_EOF || true
-You are the fedora-dev RED-fix iteration for PR $SLUG#$pr (branch: $ref). The host live-gate returned a
-problem. Your ONE job: make a MINIMAL, correct fix and push it to the FEATURE branch '$ref' so the host
-re-gates. HARD RULES: work only on '$ref'; NEVER merge, NEVER push or target main, NEVER touch the merge
-gate. If you cannot fix it (need a decision, missing access, or the approach is wrong), do NOT guess —
-end your reply with a line 'FIXER_BLOCKED: <one-line reason>' and push nothing. Otherwise fix, commit,
-and push to '$ref'. The failure the host reported:
+You are the fedora-dev fix iteration for PR $SLUG#$pr (branch: $ref). $what
+
+Your ONE job: make a MINIMAL, correct fix and push it to the FEATURE branch '$ref' so the gates re-run.
+HARD RULES: work only on '$ref'; NEVER merge, NEVER push or target main, NEVER touch the merge gate. If you
+cannot fix it (need a decision, missing access, or the approach is wrong), do NOT guess — end your reply
+with a line 'FIXER_BLOCKED: <one-line reason>' and push nothing. Otherwise fix, commit, and push to '$ref'.
+
+The findings you must address (from the ${cause} gate):
 
 $reason
 FIX_EOF
@@ -383,8 +437,43 @@ sweep_repo(){
     case "$action" in
       NOOP) : ;;
       FIX)
-        local reason; reason="$(printf '%s' "$comments" | grep -A3 'VERDICT RED' | tail -3)"
-        run_fixer "$pr" "$ref" "$sha" "${reason:-host live-gate RED; see the host verdict comment on the PR}"
+        # R6 — FINDINGS ARE GENERATIVE. plan() routes FIX from TWO causes; derive the reason from the one
+        # that ACTUALLY fired, and in BOTH cases from that gate's OWN COMMENT BODY.
+        #
+        # TRUST BOUNDARY (G2), and it holds for both arms: the VERDICT is read from LINE 1 ONLY (the
+        # machine-owned header, sha-bound — that is what routed us here and what $comments holds). The
+        # fetches below pull the gate's FULL comment body purely as PROMPT material for the fixer, bound
+        # to THIS head's sha + that gate's own login, so prose can never flip a gate — it can only say
+        # what to fix, and a stale verdict's text can never drive a fresh head.
+        #
+        # NB the reason CANNOT come from $comments: that stream is line-1-only (see the sha-binding
+        # fetch above), so grepping it yields the verdict HEADER and never the failure detail. That was
+        # the whole defect — a fitness RETURN found no host 'VERDICT RED' line at all and fell back to a
+        # canned "host live-gate RED" (sending the fixer after a build failure that never happened),
+        # while a host RED handed the fixer its own verdict token and called it "the findings".
+        local cause reason; cause="$(fix_cause "$host" "$fit")"
+        case "$cause" in
+          HOST)
+            # `contains`, NOT `startswith`: the host header is markdown-bold (`**Host live-gate …**`),
+            # so a startswith("Host live-gate") match silently returns EMPTY. Verified against the live
+            # comment. The candidate log's failure detail sits at the END of the body → tail, not head.
+            reason="$(gh pr view "$pr" --repo "$SLUG" --json comments \
+                       -q ".comments[] | select(.author.login==\"$LG_HOST_LOGIN\") | .body
+                           | select(split(\"\n\")[0] | contains(\"@ $sha\") and contains(\"VERDICT RED\"))" \
+                       2>/dev/null | tail -c 6000)"
+            reason="${reason:-the host live-gate reported RED; see the host verdict comment on the PR}" ;;
+          FITNESS)
+            reason="$(gh pr view "$pr" --repo "$SLUG" --json comments \
+                       -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | .body
+                           | select(startswith(\"Fitness review: VERDICT RETURN\")) | select(contains(\"head $sha\"))" \
+                       2>/dev/null | head -c 6000)"
+            reason="${reason:-the independent fitness review RETURNed this head; see its verdict comment on the PR}" ;;
+          *)
+            log "#$pr: FIX routed with no known cause (host=$host fitness=$fit) — refusing to invent a reason"
+            surface "$pr" "$sha" "blocked" "the poller routed this PR to the fixer but cannot tell which gate failed (host=$host, fitness=$fit) — a human decision is needed."
+            continue ;;
+        esac
+        run_fixer "$pr" "$ref" "$sha" "$cause" "$reason"
         ;;
       REVIEW)
         [ -f "$done" ] && continue
