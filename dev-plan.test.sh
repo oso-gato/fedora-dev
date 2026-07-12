@@ -8,9 +8,11 @@ PLAN="$HERE/bin/dev-plan.sh"
 ROOT="$(mktemp -d)"; trap 'rm -rf "$ROOT"' EXIT
 BIN="$ROOT/bin"; mkdir -p "$BIN"
 
-# gh stub: serve the spec's title/body/labels/comments (author-TSV) + the collaborator-permission API;
-# log issue creates + comments; never touch GitHub. FAKE_CONFIRMED: 1 = maintainer line-1 token,
-# 2 = NON-maintainer line-1 token, 3 = maintainer comment WITHOUT a line-1 token.
+# gh stub: serve the spec's title/body/labels/comments (author-TSV), the issue TIMELINE (who applied the
+# `approved` label) + the collaborator-permission API; log issue creates, label creates + comments; never
+# touch GitHub. FAKE_CONFIRMED: 1 = maintainer line-1 token, 2 = NON-maintainer line-1 token, 3 =
+# maintainer comment WITHOUT a line-1 token. FAKE_APPROVED_BY = who applied the label (default the
+# maintainer). FAKE_CREATE_FAIL: 1 = the 2nd+ create fails (PARTIAL), all = EVERY create fails (TOTAL).
 cat > "$BIN/gh" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -29,11 +31,15 @@ case "${1:-} ${2:-}" in
     esac ;;
   "issue list") printf '%s\n' "${FAKE_EXISTING:-}";;
   "issue create")
+    # TOTAL failure (all) models the repo-agnostic hazard: a repo with no `backlog` label / no issue-write
+    # fails EVERY create identically. PARTIAL (1) fails only the 2nd+ — a transient blip.
+    if [ "${FAKE_CREATE_FAIL:-0}" = all ]; then printf 'CREATEFAIL %s\n' "$*" >> "$GH_LOG"; exit 1; fi
     if [ "${FAKE_CREATE_FAIL:-0}" = 1 ] && grep -q '^CREATE ' "$GH_LOG" 2>/dev/null; then
       printf 'CREATEFAIL %s\n' "$*" >> "$GH_LOG"; exit 1
     fi
     printf 'CREATE %s\n' "$*" >> "$GH_LOG"; printf 'https://github.com/oso-gato/fedora-dev/issues/900\n';;
   "issue comment") printf 'COMMENT %s\n' "$*" >> "$GH_LOG";;
+  "label create") printf 'LABELCREATE %s\n' "$*" >> "$GH_LOG";;
   "api "*)
     # Log every permission lookup: it is the DISCRIMINATOR the tests assert on. A line-1 token from a
     # non-maintainer MUST trigger a role fetch and then be rejected; maintainer PROSE must never reach
@@ -41,6 +47,9 @@ case "${1:-} ${2:-}" in
     # it" from "never read it" — and would pass vacuously.
     printf 'API %s\n' "$*" >> "$GH_LOG"
     case "$*" in
+      # WHO applied the `approved` label — the `labeled` timeline event the label gate now binds to a
+      # maintainer role. Presence of the label alone must authorize NOTHING.
+      *"/timeline"*) printf '%s\n' "${FAKE_APPROVED_BY:-arthur}";;
       *"/collaborators/arthur/permission"*) printf 'admin';;
       *"/collaborators/"*) printf 'read';;
     esac ;;
@@ -109,8 +118,13 @@ ck_log(){ # <desc> <present|absent> <pattern>
   fi
 }
 
-echo "== confirmed (approved label) + planner writes 2 → 2 backlog issues + summary =="
+echo "== confirmed (MAINTAINER-applied approved label) + planner writes 2 → 2 backlog issues + summary =="
 run "plans a confirmed objective" "FAKE_APPROVED=1 FAKE_PLAN=two" CREATE 2 marker
+# DISCRIMINATOR: the label was not merely SEEN — the gate resolved WHO applied it and role-checked him.
+ck_log "  └─ and it resolved WHO applied the label (timeline)" present 'API .*issues/500/timeline'
+ck_log "  └─ and it role-checked that applier" present 'API .*collaborators/arthur/permission'
+# create-on-use: dev-plan is repo-agnostic, so it must not assume the label pre-exists in the repo.
+ck_log "  └─ and it created the backlog label on use" present 'LABELCREATE'
 echo "== confirmed via MAINTAINER line-1 CONFIRMED comment (no label) also plans =="
 run "maintainer CONFIRMED authorizes" "FAKE_APPROVED=0 FAKE_CONFIRMED=1 FAKE_PLAN=two" CREATE 2 marker
 ck_log "  └─ and it VERIFIED the author's role via the API" present 'API .*collaborators/arthur/permission'
@@ -132,6 +146,17 @@ run "prose is not a confirmation" "FAKE_APPROVED=0 FAKE_CONFIRMED=3 FAKE_PLAN=tw
 # the permission API. This is what makes the token position-bound, not just author-bound.
 ck_log "  └─ and line-1 killed it BEFORE any role lookup" absent 'API .*collaborators/'
 
+# --- The LABEL path is the other half of the anchor. Applying a label needs only triage/write — which
+# --- every fleet App identity holds (dev-author adds `live-validate`; dev-plan itself adds `backlog`) —
+# --- so a PRESENCE-only check let the autonomous side self-authorize an unratified objective with one
+# --- `gh issue edit --add-label approved`. The APPLIER must be maintainer-bound, exactly like the
+# --- comment's author. This is the loop's only human anchor; it cannot rest on an unauthenticated label.
+echo "== NON-maintainer applies the approved label → INERT (applier-bound) =="
+run "a non-maintainer's label cannot confirm" "FAKE_APPROVED=1 FAKE_APPROVED_BY=randomer FAKE_CONFIRMED=0 FAKE_PLAN=two" COMMENT-ONLY "" nomarker
+# DISCRIMINATOR: it must have RESOLVED the applier and REJECTED him on role — not merely failed to see
+# the label (which is how a presence-only check would also "pass" this row).
+ck_log "  └─ and it REJECTED the applier on role (not blind to the label)" present 'API .*collaborators/randomer/permission'
+
 # --- Both-end rigor: a planner killed mid-write (timeout) leaves feature files but NO PLAN_DONE. Filing
 # --- them would ship a silently TRUNCATED backlog behind a permanent marker.
 echo "== planner died mid-plan (files, no PLAN_DONE) → files NOTHING, no marker =="
@@ -144,6 +169,13 @@ run "partial create defers" "FAKE_APPROVED=1 FAKE_PLAN=two FAKE_CREATE_FAIL=1" D
 
 echo "== re-run after a defer: already-filed features are DEDUPED, not duplicated =="
 FAKE_EXISTING='Feature one' run "dedup skips already-filed" "FAKE_APPROVED=1 FAKE_PLAN=two" CREATE 1 marker
+
+# --- TOTAL create failure is NOT a transient blip: a repo with no `backlog` label or no issue-write fails
+# --- EVERY create identically. Deferring that silently spins forever with nobody ever told — so it must
+# --- surface a dev-task QUESTION (and still never write the .planned marker, so a fixed repo re-plans).
+echo "== EVERY create fails → surfaces a question (not a silent, endless defer) =="
+run "total create failure asks a human" "FAKE_APPROVED=1 FAKE_PLAN=two FAKE_CREATE_FAIL=all" COMMENT-ONLY "" nomarker
+ck_log "  └─ and the comment is a BLOCKED dev-task question" present 'COMMENT.*BLOCKED'
 
 echo
 echo "dev-plan-dryrun: $pass passed, $fail failed"

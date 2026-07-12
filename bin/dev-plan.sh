@@ -5,14 +5,21 @@
 # one per feature — the work-list the dev-loop driver (P3) then authors (R3) and the pipeline ships. It
 # is the front of the loop: after this, the human is out until an ESCALATE question (R13).
 #
-# R1 discipline — it plans ONLY the human-confirmed spec: the spec issue must carry the `approved` label
-# OR a MAINTAINER `CONFIRMED` comment; an unconfirmed spec is refused (the confirmed set is what fitness
-# later grades against, so planning an unconfirmed one would ground the whole loop in unratified intent).
-# The comment gate is bound like every fleet trust anchor (the auto-merge G2 discipline): the token must
-# OPEN line 1 of the comment (machine-owned position — a quoted or mid-prose token never acts) AND the
-# comment author must hold admin|maintain on the repo (permission-checked against the GitHub API, never
-# text-trusted; the label path is already permission-gated by GitHub itself). Any check unfetchable →
-# not confirmed (fail-closed).
+# R1 discipline — it plans ONLY the human-confirmed spec: the spec issue must carry a MAINTAINER-APPLIED
+# `approved` label OR a MAINTAINER `CONFIRMED` comment; an unconfirmed spec is refused (the confirmed set
+# is what fitness later grades against, so planning an unconfirmed one would ground the whole loop in
+# unratified intent). This confirmation is the loop's ONLY remaining human anchor, so BOTH paths are
+# MAINTAINER-BOUND exactly like every other fleet trust anchor (the auto-merge G2 discipline) — the
+# acting identity is resolved from the GitHub permission API and must hold admin|maintain; nothing is
+# text-trusted or mere-presence-trusted:
+#   * LABEL  — the label's PRESENCE proves nothing: applying one needs only triage/write, which every
+#     fleet App identity holds (dev-author adds `live-validate`, dev-plan itself adds `backlog`), so a
+#     presence-only check would let the autonomous side self-authorize an unratified objective with one
+#     `gh issue edit --add-label approved`. We resolve WHO applied it (the last `labeled` timeline event
+#     for that label) and bind THAT actor to a maintainer role.
+#   * COMMENT — the token must OPEN line 1 (machine-owned position: a quoted or mid-prose token never
+#     acts) AND the comment's author must be a maintainer.
+# Anything unfetchable (labels, timeline, role) ⇒ NOT confirmed (fail-closed).
 #
 # DETERMINISM split (design law): the JUDGMENT — "what features does this objective decompose into" — is
 # ONE bounded `claude -p`, which WRITES each feature as a file (never creates issues itself). The ACTION
@@ -112,7 +119,24 @@ if [ -f "$marker" ]; then log "spec $SLUG#$SPEC already planned — skipping (id
 title="$(gh issue view "$SPEC" --repo "$SLUG" --json title -q .title 2>/dev/null)" \
   || { log "cannot read spec $SLUG#$SPEC (fail-closed)"; exit 2; }
 body="$(gh issue view "$SPEC" --repo "$SLUG" --json body -q .body 2>/dev/null)"
-has_appr=0; gh issue view "$SPEC" --repo "$SLUG" --json labels -q '.labels[].name' 2>/dev/null | grep -qx "$APPROVED_LABEL" && has_appr=1
+# LABEL gate, APPLIER-BOUND: presence alone is forgeable by any write/triage identity (incl. the fleet
+# Apps), so resolve WHO applied it — the LAST `labeled` timeline event for this label — and bind that
+# actor to admin|maintain. Unfetchable timeline / non-maintainer applier ⇒ inert (fail-closed).
+has_appr=0
+if gh issue view "$SPEC" --repo "$SLUG" --json labels -q '.labels[].name' 2>/dev/null | grep -qx "$APPROVED_LABEL"; then
+  appr_by="$(gh api "repos/$SLUG/issues/$SPEC/timeline" --paginate \
+               -q '.[] | select(.event == "labeled" and .label.name == "'"$APPROVED_LABEL"'") | .actor.login' 2>/dev/null | tail -1)"
+  if [ -z "$appr_by" ]; then
+    log "'$APPROVED_LABEL' is present but WHO applied it is unfetchable — inert (fail-closed)"
+  else
+    role="$(gh api "repos/$SLUG/collaborators/$appr_by/permission" -q .role_name 2>/dev/null)"
+    if [ "$(role_can_confirm "$role")" = 1 ]; then
+      has_appr=1; log "CONFIRMED by maintainer @$appr_by ('$APPROVED_LABEL' label; role: $role)"
+    else
+      log "ignoring '$APPROVED_LABEL' applied by @$appr_by (role: ${role:-unfetchable} — not a maintainer)"
+    fi
+  fi
+fi
 # Comment gate, anchor-bound (auto-merge G2 discipline): only LINE 1 of each comment is read (machine-
 # owned position), and it acts only when its author holds admin|maintain on the repo — verified against
 # the GitHub permission API per author, fail-closed (unfetchable role ⇒ not a maintainer ⇒ inert).
@@ -130,8 +154,8 @@ if [ "$has_appr" != 1 ]; then
              -q '.comments[] | [.author.login, (.body | split("\n")[0])] | @tsv' 2>/dev/null)
 fi
 if [ "$(is_confirmed "$has_appr" "$has_conf")" != CONFIRMED ]; then
-  log "spec $SLUG#$SPEC is NOT confirmed (needs the '$APPROVED_LABEL' label or a maintainer line-1 CONFIRMED comment) — refusing"
-  gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → refused:** this objective is not yet confirmed. Add the \`$APPROVED_LABEL\` label, or have a repo maintainer post a comment whose FIRST line starts with \`CONFIRMED\`, to authorize planning (R1)." >/dev/null 2>&1 || true
+  log "spec $SLUG#$SPEC is NOT confirmed (needs a MAINTAINER-applied '$APPROVED_LABEL' label or a maintainer line-1 CONFIRMED comment) — refusing"
+  gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → refused:** this objective is not yet confirmed. A repo MAINTAINER (admin|maintain) must either apply the \`$APPROVED_LABEL\` label or post a comment whose FIRST line starts with \`CONFIRMED\`, to authorize planning (R1). A label applied by a non-maintainer identity does not authorize anything." >/dev/null 2>&1 || true
   exit 3
 fi
 
@@ -188,6 +212,13 @@ fi
 existing="$(gh issue list --repo "$SLUG" --label "$BACKLOG_LABEL" --state all --limit 200 \
               --json title -q '.[].title' 2>/dev/null)" \
   || { log "cannot list existing '$BACKLOG_LABEL' issues (fail-closed — filing nothing, marker not written)"; exit 6; }
+# CREATE-ON-USE the backlog label (the host-ticket.sh precedent): dev-plan is repo-agnostic, and a fleet
+# repo need not already carry '$BACKLOG_LABEL' (fedora-bootstrap does not). `gh issue create --label` HARD-
+# FAILS on an unknown label, so without this every create fails in such a repo and the run defers forever,
+# silently. Best-effort: if the label already exists (or we lack label-write), the creates below decide.
+gh label create "$BACKLOG_LABEL" --repo "$SLUG" --color 0e8a16 \
+   --description "actionable feature ticket — dev-plan (R2) files it, dev-loop authors it" --force >/dev/null 2>&1 || true
+
 created=(); failed=0
 for fpath in "${files[@]}"; do
   ftitle="$(feature_title "$fpath")"; [ -n "$ftitle" ] || continue
@@ -201,12 +232,27 @@ for fpath in "${files[@]}"; do
   [ -n "$url" ] && { created+=("$url"); log "  filed backlog: $url"; } \
     || { failed=$((failed+1)); log "  WARN: failed to file '$ftitle'"; }
 done
-# ANY create failure → DEFER, marker NOT written (defers, never drops): the next run re-plans and the
-# title dedup above re-files only what is missing. No comment — transient API failure needs no human.
+# TOTAL failure (nothing filed at all) → NOT a transient blip: a missing/unwritable label, lost issue-write
+# access, or an issues-disabled repo fails EVERY create identically, and a silent defer would spin that
+# forever with no human ever told. Surface it as a dev-task QUESTION — ONCE (the .create-failed marker
+# stops a timer re-asking every pass; it is cleared the moment a create succeeds) — and leave the .planned
+# marker unwritten so a fixed repo re-plans cleanly. Every not-actionable outcome is a question to a human.
+askmark="$STATE/${REPO}-${SPEC}.create-failed"
+if [ "$failed" -gt 0 ] && [ "${#created[@]}" -eq 0 ]; then
+  log "every feature create FAILED ($failed) — surfacing a question, marker NOT written"
+  if [ ! -f "$askmark" ]; then
+    gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → needs a decision (BLOCKED):** the objective decomposed into $failed feature(s), but EVERY \`gh issue create\` failed — so no backlog issues were filed. Likely the \`$BACKLOG_LABEL\` label cannot be created, or issue-write access to this repo was lost. A maintainer should check the repo's issue permissions; planning re-runs cleanly once fixed."$'\n\n<sub>autonomous planner (R2). A dev-task question, not an approval request.</sub>' >/dev/null 2>&1 \
+      && : > "$askmark" || log "WARN: could not post the create-failure question"
+  fi
+  exit 6
+fi
+# PARTIAL failure → DEFER, marker NOT written (defers, never drops): the next run re-plans and the title
+# dedup above re-files only what is missing. No comment — a partial blip is transient and needs no human.
 if [ "$failed" -gt 0 ]; then
   log "$failed feature create(s) failed — DEFERRED, marker NOT written (${#created[@]} filed this run will be dedup-skipped on retry)"
   exit 6
 fi
+rm -f "$askmark"   # creates work again — a future TOTAL failure may ask afresh
 
 # 4) AUDIT — summarise on the spec issue (R5) + mark planned (idempotent) — only on a COMPLETE plan.
 if [ "${#created[@]}" -gt 0 ]; then
