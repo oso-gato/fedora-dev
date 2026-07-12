@@ -155,14 +155,32 @@ NOT reasons to engage the human: status-confirmation, option-shopping, "which sh
    - RULE: a DIFFERENT agent-context than the author MUST score the change before it is presented to
      Arthur OR auto-merged. The author MUST NOT be its own sole judge.
    - INPUT: the change + the requirements + `GOVERNANCE.md` (human expansion).
-   - THREE QUESTIONS (all must pass):
-     - Q1 ASKED-FOR — maps to a stated requirement. Else → scope-creep → RETURN.
-     - Q2 NON-CONTRADICT — does not satisfy one requirement by breaking another. Else → RETURN.
+   - THREE QUESTIONS (each is ASKED; severity — below — decides what a finding DOES):
+     - Q1 ASKED-FOR — maps to a stated requirement; no unrequested surface.
+     - Q2 NON-CONTRADICT — does not satisfy one requirement by breaking another.
      - Q3 FIT — advances the WHOLE objective AND satisfies EVERY doctrine mandate (checklist, the
-       DOCTRINE block at top). Any mandate violated → FAIL Q3 → RETURN.
-   - OUTCOME (exactly one): PASS (all three) → route by TIER (below). RETURN (Q2 or Q3 fails) → back to
-     the author to rework; Arthur is NOT shown it. ESCALATE (fit genuinely ambiguous) → ask Arthur a
-     question; NOT a merge button.
+       DOCTRINE block at top).
+   - **SEVERITY — MVP-FIRST** (Arthur's decision 2026-07-12, ledgered in `GOVERNANCE.md` §6(d)):
+     *"Get it to work first. Where fitness finds something that could be better or improved but is NOT
+     blocking, we continue to build and you make a note of it — later, when we ship a finished function
+     or feature, we revisit and close those loops. Build your minimum viable product and prove your
+     feature first."* A finding under ANY of Q1-Q3 **BLOCKS** only if it makes the change:
+     - **(a) INCORRECT** — it does not do what it claims; the stated feature is broken.
+     - **(b) UNSAFE** — weakens/deletes a guard, exposes a credential, enables an unsafe merge, breaks
+       the fail-closed posture or the merge-trust boundary (G1/G2, author≠judge), or removes recoverability.
+     - **(c) UNTRUE** — ships a false claim: a doc row, code comment, log line or test asserting
+       behaviour the code does not have (a test that passes against the pre-fix code is untrue).
+     Everything else is a **NOTE**, recorded on a PASS under `## NOTES (non-blocking — follow-ups)` and
+     revisited after ship. WHY: an adversarial reviewer can always find something, so a rubric where any
+     shortfall RETURNs has **no convergence criterion** — and because each round yields a new failure
+     signature on a new head, the R13 no-progress stop can never fire. Observed 2026-07-12: seven
+     review+fix rounds on one PR, each costing a full model review AND a full model fix. An endless
+     RETURN loop over non-blocking polish is itself a doctrine failure (rabbit-hole) and makes the R14
+     unattended proof unpassable.
+   - OUTCOME (exactly one): PASS (works, safe, honest — non-blocking findings recorded as NOTES) → route
+     by TIER (below). RETURN (≥1 finding is INCORRECT/UNSAFE/UNTRUE — name which) → back to the author to
+     rework; Arthur is NOT shown it. ESCALATE (fit genuinely ambiguous) → ask Arthur a question; NOT a
+     merge button.
    - NOTE [rationale]: author self-review is unreliable; during this apparatus's construction, defects
      that author-confidence had shipped to a branch were caught only by an independent pass.
 
