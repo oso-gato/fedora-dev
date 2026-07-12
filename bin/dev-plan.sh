@@ -29,18 +29,34 @@
 #   dev-plan.sh <repo> <spec-issue#>   plan the confirmed objective into backlog feature issues
 #   dev-plan.sh --selftest             exercise the pure helpers (no gh / claude / network)
 #
-# NO LOCAL STATE THAT IS THE SOLE RECORD OF A FACT (spec #135's design law: *no local state anywhere —
-# every component resumes by re-reading GitHub*; R5: issues/PRs are the sole IPC, WAL and audit log). The
-# one marker left — `.planned` — is a pure CACHE: delete it and the GitHub-derived guards (the existing-
-# title dedup, the confirmation gate) still produce correct behaviour; it only saves a re-plan. The
-# "already asked about the create failure" fact is NOT cached anywhere — it is DERIVED from the spec
-# issue's own comment stream (asked_already, below), so a wiped box re-reads it from the bus (R14).
+# NO LOCAL STATE — THE PLANNER HOLDS NONE (spec #135's design law: *no local state anywhere — every
+# component resumes by re-reading GitHub*; R5: issues/PRs are the sole IPC, WAL and audit log; R14's
+# E2E-KILL: a box killed and wiped mid-work resumes FROM THE BUS ALONE). Every fact this planner acts on
+# is re-derived from the spec issue's own COMMENT STREAM each run — there is nothing on disk to lose:
+#   * ALREADY PLANNED  ⟺  this box's own line-1-anchored `planned:` SUMMARY is on the issue (planned_
+#     already). That comment is not decoration — it IS the tombstone the old `.planned` file used to be.
+#     It has to be, because the title dedup that would otherwise catch a re-plan is an EXACT-title match
+#     against a NON-DETERMINISTIC model: a wiped box re-running the planner would re-word half the
+#     features and file a fresh set of near-duplicate backlog issues, which dev-loop would then author
+#     into duplicate PRs. Fail-CLOSED: an unreadable comment stream means we cannot prove the spec is not
+#     already planned, so we refuse rather than risk that duplicate plan.
+#   * ALREADY ASKED    ⟺  the question itself is the NEWEST comment (asked_already) — so a re-run stays
+#     quiet, and a reply un-mutes it.
+# Both are IDENTITY- + LINE-1-bound (the auto-merge G2 discipline): a stranger pasting an anchor cannot
+# forge either fact.
 #
 # ENV: ORG (default oso-gato); BACKLOG_LABEL (default backlog); APPROVED_LABEL (default approved);
 #      PLAN_CLAUDE (default "claude -p", overridable for the mock test); PLAN_TIMEOUT (default 1800);
-#      MAX_FEATURES (cap the plan size, default 8); DEV_PLAN_STATE (dir for the .planned re-plan cache);
-#      DEV_LOGIN (this box's App identity, whose own questions it recognises on the bus — default
-#      oso-gato-nox-claudebox; empty ⇒ it cannot recognise them and re-asks, never silently stays mute).
+#      MAX_FEATURES (cap the plan size, default 8 — a CAP THAT DEFERS: the overflow is reported on the
+#      bus and the spec is left unplanned, never silently dropped);
+#      DEV_LOGIN (this box's App identity, whose own comments it recognises on the bus — default
+#      oso-gato-nox-claudebox; empty ⇒ it can recognise neither, so it re-asks and refuses to claim a
+#      spec is planned: fail-safe toward telling a human, fail-closed against a duplicate plan).
+#
+# EXIT: 0 planned (or already planned) · 2 spec/bus unreadable · 3 unconfirmed · 4 planner BLOCKED
+#       5 no features · 6 create failed (total or partial → deferred) · 7 no PLAN_DONE sentinel
+#       8 plan exceeded MAX_FEATURES (the surplus is deferred, reported on the bus, spec left unplanned)
+#       9 filed, but the `planned:` summary could not be posted → deferred (the bus is the only record).
 set -uo pipefail
 
 ORG="${ORG:-oso-gato}"
@@ -49,15 +65,16 @@ APPROVED_LABEL="${APPROVED_LABEL:-approved}"
 PLAN_CLAUDE="${PLAN_CLAUDE:-claude -p}"
 PLAN_TIMEOUT="${PLAN_TIMEOUT:-1800}"
 MAX_FEATURES="${MAX_FEATURES:-8}"
-STATE="${DEV_PLAN_STATE:-$HOME/.local/state/dev-plan}"
 DEV_LOGIN="${DEV_LOGIN-oso-gato-nox-claudebox}"
 
-# The machine-owned line-1 anchor of the ISSUE-CREATE-FAILURE question. It is deliberately DISTINCT from
-# the other `**dev-plan → needs a decision (BLOCKED):**` questions (planner-blocked, no-sentinel,
-# no-features): those are posted on paths that exit BEFORE the create step, so a generic prefix would let
-# an OLD planner-blocked question suppress a NEW create-failure question — the run's only way to tell a
-# human that nothing can be filed at all. Its own anchor makes the derivation unambiguous.
+# The machine-owned line-1 anchors. Each question gets its OWN anchor rather than sharing the generic
+# `**dev-plan → needs a decision (BLOCKED):**` prefix of the early-exit questions (planner-blocked,
+# no-sentinel, no-features): those are posted on paths that exit BEFORE the create step, so a shared
+# prefix would let a STALE one of them suppress a LATER, different question — the run's only way to tell
+# a human that nothing can be filed at all, or that part of the plan did not fit under the cap.
+PLANNED_ANCHOR='^\*\*dev-plan → planned:\*\*'
 CREATE_FAIL_ANCHOR='^\*\*dev-plan → needs a decision \(BLOCKED, issue-create failed\):\*\*'
+CAPPED_ANCHOR='^\*\*dev-plan → needs a decision \(BLOCKED, plan exceeded MAX_FEATURES\):\*\*'
 
 log(){ printf '[%s] dev-plan: %s\n' "$(date -u +%H:%M:%S 2>/dev/null || echo --:--:--)" "$*" >&2; }
 
@@ -81,18 +98,42 @@ role_can_confirm(){
   case "$1" in admin|maintain) printf 1;; *) printf 0;; esac
 }
 
-# asked_already <dev-login> <newest-comment-author> <newest-comment-line-1> → 1 iff the spec issue's
-# NEWEST comment is the create-failure question THIS box already posted — the ask-once gate, DERIVED from
-# the bus instead of a local marker (no local state: a wiped box must not re-ask, and a box that never
-# asked must). Identity-bound + line-1-anchored (the auto-merge G2 discipline used by the gate above): a
-# stranger pasting the anchor cannot mute the question, and a quoted marker is inert. Anything else — a
-# later reply, a later `planned:` summary from a run whose creates worked, an unreadable comment — reads
-# as NOT-asked, so we ask: fail-safe toward telling a human, never toward silence.
+# asked_already <dev-login> <newest-comment-author> <newest-comment-line-1> <anchor> → 1 iff the spec
+# issue's NEWEST comment is the question THIS box already posted under <anchor> — the ask-once gate,
+# DERIVED from the bus instead of a local marker (no local state: a wiped box must not re-ask, and a box
+# that never asked must). Identity-bound + line-1-anchored (the auto-merge G2 discipline used by the gate
+# above): a stranger pasting the anchor cannot mute the question, and a quoted marker is inert. Anything
+# else — a later reply, a later `planned:` summary from a run whose creates worked, an unreadable comment
+# — reads as NOT-asked, so we ask: fail-safe toward telling a human, never toward silence.
 asked_already(){
-  local me="$1" who="$2" line1="$3"
+  local me="$1" who="$2" line1="$3" anchor="$4"
   [ -n "$me" ] && [ "$who" = "$me" ] || { printf 0; return; }
-  printf '%s' "$line1" | grep -qE "$CREATE_FAIL_ANCHOR" && printf 1 || printf 0
+  printf '%s' "$line1" | grep -qE "$anchor" && printf 1 || printf 0
 }
+
+# planned_already <dev-login> <bus-tsv> → 1 iff THIS box's line-1-anchored `planned:` summary is ANYWHERE
+# in the spec issue's comment stream. This is the idempotency tombstone (it replaces the `.planned` file):
+# the summary comment is the sole, GitHub-resident record that this objective was decomposed.
+# WHY ANYWHERE, not newest-only (unlike asked_already): later comments legitimately land on a planned spec
+# (a maintainer's reply, a dev-author question), and a newest-only read would then see "not planned" and
+# re-plan — the exact duplicate-filing hazard this exists to stop. Identity-bound by an EXACT login match
+# (no regex, so no injection) + line-1-anchored. An empty $DEV_LOGIN can prove nothing ⇒ 0, and the caller
+# refuses to plan rather than risk a duplicate (fail-closed — the opposite direction from asked_already,
+# because here the unsafe outcome is a duplicate plan, not an extra question).
+planned_already(){
+  local me="$1" who line1
+  [ -n "$me" ] || { printf 0; return; }
+  while IFS=$'\t' read -r who line1; do
+    [ "$who" = "$me" ] || continue
+    printf '%s' "$line1" | grep -qE "$PLANNED_ANCHOR" && { printf 1; return; }
+  done <<<"$2"
+  printf 0
+}
+
+# drop_report <dropped-title…> → the bus-visible list of features the cap did NOT file. The titles go ON
+# THE BUS precisely because the planner's $OUTDIR is a mktemp the EXIT trap deletes: without this, the
+# dropped features exist nowhere at all once the run ends.
+drop_report(){ printf -- '- %s\n' "$@"; }
 
 # feature_title <feature-file> → line 1 with a leading '# ' stripped (the issue title).
 feature_title(){ head -1 "$1" | sed -E 's/^#[[:space:]]*//'; }
@@ -125,15 +166,31 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "maintain confirms"            "$(role_can_confirm maintain)" "1"
   ck "write cannot (fleet Apps)"    "$(role_can_confirm write)" "0"
   ck "empty/unknown cannot"         "$(role_can_confirm '')" "0"
-  echo "== asked_already (create-failure ask-once, DERIVED from the bus — no local marker) =="
+  echo "== asked_already (ask-once, DERIVED from the bus — no local marker) =="
   CFQ='**dev-plan → needs a decision (BLOCKED, issue-create failed):** every create failed.'
-  ck "our own create-failure question is newest → already asked" "$(asked_already me me "$CFQ")" "1"
-  ck "a reply came after it → ask again"        "$(asked_already me arthur 'fixed the label')" "0"
-  ck "no comments at all → ask"                 "$(asked_already me '' '')" "0"
-  ck "a stranger forging the anchor cannot mute us" "$(asked_already me randomer "$CFQ")" "0"
+  CAP='**dev-plan → needs a decision (BLOCKED, plan exceeded MAX_FEATURES):** 5 features, cap 3.'
+  ck "our own create-failure question is newest → already asked" "$(asked_already me me "$CFQ" "$CREATE_FAIL_ANCHOR")" "1"
+  ck "a reply came after it → ask again"        "$(asked_already me arthur 'fixed the label' "$CREATE_FAIL_ANCHOR")" "0"
+  ck "no comments at all → ask"                 "$(asked_already me '' '' "$CREATE_FAIL_ANCHOR")" "0"
+  ck "a stranger forging the anchor cannot mute us" "$(asked_already me randomer "$CFQ" "$CREATE_FAIL_ANCHOR")" "0"
   ck "an OLD planner-BLOCKED question is a DIFFERENT anchor → still ask" \
-     "$(asked_already me me '**dev-plan → needs a decision (BLOCKED):** the spec is too vague.')" "0"
-  ck "the anchor QUOTED is inert → ask"         "$(asked_already me me "> $CFQ")" "0"
+     "$(asked_already me me '**dev-plan → needs a decision (BLOCKED):** the spec is too vague.' "$CREATE_FAIL_ANCHOR")" "0"
+  ck "the anchor QUOTED is inert → ask"         "$(asked_already me me "> $CFQ" "$CREATE_FAIL_ANCHOR")" "0"
+  ck "the cap question has its OWN anchor"      "$(asked_already me me "$CAP" "$CAPPED_ANCHOR")" "1"
+  ck "a create-fail question does not mute the cap question" "$(asked_already me me "$CFQ" "$CAPPED_ANCHOR")" "0"
+  echo "== planned_already (the idempotency tombstone, DERIVED from the bus — no .planned file) =="
+  SUM=$'**dev-plan → planned:** decomposed this objective into 2 backlog feature issue(s):'
+  ck "our own summary anywhere in the stream → planned" \
+     "$(planned_already me "$(printf 'arthur\tCONFIRMED\nme\t%s' "$SUM")")" "1"
+  ck "…even when later comments buried it (NOT newest-only)" \
+     "$(planned_already me "$(printf 'me\t%s\narthur\tthanks\nme\tsomething else\n' "$SUM")")" "1"
+  ck "an empty stream → not planned"            "$(planned_already me '')" "0"
+  ck "a stranger forging the summary cannot mark it planned" \
+     "$(planned_already me "$(printf 'randomer\t%s' "$SUM")")" "0"
+  ck "the summary QUOTED is inert"              "$(planned_already me "$(printf 'me\t> %s' "$SUM")")" "0"
+  ck "an unknown identity can prove nothing → not planned" "$(planned_already '' "$(printf 'me\t%s' "$SUM")")" "0"
+  echo "== drop_report (the dropped titles reach the BUS — \$OUTDIR is deleted on exit) =="
+  ck "lists every dropped title" "$(drop_report 'Feature four' 'Feature five')" "$(printf -- '- Feature four\n- Feature five')"
   echo "== feature file parsing =="
   ck "title strips '# '"            "$(feature_title "$td/feat-01.md")" "Add a WebP probe"
   ck "body is lines 2+"             "$(feature_body "$td/feat-01.md")" "$(printf 'The body line one.\nAnd two.')"
@@ -149,15 +206,30 @@ fi
 REPO="${1:?usage: dev-plan.sh <repo> <spec-issue#> | --selftest}"
 SPEC="${2:?usage: dev-plan.sh <repo> <spec-issue#>}"
 SLUG="$ORG/$REPO"
-mkdir -p "$STATE"
-marker="$STATE/${REPO}-${SPEC}.planned"
 
-if [ -f "$marker" ]; then log "spec $SLUG#$SPEC already planned — skipping (idempotent)"; exit 0; fi
+# bus_comments → the spec issue's COMPLETE comment stream, one "<login>\t<line-1>" per line, oldest→newest.
+# The REST endpoint with `--paginate`, NOT `gh issue view --json comments`, whose GraphQL page carries only
+# the newest 100: planned_already must find a summary however long the thread grew, and its failure to see
+# one re-plans the spec — a DUPLICATE backlog, the one outcome that must not be reachable by a paging quirk.
+# App identities are suffixed REST-side (`<app>[bot]`); strip it so the comparison matches the bare
+# $DEV_LOGIN form the rest of the fleet uses (dev-loop's park gate, the poller's FITNESS_LOGIN).
+bus_comments(){
+  gh api "repos/$SLUG/issues/$SPEC/comments" --paginate \
+     -q '.[] | [((.user.login // "") | rtrimstr("[bot]")), ((.body // "") | split("\n")[0])] | @tsv' 2>/dev/null
+}
 
 # 1) GUARD — read the spec + its confirmation state (R1). Refuse an unconfirmed spec, fail-closed.
 title="$(gh issue view "$SPEC" --repo "$SLUG" --json title -q .title 2>/dev/null)" \
   || { log "cannot read spec $SLUG#$SPEC (fail-closed)"; exit 2; }
 body="$(gh issue view "$SPEC" --repo "$SLUG" --json body -q .body 2>/dev/null)"
+# The BUS — read ONCE, and it carries every fact the old local markers used to: whether this spec is
+# already planned, and who confirmed it. Unreadable ⇒ we cannot prove the spec is not already planned,
+# so we refuse (fail-closed against a duplicate plan) rather than re-spend a model run and re-file.
+bus="$(bus_comments)" \
+  || { log "cannot read the comment stream of $SLUG#$SPEC — refusing (cannot prove it is not already planned)"; exit 2; }
+if [ "$(planned_already "$DEV_LOGIN" "$bus")" = 1 ]; then
+  log "spec $SLUG#$SPEC already planned (its 'planned:' summary is on the issue) — skipping (idempotent)"; exit 0
+fi
 # LABEL gate, APPLIER-BOUND: presence alone is forgeable by any write/triage identity (incl. the fleet
 # Apps), so resolve WHO applied it — the LAST `labeled` timeline event for this label — and bind that
 # actor to admin|maintain. Unfetchable timeline / non-maintainer applier ⇒ inert (fail-closed).
@@ -189,8 +261,7 @@ if [ "$has_appr" != 1 ]; then
       has_conf=1; log "CONFIRMED by maintainer @$c_login (role: $role)"; break
     fi
     log "ignoring line-1 CONFIRMED from @$c_login (role: ${role:-unfetchable} — not a maintainer)"
-  done < <(gh issue view "$SPEC" --repo "$SLUG" --json comments \
-             -q '.comments[] | [.author.login, (.body | split("\n")[0])] | @tsv' 2>/dev/null)
+  done <<<"$bus"
 fi
 if [ "$(is_confirmed "$has_appr" "$has_conf")" != CONFIRMED ]; then
   log "spec $SLUG#$SPEC is NOT confirmed (needs a MAINTAINER-applied '$APPROVED_LABEL' label or a maintainer line-1 CONFIRMED comment) — refusing"
@@ -243,9 +314,18 @@ shopt -s nullglob
 files=("$OUTDIR"/feat-*.md)
 # ENFORCE the cap HERE, not in the prompt. MAX_FEATURES is documented as a cap, and a prompt line is a
 # request, not a bound — the model can write any number of feat-*.md files. The harness owns every write
-# to GitHub, so it owns the cap too. Never silently: the drop is logged.
+# to GitHub, so it owns the cap too.
+#
+# A CAP MUST DEFER, NEVER DROP — the same principle the partial-create path already obeys, and the reason
+# this is not simply a truncation: $OUTDIR is a mktemp the EXIT trap deletes, so a feature we merely skip
+# is GONE — deleted work from a maintainer's confirmed objective, with the run still reporting a complete
+# plan. So the overflow is (a) carried to the bus BY TITLE below, where a human (or a re-run) can still
+# reach it, and (b) treated as an INCOMPLETE plan: no `planned:` summary, so the spec is never marked
+# done and a re-run under a raised cap re-plans and files the rest (the title dedup skips what is filed).
+dropped=()
 if [ "${#files[@]}" -gt "$MAX_FEATURES" ]; then
-  log "planner wrote ${#files[@]} feature file(s) > MAX_FEATURES=$MAX_FEATURES — filing the first $MAX_FEATURES, DROPPING $(( ${#files[@]} - MAX_FEATURES )) (re-run with a higher MAX_FEATURES to file the rest)"
+  for fpath in "${files[@]:$MAX_FEATURES}"; do dropped+=("$(feature_title "$fpath")"); done
+  log "planner wrote ${#files[@]} feature file(s) > MAX_FEATURES=$MAX_FEATURES — filing the first $MAX_FEATURES; the other ${#dropped[@]} are DEFERRED (reported on the spec issue, spec left UNPLANNED)"
   files=("${files[@]:0:$MAX_FEATURES}")
 fi
 if [ "${#files[@]}" -eq 0 ]; then
@@ -281,40 +361,60 @@ done
 # TOTAL failure (nothing filed at all) → NOT a transient blip: a missing/unwritable label, lost issue-write
 # access, or an issues-disabled repo fails EVERY create identically, and a silent defer would spin that
 # forever with no human ever told. Surface it as a dev-task QUESTION — ONCE, so a timer does not re-ask
-# every pass — and leave the .planned marker unwritten so a fixed repo re-plans cleanly. ASK-ONCE IS
-# DERIVED FROM THE BUS, NOT CACHED: the question already sitting on the spec issue IS the record that we
-# asked (a local marker would be the sole record of that fact, and losing it — a wiped box, a different
-# box — would re-ask; spec #135 forbids exactly that). Once a later comment lands (a maintainer's reply,
-# or the `planned:` summary of a run whose creates worked), the question is no longer newest and a fresh
-# failure asks afresh — the same semantics the marker had, with nothing on disk to lose.
-if [ "$failed" -gt 0 ] && [ "${#created[@]}" -eq 0 ]; then
-  log "every feature create FAILED ($failed) — surfacing a question, marker NOT written"
-  last="$(gh issue view "$SPEC" --repo "$SLUG" --json comments \
-            -q '(.comments | last) as $c | [(($c.author.login) // ""), ((($c.body) // "") | split("\n")[0])] | @tsv' 2>/dev/null)"
-  IFS=$'\t' read -r last_who last_line1 <<<"$last"
-  if [ "$(asked_already "$DEV_LOGIN" "${last_who:-}" "${last_line1:-}")" = 1 ]; then
-    log "the create-failure question is already the newest comment on $SLUG#$SPEC — not re-asking"
-  else
-    gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → needs a decision (BLOCKED, issue-create failed):** the objective decomposed into $failed feature(s), but EVERY \`gh issue create\` failed — so no backlog issues were filed. Likely the \`$BACKLOG_LABEL\` label cannot be created, or issue-write access to this repo was lost. A maintainer should check the repo's issue permissions; planning re-runs cleanly once fixed."$'\n\n<sub>autonomous planner (R2). A dev-task question, not an approval request.</sub>' >/dev/null 2>&1 \
-      || log "WARN: could not post the create-failure question"
+# every pass — and post no `planned:` summary, so a fixed repo re-plans cleanly. ASK-ONCE IS DERIVED FROM
+# THE BUS, NOT CACHED: the question already sitting on the spec issue IS the record that we asked (a local
+# marker would be the sole record of that fact, and losing it — a wiped box, a different box — would
+# re-ask; spec #135 forbids exactly that). Once a later comment lands (a maintainer's reply, or the
+# `planned:` summary of a run whose creates worked), the question is no longer newest and a fresh failure
+# asks afresh — the same semantics a marker would have had, with nothing on disk to lose.
+
+# ask_once <anchor> <body> — post a question UNLESS it is already the newest comment on the spec issue
+# (the bus IS the record that we asked; see asked_already). The stream is RE-READ here, not taken from the
+# opening $bus: a bounded planner run sits in between, and a human may have replied inside that window.
+ask_once(){
+  local anchor="$1" body="$2" last who line1
+  last="$(bus_comments | tail -1)"
+  IFS=$'\t' read -r who line1 <<<"$last"
+  if [ "$(asked_already "$DEV_LOGIN" "${who:-}" "${line1:-}" "$anchor")" = 1 ]; then
+    log "that question is already the newest comment on $SLUG#$SPEC — not re-asking"; return 0
   fi
+  gh issue comment "$SPEC" --repo "$SLUG" --body "$body" >/dev/null 2>&1 || log "WARN: could not post the question"
+}
+
+if [ "$failed" -gt 0 ] && [ "${#created[@]}" -eq 0 ]; then
+  log "every feature create FAILED ($failed) — surfacing a question, spec NOT marked planned"
+  ask_once "$CREATE_FAIL_ANCHOR" "**dev-plan → needs a decision (BLOCKED, issue-create failed):** the objective decomposed into $failed feature(s), but EVERY \`gh issue create\` failed — so no backlog issues were filed. Likely the \`$BACKLOG_LABEL\` label cannot be created, or issue-write access to this repo was lost. A maintainer should check the repo's issue permissions; planning re-runs cleanly once fixed."$'\n\n<sub>autonomous planner (R2). A dev-task question, not an approval request.</sub>'
   exit 6
 fi
-# PARTIAL failure → DEFER, marker NOT written (defers, never drops): the next run re-plans and the title
-# dedup above re-files only what is missing. No comment — a partial blip is transient and needs no human.
+# PARTIAL failure → DEFER, spec NOT marked planned (defers, never drops): the next run re-plans and the
+# title dedup above re-files only what is missing. No comment — a partial blip is transient, needs no human.
 if [ "$failed" -gt 0 ]; then
-  log "$failed feature create(s) failed — DEFERRED, marker NOT written (${#created[@]} filed this run will be dedup-skipped on retry)"
+  log "$failed feature create(s) failed — DEFERRED, spec NOT marked planned (${#created[@]} filed this run will be dedup-skipped on retry)"
   exit 6
 fi
 
-# 4) AUDIT — summarise on the spec issue (R5) + mark planned (idempotent) — only on a COMPLETE plan.
-if [ "${#created[@]}" -gt 0 ]; then
-  summary="**dev-plan → planned:** decomposed this objective into ${#created[@]} backlog feature issue(s):"$'\n'"$(printf '- %s\n' "${created[@]}")"$'\n\n<sub>autonomous planner (R2). The dev-loop authors each; the host live-gate → fitness → poller pipeline ships them. No merge taken.</sub>'
-  gh issue comment "$SPEC" --repo "$SLUG" --body "$summary" >/dev/null 2>&1 || log "WARN: could not post the plan summary"
-else
-  log "every planned feature was already filed (recovered from an earlier deferred run)"
+# 4a) CAP OVERFLOW → DEFER, and say so ON THE BUS. The plan is INCOMPLETE, so it must not claim success:
+# no `planned:` summary is posted, which leaves the spec re-plannable (that summary IS the tombstone now).
+# The dropped TITLES ride the comment, so the work survives $OUTDIR's teardown even if nobody re-runs.
+if [ "${#dropped[@]}" -gt 0 ]; then
+  log "cap overflow: ${#dropped[@]} feature(s) deferred — reporting on $SLUG#$SPEC, spec left UNPLANNED"
+  ask_once "$CAPPED_ANCHOR" "**dev-plan → needs a decision (BLOCKED, plan exceeded MAX_FEATURES):** this objective decomposed into $(( ${#created[@]} + ${#dropped[@]} )) features, but \`MAX_FEATURES=$MAX_FEATURES\` caps one plan. The first $MAX_FEATURES were filed as \`$BACKLOG_LABEL\` issues; the remaining ${#dropped[@]} were **not** filed and are listed here so none is lost:"$'\n'"$(drop_report "${dropped[@]}")"$'\n'"A maintainer should either raise \`MAX_FEATURES\` and re-run \`dev-plan\` (the already-filed features are dedup-skipped by title; the re-plan may word the deferred ones differently), or split this objective into smaller specs. **This spec is deliberately NOT marked planned** — the cap defers, it never drops."$'\n\n<sub>autonomous planner (R2). A dev-task question, not an approval request.</sub>'
+  if [ "${#created[@]}" -gt 0 ]; then printf '%s\n' "${created[@]}"; fi
+  exit 8
 fi
-: > "$marker"
+
+# 4b) AUDIT — the `planned:` summary on the spec issue (R5). This comment is NOT decoration: it is the
+# idempotency TOMBSTONE (planned_already reads it back), so it is posted on EVERY complete plan — the
+# all-deduped recovery run included, which would otherwise leave a fully-planned spec with no record and
+# re-plan forever. If it cannot be posted we have no record, so the run DEFERS rather than claim success.
+if [ "${#created[@]}" -gt 0 ]; then
+  summary="**dev-plan → planned:** decomposed this objective into ${#created[@]} backlog feature issue(s):"$'\n'"$(printf -- '- %s\n' "${created[@]}")"
+else
+  summary="**dev-plan → planned:** every feature of this objective was already filed as a \`$BACKLOG_LABEL\` issue (recovered from an earlier deferred run) — nothing new to file."
+fi
+summary="$summary"$'\n\n<sub>autonomous planner (R2). The dev-loop authors each; the host live-gate → fitness → poller pipeline ships them. No merge taken.</sub>'
+gh issue comment "$SPEC" --repo "$SLUG" --body "$summary" >/dev/null 2>&1 \
+  || { log "could not post the plan summary — it is the ONLY record that $SLUG#$SPEC is planned, so this run DEFERS (the ${#created[@]} filed issue(s) dedup-skip on retry)"; exit 9; }
 log "PLANNED $SLUG#$SPEC → ${#created[@]} new backlog issue(s)"
 if [ "${#created[@]}" -gt 0 ]; then printf '%s\n' "${created[@]}"; fi
 exit 0
