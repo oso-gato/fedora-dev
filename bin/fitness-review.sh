@@ -201,16 +201,42 @@ Answer these three questions about the PR below, briefly, then emit the verdict 
   Q1 ASKED-FOR: does the change do what its title/body says was asked, with NO unrequested extra surface?
   Q2 CONTRADICTS: does it violate the constitution/law — GOVERNANCE.md, fleet-core.md, the Build
      Principles (provenance/minimalism/no-secrets/deploy-contract/validate), or the control-plane/Tier
-     boundary? Any contradiction is disqualifying.
+     boundary?
   Q3 FIT-FOR-PURPOSE incl. the 6 doctrine mandates: solution-oriented; iterated-on-facts (proven, not
      asserted); zero-based; objective-held; no rabbit-hole; no quiet-quit/partial-done presented as done.
 
+SEVERITY — the single most important judgment you make. MVP-FIRST (Arthur's standing instruction):
+"get it to work first; where fitness finds something that could be better or improved but is NOT
+blocking, we continue to build and you make a note of it — later, when we ship a finished feature, we
+revisit and close those loops." Prove the feature first; polish is a follow-up, not a gate.
+
+A finding BLOCKS only if it makes the change INCORRECT, UNSAFE, or UNTRUE:
+  (a) INCORRECT — it does not actually do what it claims; the stated feature is broken or does not work.
+  (b) UNSAFE    — it weakens or deletes a guard, exposes a credential, enables an unsafe or unreviewed
+                  merge, breaks the fail-closed posture or the merge-trust boundary (G1/G2, author≠judge),
+                  or removes recoverability/rollback.
+  (c) UNTRUE    — it ships a claim that is false: a doc row, code comment, log line or test that asserts
+                  behaviour the code does not have. (This fleet's dominant defect. A test that passes
+                  against the pre-fix code is untrue. Hold this line hard.)
+EVERYTHING ELSE IS A NOTE, NOT A BLOCKER — and a NOTE is compatible with PASS. Non-blocking includes:
+missing coverage that is not load-bearing for (a)-(c); design/idiom/DRY improvements; a cleaner
+architecture you would have preferred; stale numbers in the PR body; secondary spec gaps that do not
+stop the feature working correctly and safely; anything you would phrase as "should also", "could be
+better", or "a cleaner way would be".
+
+Ask yourself literally: does this make the change incorrect, unsafe, or untrue? If NO — it is a NOTE.
+Do NOT RETURN a working, safe, honest change because it is imperfect. An endless RETURN loop over
+non-blocking polish burns the maintainer's budget and is itself a doctrine failure (rabbit-hole).
+
 Decide:
-  PASS     — asked-for, contradicts nothing, fit for purpose. Safe to route to the merge decision.
-  RETURN   — fixable shortfall; send back to the developer to rework (do NOT bother Arthur).
+  PASS     — works, safe, honest. Route to the merge decision. Record any non-blocking findings under a
+             "## NOTES (non-blocking — follow-ups)" heading; they are logged and revisited after ship.
+  RETURN   — at least ONE finding is INCORRECT, UNSAFE or UNTRUE per (a)-(c). Name it explicitly and say
+             which of (a)/(b)/(c) it is. Send back to the developer (do NOT bother Arthur).
   ESCALATE — a judgment only Arthur should make (genuine policy ambiguity, control-plane trade-off,
              or the diff is unreadable/truncated past the point of judgment).
-When unsure between PASS and a lower verdict, do NOT PASS.
+When unsure whether a finding BLOCKS, apply the (a)/(b)/(c) test — not your taste. If it is not
+incorrect, unsafe, or untrue, PASS and NOTE it.
 
 End your reply with EXACTLY one line, nothing after it — the token alone, no brackets, no trailing text:
 FITNESS_VERDICT: <PASS|RETURN|ESCALATE>
