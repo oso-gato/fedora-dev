@@ -58,7 +58,10 @@
 #                     GREEN PR whose routing is PENDING (fitness verdict not yet posted, or
 #                     fitness-RETURN driving the fixer) costs +2 (files + fitness comments) per
 #                     sweep until it parks — short-lived, and bounded by the fitness/fixer
-#                     turnaround. Against the dev App's 5k/h REST budget (SHARED with the fixer,
+#                     turnaround. A REVIEW-PARKED head (#156: the reviewer failed its bounded
+#                     retries and a question is asked) keeps costing that +2 by DESIGN: it is not
+#                     acted-marker-parked, precisely so a hand-posted verdict is still seen — no
+#                     model run is spent on it, only the reads. Against the dev App's 5k/h REST budget (SHARED with the fixer,
 #                     fitness reviewer and auto-merge): N=10 open PRs ≈ 4.3k/h — the ceiling is
 #                     ~10 sustained open PRs (was 2-3 unbatched). On exhaustion gh calls fail and
 #                     sweeps degrade to NOOP until the window resets — fail-closed,
@@ -70,6 +73,19 @@
 #                     count of iterations.
 #   FRESH_TREE        the isolator (default: bin/fresh-tree.sh). Every fix runs in a throwaway worktree
 #                     off the PR's own head — NEVER the shared clone (#152). Overridable for testing.
+#   FITNESS_REVIEW    the independent fitness harness the REVIEW arm runs (default: bin/fitness-review.sh).
+#                     Overridable for testing. Its exit code is a CONTRACT: 0 = verdict posted; 3 = the
+#                     reviewer could not be RUN / produced no verdict for this head; anything else = a
+#                     retryable precondition (try again next sweep).
+#   FITNESS_REVIEW_TRIES / FITNESS_RETRY_BACKOFF
+#                     how the REVIEW arm answers an rc 3 (default 3 attempts, ≥300s apart — see
+#                     review_due). rc 3 CANNOT distinguish a permanent cause (E2BIG, missing binary) from
+#                     a transient one (model API 5xx, rate limit, timeout), so the arm retries a BOUNDED
+#                     number of spaced times and only then SURFACES the real cause and stops reviewing
+#                     that head. Re-spinning every sweep is the silent spin R4 forbids (#155); parking on
+#                     the FIRST rc 3 would strand a host-GREEN PR forever on one blip (#156). The parked
+#                     head is NOT written to the acted marker, so a verdict posted by hand (the
+#                     remediation the question prints) is still picked up and acted on.
 #   RETIRE_LOOKBACK   how many of the most recently UPDATED merged PRs each sweep scans for
 #                     `Supersedes #N` declarations (default 15; sorted by update recency so a
 #                     long-parked PR that merges late still enters the window; each merged PR is
@@ -161,6 +177,28 @@ fix_cause(){
   esac
 }
 
+# review_due <attempts-so-far> <seconds-since-last-attempt> <max-tries> <backoff-secs>
+#   -> RUN | WAIT | PARKED
+# THE BOUNDED RETRY THE rc-3 CONTRACT REQUIRES (#156). fitness-review.sh returns 3 for "the reviewer
+# produced no verdict for THIS head" — and it CANNOT tell a PERMANENT cause (E2BIG, missing binary, bad
+# auth) from a TRANSIENT one (model API 5xx, rate limit, timeout, a killed run). So NEITHER extreme is
+# correct, and each is a real failure mode:
+#   * re-running every sweep is the SILENT SPIN R4 forbids — a bounded model run burned per 10s, forever,
+#     signalling nothing;
+#   * parking on the FIRST rc 3 STRANDS a host-GREEN PR on a single API blip — nothing re-reviews it (the
+#     fixer only runs on RED / fitness-RETURN), so it can never merge on that head. Before the rc contract
+#     existed, that same blip simply self-healed on the next sweep; a fix for the permanent class must not
+#     buy a new permanent failure for the transient one.
+# So: retry a BOUNDED number of times, SPACED by a backoff (a 10s re-poke does not outlast a 529 burst),
+# and surface only when the failure SURVIVES them. A blip then costs nothing and a real breakage still
+# reaches a human — exactly once.
+review_due(){
+  local n="$1" since="$2" max="$3" backoff="$4"
+  [ "$n" -ge "$max" ] && { printf 'PARKED'; return; }   # tries exhausted → the question is asked; never re-run
+  [ "$n" -le 0 ] && { printf 'RUN'; return; }           # no failure on this head yet → run
+  [ "$since" -ge "$backoff" ] && printf 'RUN' || printf 'WAIT'
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -206,6 +244,15 @@ if [ "${1:-}" = "--selftest" ]; then
   fo "push rc0 but origin stale" 0 aaa bbb 0 aaa  NOT_LANDED
   fo "origin unreadable"         0 aaa bbb 0 ""   NOT_LANDED
   fo "landed (origin holds it)"  0 aaa bbb 0 bbb  LANDED
+  # #156 — the rc-3 retry is BOUNDED, not absent (silent spin) and not zero (a blip strands a GREEN PR).
+  rd(){ local got; got="$(review_due "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — review_due($2,$3,$4,$5)=$got want $6"; fail=1; }; }
+  rd "first attempt runs"           0 0     3 300 RUN
+  rd "a blip retries after backoff" 1 300   3 300 RUN
+  rd "…but not inside the backoff"  1 299   3 300 WAIT
+  rd "the LAST try still runs"      2 300   3 300 RUN
+  rd "exhausted → parked"           3 99999 3 300 PARKED
+  rd "parked stays parked"          9 99999 3 300 PARKED
+  rd "tries=1 parks after one"      1 99999 1 0   PARKED
   vg(){ local got; got="$(printf '%s' "$2" | host_verdict)"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
   vg "host green"  'Host live-gate (Gate B): VERDICT GREEN'                                 GREEN
   vg "host latest" $'…VERDICT RED\nHost live-gate (Gate B): VERDICT GREEN'                   GREEN
@@ -273,6 +320,15 @@ FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
 # the isolator the fixer runs in (#152). Overridable so poller-fixer.test.sh can drive the REAL sweep.
 FRESH_TREE="${FRESH_TREE:-$HERE/fresh-tree.sh}"
+# the independent fitness harness the REVIEW arm runs. Overridable (same reason as FRESH_TREE) so
+# fitness-review.test.sh can drive the REAL sweep against a scripted reviewer outcome.
+FITNESS_REVIEW="${FITNESS_REVIEW:-$HERE/fitness-review.sh}"
+# THE BOUNDED RETRY BEHIND rc 3 (#156 — see review_due). A no-verdict review is retried at most
+# FITNESS_REVIEW_TRIES times per head, spaced by FITNESS_RETRY_BACKOFF seconds; only a failure that
+# SURVIVES them becomes a question. Defaults: 3 attempts over ≥10 min — long enough to ride out a model
+# API 5xx / rate-limit window, short enough that a genuinely broken reviewer reaches a human promptly.
+FITNESS_REVIEW_TRIES="${FITNESS_REVIEW_TRIES:-3}"
+FITNESS_RETRY_BACKOFF="${FITNESS_RETRY_BACKOFF:-300}"
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
@@ -288,6 +344,22 @@ surface(){ # <pr> <sha> <kind> <message>
   [ -f "$m" ] && return 0
   log "SURFACE $SLUG#$pr @ ${sha:0:7} [$kind]: $msg"
   gh pr comment "$pr" --repo "$SLUG" --body "**Poller → Arthur [$kind]:** $msg"$'\n\n<sub>dev-side poller (Step 5); no merge taken — needs your decision.</sub>' >/dev/null 2>&1 && : > "$m"
+}
+
+# The rc-3 question — asked ONCE per head, and ONLY once the bounded retries are exhausted (review_due).
+# It carries the reviewer harness's REAL stderr: a question that shrugs is not a question. Re-callable on
+# every later sweep at zero cost — surface() early-exits on its own marker, and RE-POSTS if a previous
+# post failed (a throttled comment must not become a lost question).
+#
+# THE REMEDIATION IT PRINTS IS ONE THE HARNESS HONOURS. This deliberately does NOT write the sweep's
+# `acted` marker: that marker is the TERMINAL-state skip the MERGE arm also short-circuits on, so parking
+# the head with it would make the operator's fix — re-run `fitness-review.sh --post` — post a verdict the
+# poller then refuses to read. What is parked is the REVIEW (review_due returns PARKED for this head, so
+# no further model run is spent); the PR itself stays live, and a verdict posted by hand routes to MERGE
+# on the very next sweep.
+review_question(){ # <pr> <sha> <attempts> <reviewer-stderr>
+  surface "$1" "$2" "review-failed" \
+    "the independent fitness reviewer could not produce a verdict on head \`${2:0:7}\` — it failed $3 spaced attempt(s), so this is an INFRASTRUCTURE failure, not a judgment (and not a transient blip: a blip is retried silently). No verdict was posted, so the merge stays blocked (fail-closed). The reviewer harness reported:"$'\n\n```\n'"$(printf '%s' "${4:-(no stderr captured)}" | tail -c 900)"$'\n```\n\n'"The poller will not re-run the review on this head (that would re-spin every sweep with no signal). Push a new commit — or fix the cause and re-run \`bin/fitness-review.sh --post $POLLER_REPO $1\`: this head is NOT parked on the poller's acted marker, so the verdict that run posts IS picked up and acted on by the next sweep."
 }
 
 # Resolve the PERSISTENT clone a throwaway worktree bolts off. `~/repos/<repo>` is the fleet convention
@@ -354,9 +426,17 @@ run_fixer(){ # <pr> <headref> <sha> <cause:HOST|FITNESS> <reason>
   # the worktree is checked out on the PR's OWN head (FD_BASE_REF=origin/<ref>), not origin/main:
   # a fix iterates the PR's branch, so its base is that branch as ORIGIN currently holds it.
   wt="$(FD_BASE_REF="origin/$ref" "$FRESH_TREE" "$clone" "$ref" 2>>"$LOG")"
-  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
-    log "FIX $SLUG#$pr @ ${sha:0:7} — FRESH-TREE FAILED for origin/$ref (fail-closed: no fix attempted)"
-    surface "$pr" "$sha" "blocked" "could not create an isolated worktree on \`$ref\` — no fix was attempted (the fixer must never run in the shared clone). A maintainer should check the repo clone."
+  # A worktree we cannot ENTER is not isolation. Prove it HERE — the one place the refusal can name its
+  # real cause — because the branch-moved check below reads the tree with `git -C` and would fail on an
+  # unenterable one too, parking the PR on a bogus "the branch moved" instead of the truth. `( cd )`
+  # tests exactly what the model's own `cd` does: a directory can exist, pass -d, and still be unenterable.
+  if [ -z "$wt" ] || [ ! -d "$wt" ] || ! ( cd "$wt" ) 2>/dev/null; then
+    log "FIX $SLUG#$pr @ ${sha:0:7} — FRESH-TREE FAILED (no usable isolated worktree) for origin/$ref (fail-closed: no fix attempted)"
+    surface "$pr" "$sha" "blocked" "could not create a usable isolated worktree on \`$ref\` — no fix was attempted (the fixer must never run in the shared clone). A maintainer should check the repo clone."
+    # EVERY path reaps (Principle 10) — this one INCLUDED. A tree that exists but cannot be entered is
+    # still a tree on the home volume; refusing to use it is not a licence to leave it behind. reap_tree
+    # no-ops on an empty $wt (the fresh-tree-failed case), so one call covers both refusals.
+    reap_tree "$clone" "$wt"
     return 0
   fi
 
@@ -414,7 +494,23 @@ The findings you must address (from the ${cause} gate):
 
 $reason
 FIX_EOF
-  local out; out="$(cd "$wt" && timeout "$FIXER_TIMEOUT" $POLLER_FIXER "$prompt" 2>&1)"
+  # TRANSPORT — THE PROMPT RIDES STDIN, NEVER ARGV (#155). A single argv argument is capped by the
+  # kernel at MAX_ARG_STRLEN (32 pages = 131072 bytes), and this prompt embeds a GATE'S OWN FINDINGS —
+  # a host candidate log or a reviewer's prose (each `tail -c 6000` today, but bounded only by that
+  # choice) — so the argv form is a latent E2BIG: the exec fails and the fixer NEVER RUNS. stdin has no
+  # such ceiling. It also CLOSES the inherited-stdin hole the old `</dev/null` guarded from the other
+  # side: the model's stdin IS the prompt pipe now, so it can never drain the sweep's PR list off FD 0.
+  # `set +o pipefail` inside the subshell keeps a printf SIGPIPE (a model that exits without draining)
+  # from masquerading as the model's own failure.
+  #
+  # THE `cd` IS THE LAST STRAND OF THE ISOLATION, SO BIND THE BODY TO IT. `cd "$wt" && set +o pipefail;
+  # <pipeline>` does NOT: `&&` binds to `set` ALONE and the `;` ends the list, so the pipeline would run
+  # even when the cd FAILED — in the POLLER'S OWN cwd (a shared clone), with a prompt telling the model
+  # to commit. That is the 2026-06-28 cross-branch-leak hazard `policy/CLAUDE.md` names by date, and the
+  # shared-clone fallback this file swears it does not have. The BRACE GROUP binds the whole body to the
+  # cd: no worktree, no model. run_fixer already refuses an unenterable tree (and says so), so this is
+  # the structural belt behind that check — it cannot be reasoned away by a future edit up there.
+  local out; out="$(cd "$wt" && { set +o pipefail; printf '%s' "$prompt" | timeout "$FIXER_TIMEOUT" $POLLER_FIXER 2>&1; })"
   local blocked bflag=0
   blocked="$(printf '%s' "$out" | grep -aoE '^FIXER_BLOCKED:.*' | head -1)"; [ -n "$blocked" ] && bflag=1
 
@@ -518,7 +614,7 @@ sweep_repo(){
   # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
   # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
   # --watch flock; FD 3 is free.
-  local pr ref sha comments host tier fit action files fitraw
+  local pr ref sha comments host tier fit action files fitraw ferr frc nf ef n last now since
   while IFS=$'\t' read -r -u 3 pr ref sha; do
     [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
@@ -614,10 +710,61 @@ sweep_repo(){
         ;;
       REVIEW)
         [ -f "$done" ] && continue
-        log "#$pr GREEN + unreviewed → running fitness harness"
-        FITNESS_LOGIN="$FITNESS_LOGIN" LG_HOST_LOGIN="$LG_HOST_LOGIN" "$HERE/fitness-review.sh" --post "$POLLER_REPO" "$pr" \
-          && log "#$pr fitness posted — next sweep routes on it" \
-          || log "#$pr fitness harness declined/failed (fail-closed: no PASS ⇒ no merge)"
+        # BOUNDED RETRY, THEN A QUESTION (#156). rc 3 says "no verdict for this head" and CANNOT say
+        # whether the cause is permanent or transient (see review_due), so we do neither of the two
+        # wrong things: we do not re-spin every sweep, and we do not park a host-GREEN PR forever on one
+        # model-API blip. State is per-(pr,sha) — a new head starts clean, with no attempt to carry.
+        nf="$STATE/reviewfail-${pr}-${sha}.n"; ef="$STATE/reviewfail-${pr}-${sha}.err"
+        n=0; last=0; [ -f "$nf" ] && read -r n last < "$nf"
+        case "$n"    in ''|*[!0-9]*) n=0;;    esac      # a corrupt/truncated marker must never abort
+        case "$last" in ''|*[!0-9]*) last=0;; esac      # the sweep on arithmetic — start clean instead
+        now="$(date +%s)"; since=$(( now - last ))
+        case "$(review_due "$n" "$since" "$FITNESS_REVIEW_TRIES" "$FITNESS_RETRY_BACKOFF")" in
+          PARKED)
+            # The tries are spent and the question is asked. Re-assert it (idempotent; re-posts only if
+            # the earlier post FAILED) and spend no model run. The PR is NOT parked on $done — a verdict
+            # posted by hand still routes on the next sweep (see review_question).
+            review_question "$pr" "$sha" "$n" "$(cat "$ef" 2>/dev/null)"
+            log "#$pr fitness review PARKED @ ${sha:0:7} — $n failed attempts, question asked; not re-running the reviewer on this head"
+            continue ;;
+          WAIT)
+            log "#$pr fitness review failed $n/$FITNESS_REVIEW_TRIES @ ${sha:0:7} — backing off (${since}s of ${FITNESS_RETRY_BACKOFF}s) before the next attempt"
+            continue ;;
+        esac
+        log "#$pr GREEN + unreviewed → running fitness harness (attempt $((n+1))/$FITNESS_REVIEW_TRIES)"
+        # Its STDOUT goes to the log; its STDERR is CAPTURED — that is where the harness reports the
+        # REAL cause of a failed review (#155 R2), and a surfaced question that carries the cause beats
+        # one that shrugs. rc is the harness's own (no pipe), and it is a CONTRACT (fitness-review.sh
+        # header): 0 = verdict posted; 3 = the reviewer could not be RUN / emitted no verdict for THIS
+        # head; anything else = a precondition refused it (retryable — the state can change on its own).
+        ferr="$(FITNESS_LOGIN="$FITNESS_LOGIN" LG_HOST_LOGIN="$LG_HOST_LOGIN" \
+                "$FITNESS_REVIEW" --post "$POLLER_REPO" "$pr" 2>&1 >>"$LOG")"; frc=$?
+        case "$frc" in
+          0) rm -f "$nf" "$ef"; log "#$pr fitness posted — next sweep routes on it" ;;
+          3)
+            # NEVER SPIN SILENTLY (#155 R4 — the silent-spin class of #150), and NEVER STRAND ON ONE BLIP
+            # (#156). Count this failure, keep its REAL cause, and let review_due decide: retry after the
+            # backoff while tries remain; ask the human — once, with the cause — when they run out.
+            n=$((n+1)); printf '%s %s\n' "$n" "$now" > "$nf"; printf '%s' "$ferr" > "$ef"
+            printf '%s\n' "$ferr" >> "$LOG"
+            if [ "$n" -ge "$FITNESS_REVIEW_TRIES" ]; then
+              log "#$pr fitness reviewer COULD NOT PRODUCE A VERDICT @ ${sha:0:7} (rc=3, attempt $n/$FITNESS_REVIEW_TRIES — EXHAUSTED) — surfacing the real cause; no further attempts on this head"
+              review_question "$pr" "$sha" "$n" "$ferr"
+            else
+              log "#$pr fitness reviewer produced no verdict @ ${sha:0:7} (rc=3, attempt $n/$FITNESS_REVIEW_TRIES) — retrying in ≥${FITNESS_RETRY_BACKOFF}s (a transient model/API failure self-heals; only a PERSISTENT one is a question for a human)"
+            fi ;;
+          *)
+            # RETRYABLE — but NOT SILENT. Capturing the harness's stderr and then DROPPING it makes the
+            # one path that REPEATS FOREVER the only one that never says WHY. A precondition refusal is
+            # not always self-healing (an unset FITNESS_LOGIN, no --post token, an SoD misconfig refuses
+            # identically every sweep), and before its stderr was captured it at least reached the
+            # service log. So it still does: the reason rides `log` (state file + stderr → the journal),
+            # the same channel every other outcome here reports on. A harness whose thesis is that the
+            # failure report tells the truth must not go quiet on its loudest loop.
+            log "#$pr fitness harness declined (rc=$frc — a precondition, retryable; fail-closed: no PASS ⇒ no merge)"
+            [ -n "$ferr" ] && log "#$pr fitness harness reported: $(printf '%s' "$ferr" | tr '\n' ' ' | tail -c 500)"
+            ;;
+        esac
         ;;
       MERGE|MERGE_DRYRUN)
         [ -f "$done" ] && continue

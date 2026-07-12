@@ -71,10 +71,16 @@ EOF
 # ---- stub claude: the "fixer". Records WHERE it ran (the isolation assertion) then acts per case. --
 cat > "$BIN/claude" <<'EOF'
 #!/usr/bin/env bash
+# FAITHFUL TRANSPORT (#155): the real `claude -p` takes its prompt ON STDIN — an argv prompt past
+# MAX_ARG_STRLEN (131072 bytes) cannot even EXEC — and drains it to EOF. Reading it from stdin here is
+# what makes the FIXERPROMPT row BITE on the transport: restore the argv form in bin/pr-poller.sh and
+# the recorded prompt is EMPTY, so `isolated()`'s prompt assertion FAILS.
+prompt="$(cat)"
 { printf 'FIXERCWD %s\n' "$PWD"
   printf 'FIXERBRANCH %s\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
   printf 'FIXERHEAD %s\n'   "$(git rev-parse HEAD 2>/dev/null)"
-  printf 'FIXERPROMPT %s\n' "$(printf '%s' "$*" | tr '\n' ' ')"
+  printf 'FIXERARGV %s\n'   "$*"
+  printf 'FIXERPROMPT %s\n' "$(printf '%s' "$prompt" | tr '\n' ' ')"
 } >> "$FIX_LOG"
 case "${FAKE_FIXER:-commit}" in
   commit)  echo fixed >> f; git add -A >/dev/null 2>&1; git commit -qm "fix the boom" >/dev/null 2>&1
@@ -145,7 +151,10 @@ isolated(){
   ck "$([ "$cwd" = "$WT" ] && echo 1 || echo 0)" "the fixer did not run in the isolated worktree (cwd=$cwd want=$WT)"
   ck "$(grep -qx "FIXERHEAD $SHA" "$FIX_LOG" && echo 1 || echo 0)" "the fixer's tree was not on the PR's GATED head ($SHA)"
   ck "$(grep -qx "FIXERBRANCH $FAKE_REF" "$FIX_LOG" && echo 1 || echo 0)" "the fixer's tree was not on the PR's branch ($FAKE_REF)"
-  ck "$(grep -q "FIXERPROMPT.*Do NOT 'git push'" "$FIX_LOG" && echo 1 || echo 0)" "the model was not told the harness owns the push"
+  ck "$(grep -q "FIXERPROMPT.*Do NOT 'git push'" "$FIX_LOG" && echo 1 || echo 0)" "the model was not told the harness owns the push — ON STDIN (an argv prompt would be EMPTY here, and past 131072 bytes would not even exec: #155)"
+  # …and the prompt reached it ONLY on stdin: nothing but the flags may ride argv (#155). A prompt in
+  # argv is a latent E2BIG — the fixer's prompt carries a gate's own findings and grows with them.
+  ck "$(grep -qx 'FIXERARGV -p' "$FIX_LOG" && echo 1 || echo 0)" "the prompt (or anything else) rode ARGV: $(sed -n 's/^FIXERARGV //p' "$FIX_LOG" | head -1 | cut -c1-60)"
 }
 never_ran(){ ck "$(grep -q '^FIXERCWD' "$FIX_LOG" && echo 0 || echo 1)" "the model RAN when the harness could not isolate/gate it — it must attempt no fix"; }
 no_push(){   ck "$(grep -q '^GITPUSH' "$FIX_LOG" && echo 0 || echo 1)" "something pushed on a non-landing outcome"; }
@@ -233,6 +242,45 @@ sweep feat/ghost "$SHA" FAKE_FIXER=commit
 common; never_ran; no_push; surfaced
 logs 'FRESH-TREE FAILED'; notlogs 'FIXER LANDED'
 done_case
+
+# ---------------------------------------------------------------------------------------------------
+# AN UNENTERABLE WORKTREE IS NOT ISOLATION — and it must be refused BY NAME. This is the isolation
+# failure `-d` cannot see: the tree EXISTS, so the fresh-tree guard passes, and everything downstream
+# rests on the `cd` in front of the model run. Two things must hold, and each has its own assertion:
+#   * the model MUST NOT RUN. `cd "$wt" && set +o pipefail; <pipeline>` does NOT guarantee that — `&&`
+#     binds to `set` ALONE and the `;` ends the list, so the pipeline runs even when the cd FAILED, in
+#     the POLLER'S OWN cwd (a shared clone), told to commit: the 2026-06-28 cross-branch-leak hazard,
+#     re-opened by a bash-precedence slip, in the merge path.
+#   * the refusal must name its REAL cause. Before this fix the poller reached its branch-moved check
+#     first (`git -C` cannot read an unenterable tree either), so it parked the PR on a bogus "the
+#     branch moved" and surfaced NOTHING — safe, but lying about why. `notlogs 'BRANCH MOVED'` +
+#     `surfaced` are the discriminators: the pre-fix script fails both.
+#   * and the tree must still be REAPED. Refusing to USE a worktree is not a licence to LEAVE it on the
+#     home volume: "reaped on EVERY path" (Principle 10) has no exception for the paths that refuse.
+#     The first cut of this refusal returned before the reap — it leaked one tree per unenterable head,
+#     forever, while the file above still claimed every path reaps. Asserted, not claimed.
+echo "== WORKTREE UNENTERABLE: refuse by name — no model, no push, and the TRUE cause reported =="
+DESC="a worktree that exists but cannot be entered runs NO model and is refused by its real cause"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+BADWT="$CASE/unenterable"; mkdir -p "$BADWT"; chmod 000 "$BADWT"
+# Fixture check: as root, chmod cannot make a dir unenterable, and the row would pass vacuously.
+if ( cd "$BADWT" ) 2>/dev/null; then
+  chmod 755 "$BADWT"
+  printf '  SKIP %s: running as root — a chmod-000 dir is still enterable, so this row cannot bite\n' "$DESC"
+else
+  # a fresh-tree that SUCCEEDS (rc 0, prints a real, EXISTING dir) — so only enterability is in question
+  printf '#!/usr/bin/env bash\nprintf %%s "%s"\n' "$BADWT" > "$BIN/fresh-tree-bad.sh"; chmod +x "$BIN/fresh-tree-bad.sh"
+  sweep feat/x "$SHA" FAKE_FIXER=commit FRESH_TREE="$BIN/fresh-tree-bad.sh"
+  never_ran; no_push; surfaced
+  ck "$(clone_intact && echo 1 || echo 0)" "a shared clone was MUTATED — the model ran in the caller's cwd because the cd was not a guard"
+  ck "$([ "$(origin_sha feat/x)" = "$SHA" ] && echo 1 || echo 0)" "origin/feat/x moved — something was pushed from an un-isolated run"
+  logs 'FRESH-TREE FAILED'                       # refused for what it IS: no usable isolated worktree
+  notlogs 'BRANCH MOVED'                         # …not for what it merely LOOKS like from `git -C`
+  notlogs 'FIXER NO-COMMIT'; notlogs 'FIXER LANDED'
+  ck "$([ ! -d "$BADWT" ] && echo 1 || echo 0)" "the REFUSED worktree was left behind — every path reaps (Principle 10), including the ones that refuse to use the tree"
+  chmod 755 "$BADWT" 2>/dev/null || true         # (a reaped tree is gone; this only matters if it leaked)
+  done_case
+fi
 
 echo
 echo "poller-fixer-dryrun: $pass passed, $fail failed"

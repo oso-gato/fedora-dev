@@ -174,13 +174,33 @@ RULES (hard):
       AUTHOR_DONE: <one-line PR title>
 AUTHOR_EOF
 
-log "spawning bounded author (timeout ${AUTHOR_TIMEOUT}s)"
-# STDIN CLOSED (`</dev/null`) — load-bearing, not hygiene: `claude -p` DRAINS whatever stdin it inherits,
-# to EOF. dev-author is driven per-issue by dev-loop, so an inherited stdin means this run (a) SWALLOWS
-# the rest of the caller's backlog — the caller's next `read` hits EOF and its pass ends after one issue —
-# and (b) feeds that list into the model's context as unasked-for input. The prompt is an ARGUMENT; the
-# run needs no stdin at all. (dev-loop also feeds its own list on FD 3: both ends of the hole are shut.)
-out="$(cd "$WT" && timeout "$AUTHOR_TIMEOUT" $AUTHOR_CLAUDE "$prompt" </dev/null 2>&1)"; rc=$?
+log "spawning bounded author (timeout ${AUTHOR_TIMEOUT}s, prompt ${#prompt} bytes)"
+# THE PROMPT RIDES STDIN, NEVER ARGV (#155). The kernel caps a SINGLE argv argument at MAX_ARG_STRLEN
+# (32 pages = 131072 bytes) independently of the far larger total ARG_MAX, so an argv prompt is a latent
+# E2BIG — and this one embeds an ISSUE BODY, which no one bounds: a long spec would simply fail to EXEC
+# and the author would never run (that is exactly how the fitness reviewer died on #154). stdin has no
+# such ceiling. It also SUBSUMES the old `</dev/null`: `claude -p` drains whatever stdin it inherits to
+# EOF, and dev-loop drives this script per-issue — off FD 0 the first author would swallow the rest of
+# the backlog. Now the model's stdin IS the prompt pipe, so there is nothing else there to swallow.
+# (dev-loop still feeds its list on FD 3 and closes stdin: both ends of that hole stay shut.)
+# `set +o pipefail` inside the subshell (it cannot leak out) keeps $rc the MODEL's own — with pipefail
+# on, a model that exits 0 without draining its prompt would make printf die of SIGPIPE and report 141.
+#
+# THE ISOLATION IS FAIL-CLOSED, AND THE `cd` IS PART OF IT — the model runs in its OWN worktree or it
+# does NOT run. `cd "$WT" && set +o pipefail; <pipe>` does NOT say that: `&&` binds to `set` alone and
+# the `;` ends the list, so the pipeline runs ANYWAY in the CALLER'S cwd — under dev-loop, the shared
+# clone — with a prompt telling it to implement and commit. That is the 2026-06-28 cross-branch-leak
+# hazard `policy/CLAUDE.md` names by date. The BRACE GROUP binds the whole body to the cd. And a cd that
+# fails must SAY SO rather than be read downstream as a model that ran and committed nothing (the
+# no-progress surface below) — the author never STARTED, which is an infrastructure fault, not a stuck
+# feature. Same rc 3 as a failed fresh-tree: an unusable worktree, a question posted, no PR opened.
+# `( cd )` tests what the real cd does (a directory can exist and still be unenterable).
+if ! ( cd "$WT" ) 2>/dev/null; then
+  log "cannot enter isolated worktree '$WT' (fail-closed) — the author was NOT run"
+  surface_blocked "the isolated worktree for this feature could not be entered (\`$WT\`), so the author was **never run** — no code was written and no PR was opened. A maintainer should check the repo clone on the dev box. (Fail-closed by design: the author is NEVER run outside its own worktree.)"
+  exit 3
+fi
+out="$(cd "$WT" && { set +o pipefail; printf '%s' "$prompt" | timeout "$AUTHOR_TIMEOUT" $AUTHOR_CLAUDE 2>&1; })"; rc=$?
 [ "$rc" = 124 ] && log "author run hit the ${AUTHOR_TIMEOUT}s timeout"
 sentinel="$(extract_sentinel "$out")"
 head_sha="$(git -C "$WT" rev-parse HEAD 2>/dev/null)"

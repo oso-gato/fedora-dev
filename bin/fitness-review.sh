@@ -28,6 +28,31 @@
 #
 # SAFE BY DEFAULT: --dry-run prints the composed verdict and posts nothing. Real posting needs --post.
 #
+# THE PROMPT RIDES STDIN, NEVER ARGV (#155 — the defect that made this gate UNRUNNABLE on a big PR).
+# Linux caps a SINGLE argv argument at MAX_ARG_STRLEN (32 pages = 131072 bytes) INDEPENDENTLY of the far
+# larger total ARG_MAX, so the old `$FITNESS_CLAUDE "$PROMPT"` failed to EXEC with E2BIG on any PR whose
+# prompt (diff + body + rubric) crossed ~128 KiB: the reviewer never started (measured in-box: #147
+# 22557 diff bytes → reviewed; #153 50382 → reviewed; #154 141078 → E2BIG, never ran). And because the
+# reviewer's stderr was discarded, the harness then blamed the MODEL ("produced no verdict") for a
+# failure of its own transport, and the poller re-attempted it every sweep, forever, in silence.
+# So: the prompt goes on stdin (no ceiling), the reviewer's stderr is KEPT, and the three failure events
+# — could-not-exec / non-zero exit / ran-but-emitted-no-verdict — are three DISTINCT log lines.
+#
+# EXIT CODES (a contract with bin/pr-poller.sh's REVIEW arm):
+#   0  a verdict was extracted (and, with --post, posted).
+#   1  a PRECONDITION refused the review (not host-GREEN, no diff, SoD/config, post failed). RETRYABLE:
+#      the state may change on its own, so the caller may simply try again next sweep.
+#   3  THE REVIEWER COULD NOT BE RUN, or ran and produced no sanctioned verdict, FOR THIS HEAD. NOT a
+#      governance judgment. Its cause may be PERMANENT (E2BIG, missing binary, bad credential) or
+#      TRANSIENT (model API 5xx, rate limit, timeout, a killed run) and THIS HARNESS CANNOT TELL THEM
+#      APART — the reviewer's own stderr is reported so a human can, but the rc alone cannot. So the
+#      caller must do NEITHER extreme: not re-spin at sweep cadence with no signal (#155 R4; the
+#      silent-spin class of #150), and not park a host-GREEN PR on the FIRST one (a single blip would
+#      then strand it forever — nothing else re-reviews it; #156). It must retry a BOUNDED, SPACED number
+#      of times and SURFACE only when the failure survives them — which is exactly what bin/pr-poller.sh's
+#      REVIEW arm does (FITNESS_REVIEW_TRIES × FITNESS_RETRY_BACKOFF → a question carrying this stderr).
+#      Nothing is posted either way, so the gate stays NONE ⇒ auto-merge REFUSEs (fail-closed).
+#
 # Usage:
 #   fitness-review.sh <repo> <pr>              # dry-run: run the review, print the verdict, post nothing
 #   fitness-review.sh --post <repo> <pr>       # run + post the verdict comment as $FITNESS_LOGIN
@@ -41,6 +66,13 @@
 #                      (default: oso-gato-erebus-claudebox[bot]). Set empty to skip the GREEN precheck.
 #   FITNESS_CLAUDE     headless reviewer command (default: claude -p). Overridable for testing.
 #   FITNESS_DIFF_CAP   max diff bytes fed to the reviewer (default 200000; larger → truncated + noted).
+#                      A CAP MUST SIT BELOW THE CEILING IT PROTECTS: this default used to sit ABOVE the
+#                      131072-byte argv ceiling the transport could actually carry, so it could never do
+#                      its job. On stdin there is no such ceiling; the binding ceiling is now the
+#                      reviewer's CONTEXT (200 KB ≈ 50k tokens, far inside it), and the transport is
+#                      PROVEN to carry the full default cap by fitness-review.test.sh — not asserted.
+#                      Truncation is LOUD: logged here, and stated in the prompt AND on the posted
+#                      verdict, so a reviewer never silently PASSes on the strength of code it never saw.
 set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 
@@ -147,9 +179,17 @@ title="$(gh pr view "$PR" --repo "$SLUG" --json title -q .title 2>/dev/null)"
 body="$(gh pr view "$PR" --repo "$SLUG" --json body -q .body 2>/dev/null)"
 diff="$(gh pr diff "$PR" --repo "$SLUG" 2>/dev/null)"
 [ -n "$diff" ] || die "empty/unreadable diff for $SLUG#$PR (fail-closed)"
-diff_note=""
+# TRUNCATION IS EXPLICIT, LOUD, AND CARRIED INTO THE VERDICT (#155 R3). A reviewer handed a silently
+# truncated diff can PASS on the strength of code it never saw — a CORRECTNESS risk, not an ergonomic
+# one. So when the cap bites we (a) say so in the log, (b) tell the REVIEWER it is judging a partial
+# diff and to ESCALATE if the hidden part matters, and (c) stamp it on the posted verdict comment so the
+# human reading a PASS knows what it was based on.
+diff_note=""; trunc_note=""
 if [ "${#diff}" -gt "$FITNESS_DIFF_CAP" ]; then
-  diff="${diff:0:$FITNESS_DIFF_CAP}"; diff_note=$'\n\n[diff truncated at '"$FITNESS_DIFF_CAP"$' bytes — judge on what is shown; if truncation hides the answer, ESCALATE]'
+  log "diff is ${#diff} bytes > FITNESS_DIFF_CAP=$FITNESS_DIFF_CAP — TRUNCATING: the reviewer judges a PARTIAL diff (it is told so, and told to ESCALATE if the hidden part decides it)"
+  trunc_note=" Judged a **TRUNCATED** diff — first $FITNESS_DIFF_CAP of ${#diff} bytes (\`FITNESS_DIFF_CAP\`)."
+  diff_note=$'\n\n[DIFF TRUNCATED: you are seeing the first '"$FITNESS_DIFF_CAP"$' bytes of '"${#diff}"$' — this is a PARTIAL diff. Judge only on what is shown, and if what is hidden could change the judgment, ESCALATE rather than PASS.]'
+  diff="${diff:0:$FITNESS_DIFF_CAP}"
 fi
 
 read -r -d '' PROMPT <<PROMPT_EOF || true
@@ -185,21 +225,53 @@ DIFF:
 $diff$diff_note
 PROMPT_EOF
 
-log "reviewing $SLUG#$PR @ ${head_sha:0:7} (author=$pr_author, reviewer=$FITNESS_LOGIN)…"
-review="$($FITNESS_CLAUDE "$PROMPT" 2>/dev/null)"
-verdict="$(printf '%s' "$review" | extract_verdict)"
+log "reviewing $SLUG#$PR @ ${head_sha:0:7} (author=$pr_author, reviewer=$FITNESS_LOGIN, prompt ${#PROMPT} bytes)…"
 
+# ---- RUN THE REVIEWER: prompt on STDIN, stderr KEPT (see the header) --------------------------------
+# `set +o pipefail` INSIDE the substitution subshell (it cannot leak to the parent) so $rc is the
+# REVIEWER'S OWN exit status: with pipefail on, a reviewer that exits 0 without draining its prompt
+# makes printf die of SIGPIPE and the pipeline reports 141 — a transport artefact masquerading as a
+# model failure, which is the very lie this change exists to stop telling.
+errf="$(mktemp -t fitness-stderr.XXXXXX)" || die "cannot create a temp file for the reviewer's stderr"
+trap 'rm -f "$errf"' EXIT
+review="$(set +o pipefail; printf '%s' "$PROMPT" | $FITNESS_CLAUDE 2>"$errf")"; rc=$?
+rerr="$(tail -c 1500 "$errf" 2>/dev/null)"
+say_stderr(){ [ -n "$rerr" ] || { log "  reviewer stderr: (empty)"; return; }
+              printf '%s\n' "$rerr" | while IFS= read -r l; do log "  reviewer stderr: $l"; done; }
+
+# THREE DIFFERENT EVENTS, THREE DIFFERENT LINES (#155 R2). None of them is a judgment, so none of them
+# posts anything (the gate stays NONE ⇒ auto-merge REFUSEs). All exit 3: the caller must SURFACE, not
+# re-spin (the header's exit-code contract).
+if [ "$rc" -ne 0 ]; then
+  # exec failure (E2BIG / not found), auth failure, crash, timeout — the reviewer produced NO judgment
+  # because it never got to. Say THAT, with its own stderr; never "the reviewer produced no verdict".
+  log "reviewer FAILED TO RUN: '$FITNESS_CLAUDE' exited $rc — it was never able to judge $SLUG#$PR @ ${head_sha:0:7}. This is an INFRASTRUCTURE failure, not a verdict."
+  say_stderr
+  # DO NOT ASSERT WHICH CLASS THIS IS. An E2BIG or a missing binary fails identically forever; an API
+  # 5xx or a timeout clears on its own. The rc cannot tell them apart (the stderr above can — for a
+  # human), so the CALLER bounds its retries and surfaces what survives them. Claiming "re-running this
+  # will fail identically" here was exactly the kind of asserted-not-proven line this harness exists to
+  # stop telling — and it made the poller park a GREEN PR on a single blip (#156).
+  log "posting nothing (fail-closed); merge stays blocked. rc 3 — the caller must retry this a BOUNDED number of times and surface the cause if it persists."
+  exit 3
+fi
+verdict="$(printf '%s' "$review" | extract_verdict)"
 if [ -z "$verdict" ]; then
-  # Infra/format failure — NOT a governance judgment. Post nothing (gate stays NONE ⇒ REFUSE). A human
-  # can look; we never manufacture a PASS or a misleading ESCALATE from a broken reviewer run.
-  die "reviewer produced no sanctioned FITNESS_VERDICT line — posting nothing (fail-closed). Merge stays blocked."
+  if [ -z "$review" ]; then
+    log "reviewer RAN and exited 0 but produced NO OUTPUT AT ALL — nothing to extract a verdict from."
+  else
+    log "reviewer RAN and produced ${#review} bytes of output but NO sanctioned FITNESS_VERDICT line — its reply is not a usable judgment."
+  fi
+  say_stderr
+  log "posting nothing (fail-closed); merge stays blocked."
+  exit 3
 fi
 
 # ---- compose the CANONICAL verdict comment (shell-owned) + the model's rationale -------------------
 rationale="$(printf '%s' "$review" | grep -vE '^[[:space:]]*FITNESS_VERDICT:' | sed -e 's/[[:space:]]*$//')"
 comment="Fitness review: VERDICT $verdict — head $head_sha
 
-<sub>Independent fitness review (Step 4b) — reviewer \`$FITNESS_LOGIN\`, head \`${head_sha:0:7}\`. Machine-read by \`bin/auto-merge.sh\` from LINE 1 ONLY (verdict + FULL head sha — prose/rationale below this line is never machine-trusted); the verdict token above is authoritative.</sub>
+<sub>Independent fitness review (Step 4b) — reviewer \`$FITNESS_LOGIN\`, head \`${head_sha:0:7}\`.$trunc_note Machine-read by \`bin/auto-merge.sh\` from LINE 1 ONLY (verdict + FULL head sha — prose/rationale below this line is never machine-trusted); the verdict token above is authoritative.</sub>
 
 <details><summary>rationale</summary>
 
