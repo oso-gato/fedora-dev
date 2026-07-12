@@ -14,7 +14,8 @@
 #   T1 build (gate)    : podman build --isolation=chroot + the persistent dnf-cache bind  [+ $BUILD_ARGS]
 #                        (same -v …/fd-dnf:/var/cache/libdnf5 build-throwaway.sh + the host gate use,
 #                         so T1 reproduces the REAL build env — catches bind-mount-only failures)
-#   T2 assembly (gate) : create + export + inspect (entrypoint present, sane size)
+#   T2 assembly (gate) : inspect (a startup process is DECLARED: Entrypoint or Cmd) + create + export
+#                        (sane size; the fleet entrypoint*.sh file only when the source tree ships one)
 #   T3 lint (gate)     : bash -n on every shipped *.sh in the repo
 #   T4 smoke (info)    : degraded boot for NON-systemd lineages only; systemd-PID-1 => assembly-only
 set -uo pipefail
@@ -56,12 +57,28 @@ if [ "$DOBUILD" = build ]; then
 else podman image exists "$TAG" && g build SKIP-exists || { g build NO-IMAGE; exit 1; }; fi
 
 echo "== T2 assembly (gate) =="
+# REPO-AGNOSTIC startup check (#160): a correct image DECLARES a startup process — podman inspect
+# shows a non-empty .Config.Entrypoint OR .Config.Cmd (CMD-only is correct; NEITHER cannot start —
+# and podman 5's `create` still happily creates such a container, so this inspect is the only
+# thing standing between a no-startup image and a GREEN). The old unconditional rootfs grep for
+# usr/local/bin/entrypoint*.sh was the fedora-dev-family CONVENTION, not a correctness property:
+# it RED'd a legitimately minimal CMD-only image whose build/lint/smoke all passed (e2e-alpha,
+# 2026-07-12) and wedged the E2E-A run on a validator opinion.
+start=$(podman inspect --format '{{len .Config.Entrypoint}}+{{len .Config.Cmd}}' "$TAG" 2>/dev/null)
+if [ -n "$start" ] && [ "$start" != "0+0" ]; then g startup-process "PASS(entrypoint+cmd argv counts $start)"
+else g startup-process "FAIL(image declares NO startup process — .Config.Entrypoint AND .Config.Cmd are both empty; set ENTRYPOINT or CMD in $FILE)"; fi
 cid=$(podman create "$TAG" 2>/dev/null)
 if [ -n "$cid" ]; then
   podman export "$cid" >"$OUT/rootfs.tar" 2>/dev/null; podman rm -f "$cid" >/dev/null 2>&1
   files=$(tar -tf "$OUT/rootfs.tar" 2>/dev/null); n=$(wc -l <<<"$files")
   [ "$n" -gt 1000 ] && g rootfs-size "PASS($n)" || g rootfs-size FAIL
-  grep -qE 'usr/local/bin/entrypoint[^/]*\.sh' <<<"$files" && g entrypoint-present PASS || g entrypoint-present FAIL
+  # FLEET CONVENTION, now CONDITIONAL (#160): only a tree that SHIPS entrypoint*.sh sources (the
+  # fedora-dev family) must carry /usr/local/bin/entrypoint*.sh in the image — a fleet image that
+  # LOST its entrypoint is a real regression; a repo without the convention is never held to it.
+  if [ -n "$(find "$REPO" -name 'entrypoint*.sh' -not -path '*/.git/*' -print -quit 2>/dev/null)" ]; then
+    grep -qE 'usr/local/bin/entrypoint[^/]*\.sh' <<<"$files" && g entrypoint-present PASS \
+      || g entrypoint-present "FAIL(tree ships entrypoint*.sh but the image carries no /usr/local/bin/entrypoint*.sh — fleet-convention regression; COPY it into the image)"
+  else i entrypoint-present "skipped (tree ships no entrypoint*.sh — the startup-process check governs)"; fi
 else g assembly FAIL; fi
 
 echo "== T3 lint (gate) — every shipped *.sh =="
