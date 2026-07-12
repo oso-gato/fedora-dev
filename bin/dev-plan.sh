@@ -6,8 +6,13 @@
 # is the front of the loop: after this, the human is out until an ESCALATE question (R13).
 #
 # R1 discipline — it plans ONLY the human-confirmed spec: the spec issue must carry the `approved` label
-# OR a maintainer `CONFIRMED` comment; an unconfirmed spec is refused (the confirmed set is what fitness
+# OR a MAINTAINER `CONFIRMED` comment; an unconfirmed spec is refused (the confirmed set is what fitness
 # later grades against, so planning an unconfirmed one would ground the whole loop in unratified intent).
+# The comment gate is bound like every fleet trust anchor (the auto-merge G2 discipline): the token must
+# OPEN line 1 of the comment (machine-owned position — a quoted or mid-prose token never acts) AND the
+# comment author must hold admin|maintain on the repo (permission-checked against the GitHub API, never
+# text-trusted; the label path is already permission-gated by GitHub itself). Any check unfetchable →
+# not confirmed (fail-closed).
 #
 # DETERMINISM split (design law): the JUDGMENT — "what features does this objective decompose into" — is
 # ONE bounded `claude -p`, which WRITES each feature as a file (never creates issues itself). The ACTION
@@ -34,10 +39,22 @@ log(){ printf '[%s] dev-plan: %s\n' "$(date -u +%H:%M:%S 2>/dev/null || echo --:
 
 # ---- PURE HELPERS (--selftest covers exactly these) ------------------------------------------------
 
-# is_confirmed <has-approved-label:0|1> <has-CONFIRMED-comment:0|1> → CONFIRMED | UNCONFIRMED.
+# is_confirmed <has-approved-label:0|1> <has-maintainer-CONFIRMED-comment:0|1> → CONFIRMED | UNCONFIRMED.
 # Either signal suffices; both absent → refuse (R1 fail-closed).
 is_confirmed(){
   { [ "$1" = 1 ] || [ "$2" = 1 ]; } && printf 'CONFIRMED' || printf 'UNCONFIRMED'
+}
+
+# confirm_line1 <comment-line-1> → 1 iff the CONFIRMED token OPENS the line (G2 position discipline:
+# only LINE 1 of a comment is ever passed in, so a quoted/mid-prose/multi-line-embedded token is inert).
+confirm_line1(){
+  printf '%s' "$1" | grep -qE '^CONFIRMED\b' && printf 1 || printf 0
+}
+
+# role_can_confirm <role_name> → 1 only for a repo maintainer (admin|maintain); write/triage/read/bot/
+# empty/unknown → 0. The fleet App identities hold write, so they can never confirm a spec.
+role_can_confirm(){
+  case "$1" in admin|maintain) printf 1;; *) printf 0;; esac
 }
 
 # feature_title <feature-file> → line 1 with a leading '# ' stripped (the issue title).
@@ -61,6 +78,16 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "approved label → CONFIRMED"   "$(is_confirmed 1 0)" "CONFIRMED"
   ck "CONFIRMED comment → CONFIRMED" "$(is_confirmed 0 1)" "CONFIRMED"
   ck "neither → UNCONFIRMED"        "$(is_confirmed 0 0)" "UNCONFIRMED"
+  echo "== confirm_line1 (token must OPEN line 1 — G2 position discipline) =="
+  ck "line-1 token acts"            "$(confirm_line1 'CONFIRMED — ship it')" "1"
+  ck "bare token acts"              "$(confirm_line1 'CONFIRMED')" "1"
+  ck "mid-prose token inert"        "$(confirm_line1 'I would say CONFIRMED')" "0"
+  ck "prefix-glued token inert"     "$(confirm_line1 'CONFIRMEDx')" "0"
+  echo "== role_can_confirm (maintainer-bound: admin|maintain only) =="
+  ck "admin confirms"               "$(role_can_confirm admin)" "1"
+  ck "maintain confirms"            "$(role_can_confirm maintain)" "1"
+  ck "write cannot (fleet Apps)"    "$(role_can_confirm write)" "0"
+  ck "empty/unknown cannot"         "$(role_can_confirm '')" "0"
   echo "== feature file parsing =="
   ck "title strips '# '"            "$(feature_title "$td/feat-01.md")" "Add a WebP probe"
   ck "body is lines 2+"             "$(feature_body "$td/feat-01.md")" "$(printf 'The body line one.\nAnd two.')"
@@ -86,10 +113,25 @@ title="$(gh issue view "$SPEC" --repo "$SLUG" --json title -q .title 2>/dev/null
   || { log "cannot read spec $SLUG#$SPEC (fail-closed)"; exit 2; }
 body="$(gh issue view "$SPEC" --repo "$SLUG" --json body -q .body 2>/dev/null)"
 has_appr=0; gh issue view "$SPEC" --repo "$SLUG" --json labels -q '.labels[].name' 2>/dev/null | grep -qx "$APPROVED_LABEL" && has_appr=1
-has_conf=0; gh issue view "$SPEC" --repo "$SLUG" --json comments -q '.comments[].body' 2>/dev/null | grep -qE '^\s*CONFIRMED\b' && has_conf=1
+# Comment gate, anchor-bound (auto-merge G2 discipline): only LINE 1 of each comment is read (machine-
+# owned position), and it acts only when its author holds admin|maintain on the repo — verified against
+# the GitHub permission API per author, fail-closed (unfetchable role ⇒ not a maintainer ⇒ inert).
+has_conf=0
+if [ "$has_appr" != 1 ]; then
+  while IFS=$'\t' read -r c_login c_line1; do
+    [ -n "$c_login" ] || continue
+    [ "$(confirm_line1 "$c_line1")" = 1 ] || continue
+    role="$(gh api "repos/$SLUG/collaborators/$c_login/permission" -q .role_name 2>/dev/null)"
+    if [ "$(role_can_confirm "$role")" = 1 ]; then
+      has_conf=1; log "CONFIRMED by maintainer @$c_login (role: $role)"; break
+    fi
+    log "ignoring line-1 CONFIRMED from @$c_login (role: ${role:-unfetchable} — not a maintainer)"
+  done < <(gh issue view "$SPEC" --repo "$SLUG" --json comments \
+             -q '.comments[] | [.author.login, (.body | split("\n")[0])] | @tsv' 2>/dev/null)
+fi
 if [ "$(is_confirmed "$has_appr" "$has_conf")" != CONFIRMED ]; then
-  log "spec $SLUG#$SPEC is NOT confirmed (needs the '$APPROVED_LABEL' label or a CONFIRMED comment) — refusing"
-  gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → refused:** this objective is not yet confirmed. Add the \`$APPROVED_LABEL\` label or comment \`CONFIRMED\` to authorize planning (R1)." >/dev/null 2>&1 || true
+  log "spec $SLUG#$SPEC is NOT confirmed (needs the '$APPROVED_LABEL' label or a maintainer line-1 CONFIRMED comment) — refusing"
+  gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → refused:** this objective is not yet confirmed. Add the \`$APPROVED_LABEL\` label, or have a repo maintainer post a comment whose FIRST line starts with \`CONFIRMED\`, to authorize planning (R1)." >/dev/null 2>&1 || true
   exit 3
 fi
 
@@ -123,30 +165,57 @@ case "$sentinel" in
     log "planner reported BLOCKED"
     gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → needs a decision (BLOCKED):** ${sentinel#BLOCKED }"$'\n\n<sub>autonomous planner (R2). No backlog issues filed — a dev-task question, not an approval request.</sub>' >/dev/null 2>&1 || true
     exit 4 ;;
+  DONE*) : ;;
+  *)
+    # No sentinel at all — a timed-out/killed planner may have written a PARTIAL feature set; filing it
+    # would silently ship a truncated backlog behind the idempotency marker. Fail-closed: file NOTHING,
+    # surface, leave the marker unwritten so a re-run can re-plan (the both-end rigor the DONE end needs).
+    log "planner ended WITHOUT a PLAN_DONE/PLAN_BLOCKED sentinel (timeout/interrupted?) — refusing to file a possibly-partial plan"
+    gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → needs a decision (BLOCKED):** the planner did not complete (no \`PLAN_DONE\` sentinel — likely a timeout). No backlog issues were filed; re-run \`dev-plan\` (or raise \`PLAN_TIMEOUT\`)."$'\n\n<sub>autonomous planner (R2). A dev-task question, not an approval request.</sub>' >/dev/null 2>&1 || true
+    exit 7 ;;
 esac
 
 # 3) FILE — deterministic harness: one backlog issue per feature file (the model created none).
 shopt -s nullglob
 files=("$OUTDIR"/feat-*.md)
 if [ "${#files[@]}" -eq 0 ]; then
-  log "planner wrote no feature files and did not block — surfacing as no-progress"
-  gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → needs a decision (BLOCKED):** the planner produced no features (timeout or unable to decompose). A maintainer should sharpen the objective." >/dev/null 2>&1 || true
+  log "planner claimed PLAN_DONE but wrote no feature files — surfacing as no-progress"
+  gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → needs a decision (BLOCKED):** the planner produced no features (unable to decompose). A maintainer should sharpen the objective." >/dev/null 2>&1 || true
   exit 5
 fi
-created=()
+# Existing-title dedup: a re-run after a DEFERRED partial failure files ONLY the still-missing features,
+# never duplicates. Fail-closed: if the existing set is unreadable, dedup is impossible → file nothing.
+existing="$(gh issue list --repo "$SLUG" --label "$BACKLOG_LABEL" --state all --limit 200 \
+              --json title -q '.[].title' 2>/dev/null)" \
+  || { log "cannot list existing '$BACKLOG_LABEL' issues (fail-closed — filing nothing, marker not written)"; exit 6; }
+created=(); failed=0
 for fpath in "${files[@]}"; do
   ftitle="$(feature_title "$fpath")"; [ -n "$ftitle" ] || continue
+  if [ -n "$existing" ] && printf '%s\n' "$existing" | grep -qxF -- "$ftitle"; then
+    log "  already filed (dedup): $ftitle"; continue
+  fi
   fbody="$(feature_body "$fpath")"$'\n\n---\nPart of the objective #'"$SPEC"' — filed autonomously by dev-plan (R2). The dev-loop will author this.'
   bf="$(mktemp)"; printf '%s' "$fbody" > "$bf"
   url="$(gh issue create --repo "$SLUG" --title "$ftitle" --label "$BACKLOG_LABEL" --body-file "$bf" 2>/dev/null)"
   rm -f "$bf"
-  [ -n "$url" ] && { created+=("$url"); log "  filed backlog: $url"; } || log "  WARN: failed to file '$ftitle'"
+  [ -n "$url" ] && { created+=("$url"); log "  filed backlog: $url"; } \
+    || { failed=$((failed+1)); log "  WARN: failed to file '$ftitle'"; }
 done
-[ "${#created[@]}" -gt 0 ] || { log "no backlog issues filed (all creates failed) — fail-closed, not marking planned"; exit 6; }
+# ANY create failure → DEFER, marker NOT written (defers, never drops): the next run re-plans and the
+# title dedup above re-files only what is missing. No comment — transient API failure needs no human.
+if [ "$failed" -gt 0 ]; then
+  log "$failed feature create(s) failed — DEFERRED, marker NOT written (${#created[@]} filed this run will be dedup-skipped on retry)"
+  exit 6
+fi
 
-# 4) AUDIT — summarise on the spec issue (R5) + mark planned (idempotent).
-summary="**dev-plan → planned:** decomposed this objective into ${#created[@]} backlog feature issue(s):"$'\n'"$(printf '- %s\n' "${created[@]}")"$'\n\n<sub>autonomous planner (R2). The dev-loop authors each; the host live-gate → fitness → poller pipeline ships them. No merge taken.</sub>'
-gh issue comment "$SPEC" --repo "$SLUG" --body "$summary" >/dev/null 2>&1 || log "WARN: could not post the plan summary"
+# 4) AUDIT — summarise on the spec issue (R5) + mark planned (idempotent) — only on a COMPLETE plan.
+if [ "${#created[@]}" -gt 0 ]; then
+  summary="**dev-plan → planned:** decomposed this objective into ${#created[@]} backlog feature issue(s):"$'\n'"$(printf '- %s\n' "${created[@]}")"$'\n\n<sub>autonomous planner (R2). The dev-loop authors each; the host live-gate → fitness → poller pipeline ships them. No merge taken.</sub>'
+  gh issue comment "$SPEC" --repo "$SLUG" --body "$summary" >/dev/null 2>&1 || log "WARN: could not post the plan summary"
+else
+  log "every planned feature was already filed (recovered from an earlier deferred run)"
+fi
 : > "$marker"
-log "PLANNED $SLUG#$SPEC → ${#created[@]} backlog issue(s)"
-printf '%s\n' "${created[@]}"
+log "PLANNED $SLUG#$SPEC → ${#created[@]} new backlog issue(s)"
+if [ "${#created[@]}" -gt 0 ]; then printf '%s\n' "${created[@]}"; fi
+exit 0

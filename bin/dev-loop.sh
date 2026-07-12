@@ -91,5 +91,9 @@ if [ "${1:-}" = "--watch" ]; then
   while :; do one_pass "$REPO"; sleep "$LOOP_INTERVAL"; done
 else
   REPO="${1:?usage: dev-loop.sh <repo> [--once] | --watch <repo> | --selftest}"
+  case "${2:-}" in
+    ''|--once) : ;;  # one pass IS the default; --once names it explicitly (timer-unit friendliness)
+    *) log "unknown argument '$2' (usage: dev-loop.sh <repo> [--once] | --watch <repo> | --selftest)"; exit 2 ;;
+  esac
   one_pass "$REPO"
 fi
