@@ -110,20 +110,32 @@ parse_backlog(){
 #   SKIPPED   rc 0, no URL      → its guard no-op'd (already authored / an open PR exists / not backlog-
 #                                 labelled). NO model run was spawned ⇒ NO cap slot: an in-flight feature
 #                                 must never crowd the tail of the backlog out (the starvation above).
-#   QUESTION  rc 3|4|5|6|7|8    → the run spawned but could not finish, and dev-author POSTED a dev-task
+#   QUESTION  rc 3|4|5|6|7|8|9  → the run spawned but could not finish, and dev-author POSTED a dev-task
 #                                 question on the issue — EVERY one of these paths calls its
 #                                 surface_blocked() (3 worktree, 4 BLOCKED, 5 no-progress, 6 in-box RED,
-#                                 7 push, 8 PR-create). Spends a slot; the question it left on the issue
-#                                 is what PARKS it next pass (park_state, below) — the driver itself
-#                                 records nothing.
+#                                 7 push, 8 PR-create, 9 RECONCILE: the base could not be fetched, or the
+#                                 authored branch collides with work that landed while it was being
+#                                 written — #150). Spends a slot; the question it left on the issue is what
+#                                 PARKS it next pass (park_state, below) — the driver itself records nothing.
 #   RETRY     any other rc      → dev-author posted NOTHING (rc 2 — it could not even read the issue, so
-#                                 it fails closed BEFORE it can comment). Retried next pass; still takes a
-#                                 slot, so a broken environment cannot spin the whole backlog in one pass.
+#                                 it fails closed BEFORE it can comment; or a code this driver has never
+#                                 heard of, e.g. 127/124 — the enumeration above is the WHITELIST, so an
+#                                 unknown rc fails safe to "no question was posted" rather than claiming
+#                                 one was). Retried next pass; still takes a slot, so a broken environment
+#                                 cannot spin the whole backlog in one pass.
+#
+# THIS ENUMERATION IS A CONTRACT WITH bin/dev-author.sh, and it is pinned in lockstep by dev-loop.test.sh,
+# which DERIVES the code list from dev-author's own `exit`s: every surfacing code must land in QUESTION
+# here. It is not decoration. #150 added rc 9 to dev-author without touching this line, and the driver
+# then logged "(environmental — no question posted) — retrying next pass" for a run that HAD posted a
+# question, under-counting `asked` in the pass summary — the human's only view of the driver. Untruthful
+# reporting of a "cannot progress → surface" path is the exact defect class #150 exists to remove, so a
+# new dev-author exit code MUST be classified here in the same commit that adds it.
 run_class(){
   case "$1" in
-    0)           case "$2" in https://*) printf 'AUTHORED';; *) printf 'SKIPPED';; esac ;;
-    3|4|5|6|7|8) printf 'QUESTION' ;;
-    *)           printf 'RETRY' ;;
+    0)             case "$2" in https://*) printf 'AUTHORED';; *) printf 'SKIPPED';; esac ;;
+    3|4|5|6|7|8|9) printf 'QUESTION' ;;
+    *)             printf 'RETRY' ;;
   esac
 }
 
@@ -155,12 +167,16 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "rc4 BLOCKED → QUESTION"  "$(run_class 4 '')" "QUESTION"
   ck "rc5 no-progress → QUESTION" "$(run_class 5 '')" "QUESTION"
   ck "rc6 in-box RED → QUESTION"  "$(run_class 6 '')" "QUESTION"
-  # 3|7|8 ALSO call dev-author's surface_blocked() — a question IS on the issue, so they must PARK like
+  # 3|7|8|9 ALSO call dev-author's surface_blocked() — a question IS on the issue, so they must PARK like
   # any other surfaced question, never spin as RETRY (which re-spends a model run + re-asks every pass).
   ck "rc3 worktree → QUESTION"    "$(run_class 3 '')" "QUESTION"
   ck "rc7 push fail → QUESTION"   "$(run_class 7 '')" "QUESTION"
   ck "rc8 PR-create → QUESTION"   "$(run_class 8 '')" "QUESTION"
+  ck "rc9 reconcile (#150) → QUESTION" "$(run_class 9 '')" "QUESTION"
   ck "rc2 unreadable (posts nothing) → RETRY"  "$(run_class 2 '')" "RETRY"
+  # An rc dev-author cannot emit (127 = not on PATH, 124 = timeout-killed) posted nothing: fail SAFE to
+  # RETRY. That is why QUESTION is a whitelist, not "anything non-zero".
+  ck "rc127 (never ran → posts nothing) → RETRY" "$(run_class 127 '')" "RETRY"
   echo "== park_state — DERIVED from the issue's newest comment (no local state to lose) =="
   ck "our unanswered question is the newest comment → PARKED" \
      "$(park_state oso-gato-nox-claudebox oso-gato-nox-claudebox "$Q")" "PARKED"

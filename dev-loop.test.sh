@@ -70,10 +70,13 @@ EOF
 # dev-author stub — mirrors the REAL (rc, stdout, comment) contract the driver depends on:
 #   FAKE_AUTHOR_SKIP list → guard no-op: rc 0, NOTHING on stdout, no comment (already authored / PR in flight)
 #   FAKE_AUTHOR_FAIL      → rc 4: BLOCKED — and, like the real surface_blocked(), it POSTS the question
-#   FAKE_AUTHOR_RC=<n>:<rc> → issue <n> exits <rc>. The REAL dev-author calls surface_blocked() on rc 3
-#                           (worktree), 7 (push) and 8 (PR-create) too, not just 4|5|6 — so the stub posts
-#                           a question for ALL of those. rc 2 (unreadable issue) is the ONE code that fails
-#                           closed BEFORE it can comment: it posts NOTHING, and so must never park.
+#   FAKE_AUTHOR_RC=<n>:<rc> → issue <n> exits <rc>. Mirrors the REAL exit contract, which the stub must
+#                           not paraphrase: EVERY non-zero exit in dev-author is preceded by its
+#                           surface_blocked() — 3 worktree, 4 BLOCKED, 5 no-progress, 6 in-box RED, 7 push,
+#                           8 PR-create, 9 reconcile (#150) — so the stub posts a question for ALL of them.
+#                           rc 2 (unreadable issue) is the ONE code that fails closed BEFORE it can
+#                           comment: it posts NOTHING, and so must never park. Keyed on that ONE exception
+#                           rather than a list, so a code added to dev-author is modelled here by default.
 #   FAKE_POST_FAILS       → rc 4 but the comment POST fails (best-effort, as in the real script): no
 #                           question lands on the bus ⇒ the issue must be RE-OFFERED, never stranded.
 #   otherwise             → AUTHORED: rc 0 + the PR URL on stdout (its only stdout emission)
@@ -89,7 +92,7 @@ for s in ${FAKE_AUTHOR_SKIP:-}; do [ "$2" = "$s" ] && exit 0; done
 for m in ${FAKE_AUTHOR_RC:-}; do
   if [ "$2" = "${m%%:*}" ]; then
     rc="${m##*:}"
-    case "$rc" in 3|4|5|6|7|8) post_question "$@";; esac   # rc 2 posts nothing — fail-closed before it can
+    case "$rc" in 0|2) ;; *) post_question "$@";; esac   # rc 2 posts nothing — fail-closed before it can
     exit "$rc"
   fi
 done
@@ -111,10 +114,14 @@ fresh(){
 reply(){ printf '%s\t%s\n' "$2" "thanks — scope it to one probe." >> "$STORE/$1"; }
 # drive — run ONE pass and assert exactly which issues the author was INVOKED for. Successive drive()
 # calls WITHOUT fresh() are successive passes over the same BUS (that is how parking is proven).
+# The driver's own log is KEPT in $RUN_LOG, not discarded: what it INVOKED is only half the contract —
+# what it REPORTED is the other half, and the half a mis-classified exit code corrupts (see the derived
+# exit-code pin below). The pass summary is the human's only view of an unattended driver.
+RUN_LOG="$ROOT/run.log"
 drive(){ # <desc> <expected-author-invocations, space-separated>
   local desc="$1" want="$2"
   : > "$AUTHOR_LOG"
-  PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" bash "$LOOP" fedora-dev >/dev/null 2>&1 || true
+  PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" bash "$LOOP" fedora-dev >"$RUN_LOG" 2>&1 || true
   local got; got="$(awk '{print $3}' "$AUTHOR_LOG" | sort -n | tr '\n' ' ' | sed 's/ $//')"
   ck "$desc" "$got" "$want"
 }
@@ -210,18 +217,39 @@ fresh; FAKE_BACKLOG=$'3\n7\n12'
 printf '%s\t%s not really.\n' "randomer" "$ANCHOR" >> "$STORE/7"
 drive "7 is authored anyway — a forged marker is inert" "3 7 12"
 
-# --- THE rc-3/7/8 BLIND SPOT: dev-author ALSO posts a question (surface_blocked) when the worktree (3),
-# --- the push (7) or the PR create (8) fails — and because it writes its .done marker only AFTER a
-# --- successful PR create, such an issue stays open, unmarked and PR-less, so its guard says ACT again.
-# --- Left as RETRY, a persistent push/PR-create failure — lost credential, branch protection, issues
-# --- disabled — re-spends a full bounded `claude -p` run and re-posts the IDENTICAL question every
-# --- LOOP_INTERVAL, forever. These rows park them like any other surfaced question.
-echo "== rc 3|7|8 ALSO post a question (surface_blocked) — they PARK too, they do not spin =="
-for rc in 3 7 8; do
-  fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_RC="7:$rc"
-  drive "rc$rc pass 1: 7 surfaces a question" "3 7 12"
-  drive "rc$rc pass 2: 7 is PARKED — no model run re-spent, no question re-asked" "3 12"
-done
+# --- THE EXIT-CODE CONTRACT, DERIVED FROM dev-author ITSELF — the lockstep pin this suite was missing.
+# --- run_class() is a WHITELIST of the codes on which dev-author POSTED a question (every non-zero exit
+# --- but 2, which fails closed before it can comment). A code MISSING from that whitelist is invisible to
+# --- an invocation-only row: parking is derived from the BUS, so the question dev-author posted parks the
+# --- issue next pass whether or not the driver understood the code. What breaks is what the driver
+# --- REPORTS — it logs "(environmental — no question posted) — retrying next pass" for a run that DID
+# --- post a question, and leaves it out of the `asked` count in the pass summary: the only view a human
+# --- has of an unattended driver, now lying about a feature that is waiting on them. So these rows assert
+# --- the REPORT, and take the code list from dev-author's OWN `exit`s — a new surfacing exit code added
+# --- there without a run_class arm fails HERE, in the commit that adds it. (#150 added rc 9 — reconcile
+# --- fetch-failed / rebase-conflict — without touching run_class, and nothing in these 30 rows noticed.)
+# --- The PARK rows are kept too: left as RETRY, a persistent failure (lost credential, branch protection,
+# --- a base that will never rebase) re-spends a full bounded `claude -p` and re-asks the same question
+# --- every pass, forever.
+if [ -f "$AUTHOR" ]; then
+  echo "== every surfacing exit code in bin/dev-author.sh is classified QUESTION (derived, not listed) =="
+  # Code lines only (a full-line comment naming an exit code is not an exit); 0 = success/guard-no-op and
+  # 2 = fail-closed-before-commenting are the two documented non-surfacing codes.
+  SURFACING="$(grep -vE '^[[:space:]]*#' "$AUTHOR" | grep -oE 'exit [0-9]+' \
+               | awk '{print $2}' | sort -nu | grep -vE '^(0|2)$' | tr '\n' ' ')"
+  ck "dev-author still has surfacing exit codes to check against" \
+     "$([ -n "${SURFACING// /}" ] && echo yes || echo no)" "yes"
+  echo "   (derived from bin/dev-author.sh: rc ${SURFACING% })"
+  for rc in $SURFACING; do
+    fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_RC="7:$rc"
+    drive "rc$rc pass 1: 7 surfaces a question" "3 7 12"
+    ck "rc$rc is REPORTED as a surfaced question, not an environmental no-op" \
+       "$(grep -c 'a dev-task question is now on the issue' "$RUN_LOG")" "1"
+    ck "rc$rc counts toward the pass summary's 'question(s) surfaced'" \
+       "$(grep -cE 'pass complete .*: .* 1 question\(s\) surfaced' "$RUN_LOG")" "1"
+    drive "rc$rc pass 2: 7 is PARKED — no model run re-spent, no question re-asked" "3 12"
+  done
+fi
 
 # --- rc 2 is the ONE code that posts NOTHING (dev-author cannot even read the issue → fail-closed before
 # --- it can comment). Nothing lands on the bus, so nothing parks it: it must RETRY, or a ticket nobody

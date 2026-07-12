@@ -417,7 +417,7 @@ reap_tree(){ # <clone> <worktree>
 # discretion; a run that instead did `git checkout -b` in the shared clone would move the live clone's
 # HEAD off main underneath the running poller. Now the harness guarantees it — mirroring dev-author.sh,
 # the proven pattern (isolate via fresh-tree.sh → model commits, never pushes → harness owns git).
-run_fixer(){ # <pr> <headref> <sha> <cause:HOST|FITNESS> <reason>
+run_fixer(){ # <pr> <headref> <sha> <cause:HOST|CONFLICT|FITNESS> <reason>
   local pr="$1" ref="$2" sha="$3" cause="$4" reason="$5"
   # Signature spans BOTH cause and reason: a host RED and a fitness RETURN on the same head are
   # DIFFERENT failures and must not collide onto one no-progress signature.
