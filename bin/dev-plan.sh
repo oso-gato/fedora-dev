@@ -29,9 +29,18 @@
 #   dev-plan.sh <repo> <spec-issue#>   plan the confirmed objective into backlog feature issues
 #   dev-plan.sh --selftest             exercise the pure helpers (no gh / claude / network)
 #
+# NO LOCAL STATE THAT IS THE SOLE RECORD OF A FACT (spec #135's design law: *no local state anywhere —
+# every component resumes by re-reading GitHub*; R5: issues/PRs are the sole IPC, WAL and audit log). The
+# one marker left — `.planned` — is a pure CACHE: delete it and the GitHub-derived guards (the existing-
+# title dedup, the confirmation gate) still produce correct behaviour; it only saves a re-plan. The
+# "already asked about the create failure" fact is NOT cached anywhere — it is DERIVED from the spec
+# issue's own comment stream (asked_already, below), so a wiped box re-reads it from the bus (R14).
+#
 # ENV: ORG (default oso-gato); BACKLOG_LABEL (default backlog); APPROVED_LABEL (default approved);
 #      PLAN_CLAUDE (default "claude -p", overridable for the mock test); PLAN_TIMEOUT (default 1800);
-#      MAX_FEATURES (cap the plan size, default 8); DEV_PLAN_STATE (marker dir).
+#      MAX_FEATURES (cap the plan size, default 8); DEV_PLAN_STATE (dir for the .planned re-plan cache);
+#      DEV_LOGIN (this box's App identity, whose own questions it recognises on the bus — default
+#      oso-gato-nox-claudebox; empty ⇒ it cannot recognise them and re-asks, never silently stays mute).
 set -uo pipefail
 
 ORG="${ORG:-oso-gato}"
@@ -41,6 +50,14 @@ PLAN_CLAUDE="${PLAN_CLAUDE:-claude -p}"
 PLAN_TIMEOUT="${PLAN_TIMEOUT:-1800}"
 MAX_FEATURES="${MAX_FEATURES:-8}"
 STATE="${DEV_PLAN_STATE:-$HOME/.local/state/dev-plan}"
+DEV_LOGIN="${DEV_LOGIN-oso-gato-nox-claudebox}"
+
+# The machine-owned line-1 anchor of the ISSUE-CREATE-FAILURE question. It is deliberately DISTINCT from
+# the other `**dev-plan → needs a decision (BLOCKED):**` questions (planner-blocked, no-sentinel,
+# no-features): those are posted on paths that exit BEFORE the create step, so a generic prefix would let
+# an OLD planner-blocked question suppress a NEW create-failure question — the run's only way to tell a
+# human that nothing can be filed at all. Its own anchor makes the derivation unambiguous.
+CREATE_FAIL_ANCHOR='^\*\*dev-plan → needs a decision \(BLOCKED, issue-create failed\):\*\*'
 
 log(){ printf '[%s] dev-plan: %s\n' "$(date -u +%H:%M:%S 2>/dev/null || echo --:--:--)" "$*" >&2; }
 
@@ -62,6 +79,19 @@ confirm_line1(){
 # empty/unknown → 0. The fleet App identities hold write, so they can never confirm a spec.
 role_can_confirm(){
   case "$1" in admin|maintain) printf 1;; *) printf 0;; esac
+}
+
+# asked_already <dev-login> <newest-comment-author> <newest-comment-line-1> → 1 iff the spec issue's
+# NEWEST comment is the create-failure question THIS box already posted — the ask-once gate, DERIVED from
+# the bus instead of a local marker (no local state: a wiped box must not re-ask, and a box that never
+# asked must). Identity-bound + line-1-anchored (the auto-merge G2 discipline used by the gate above): a
+# stranger pasting the anchor cannot mute the question, and a quoted marker is inert. Anything else — a
+# later reply, a later `planned:` summary from a run whose creates worked, an unreadable comment — reads
+# as NOT-asked, so we ask: fail-safe toward telling a human, never toward silence.
+asked_already(){
+  local me="$1" who="$2" line1="$3"
+  [ -n "$me" ] && [ "$who" = "$me" ] || { printf 0; return; }
+  printf '%s' "$line1" | grep -qE "$CREATE_FAIL_ANCHOR" && printf 1 || printf 0
 }
 
 # feature_title <feature-file> → line 1 with a leading '# ' stripped (the issue title).
@@ -95,6 +125,15 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "maintain confirms"            "$(role_can_confirm maintain)" "1"
   ck "write cannot (fleet Apps)"    "$(role_can_confirm write)" "0"
   ck "empty/unknown cannot"         "$(role_can_confirm '')" "0"
+  echo "== asked_already (create-failure ask-once, DERIVED from the bus — no local marker) =="
+  CFQ='**dev-plan → needs a decision (BLOCKED, issue-create failed):** every create failed.'
+  ck "our own create-failure question is newest → already asked" "$(asked_already me me "$CFQ")" "1"
+  ck "a reply came after it → ask again"        "$(asked_already me arthur 'fixed the label')" "0"
+  ck "no comments at all → ask"                 "$(asked_already me '' '')" "0"
+  ck "a stranger forging the anchor cannot mute us" "$(asked_already me randomer "$CFQ")" "0"
+  ck "an OLD planner-BLOCKED question is a DIFFERENT anchor → still ask" \
+     "$(asked_already me me '**dev-plan → needs a decision (BLOCKED):** the spec is too vague.')" "0"
+  ck "the anchor QUOTED is inert → ask"         "$(asked_already me me "> $CFQ")" "0"
   echo "== feature file parsing =="
   ck "title strips '# '"            "$(feature_title "$td/feat-01.md")" "Add a WebP probe"
   ck "body is lines 2+"             "$(feature_body "$td/feat-01.md")" "$(printf 'The body line one.\nAnd two.')"
@@ -241,15 +280,23 @@ for fpath in "${files[@]}"; do
 done
 # TOTAL failure (nothing filed at all) → NOT a transient blip: a missing/unwritable label, lost issue-write
 # access, or an issues-disabled repo fails EVERY create identically, and a silent defer would spin that
-# forever with no human ever told. Surface it as a dev-task QUESTION — ONCE (the .create-failed marker
-# stops a timer re-asking every pass; it is cleared the moment a create succeeds) — and leave the .planned
-# marker unwritten so a fixed repo re-plans cleanly. Every not-actionable outcome is a question to a human.
-askmark="$STATE/${REPO}-${SPEC}.create-failed"
+# forever with no human ever told. Surface it as a dev-task QUESTION — ONCE, so a timer does not re-ask
+# every pass — and leave the .planned marker unwritten so a fixed repo re-plans cleanly. ASK-ONCE IS
+# DERIVED FROM THE BUS, NOT CACHED: the question already sitting on the spec issue IS the record that we
+# asked (a local marker would be the sole record of that fact, and losing it — a wiped box, a different
+# box — would re-ask; spec #135 forbids exactly that). Once a later comment lands (a maintainer's reply,
+# or the `planned:` summary of a run whose creates worked), the question is no longer newest and a fresh
+# failure asks afresh — the same semantics the marker had, with nothing on disk to lose.
 if [ "$failed" -gt 0 ] && [ "${#created[@]}" -eq 0 ]; then
   log "every feature create FAILED ($failed) — surfacing a question, marker NOT written"
-  if [ ! -f "$askmark" ]; then
-    gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → needs a decision (BLOCKED):** the objective decomposed into $failed feature(s), but EVERY \`gh issue create\` failed — so no backlog issues were filed. Likely the \`$BACKLOG_LABEL\` label cannot be created, or issue-write access to this repo was lost. A maintainer should check the repo's issue permissions; planning re-runs cleanly once fixed."$'\n\n<sub>autonomous planner (R2). A dev-task question, not an approval request.</sub>' >/dev/null 2>&1 \
-      && : > "$askmark" || log "WARN: could not post the create-failure question"
+  last="$(gh issue view "$SPEC" --repo "$SLUG" --json comments \
+            -q '(.comments | last) as $c | [(($c.author.login) // ""), ((($c.body) // "") | split("\n")[0])] | @tsv' 2>/dev/null)"
+  IFS=$'\t' read -r last_who last_line1 <<<"$last"
+  if [ "$(asked_already "$DEV_LOGIN" "${last_who:-}" "${last_line1:-}")" = 1 ]; then
+    log "the create-failure question is already the newest comment on $SLUG#$SPEC — not re-asking"
+  else
+    gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → needs a decision (BLOCKED, issue-create failed):** the objective decomposed into $failed feature(s), but EVERY \`gh issue create\` failed — so no backlog issues were filed. Likely the \`$BACKLOG_LABEL\` label cannot be created, or issue-write access to this repo was lost. A maintainer should check the repo's issue permissions; planning re-runs cleanly once fixed."$'\n\n<sub>autonomous planner (R2). A dev-task question, not an approval request.</sub>' >/dev/null 2>&1 \
+      || log "WARN: could not post the create-failure question"
   fi
   exit 6
 fi
@@ -259,7 +306,6 @@ if [ "$failed" -gt 0 ]; then
   log "$failed feature create(s) failed — DEFERRED, marker NOT written (${#created[@]} filed this run will be dedup-skipped on retry)"
   exit 6
 fi
-rm -f "$askmark"   # creates work again — a future TOTAL failure may ask afresh
 
 # 4) AUDIT — summarise on the spec issue (R5) + mark planned (idempotent) — only on a COMPLETE plan.
 if [ "${#created[@]}" -gt 0 ]; then

@@ -10,7 +10,9 @@ BIN="$ROOT/bin"; mkdir -p "$BIN"
 
 # gh stub: serve the spec's title/body/labels/comments (author-TSV), the issue TIMELINE (who applied the
 # `approved` label) + the collaborator-permission API; log issue creates, label creates + comments; never
-# touch GitHub. FAKE_CONFIRMED: 1 = maintainer line-1 token, 2 = NON-maintainer line-1 token, 3 =
+# touch GitHub. It also models the spec issue's COMMENT STREAM — the BUS — because the create-failure
+# ask-once gate is DERIVED from it (no local marker): `issue comment` APPENDS to $BUS, and the newest-
+# comment query reads it back. That is what lets the wiped-box row below mean anything. FAKE_CONFIRMED: 1 = maintainer line-1 token, 2 = NON-maintainer line-1 token, 3 =
 # maintainer comment WITHOUT a line-1 token. FAKE_APPROVED_BY = who applied the label (default the
 # maintainer). FAKE_CREATE_FAIL: 1 = the 2nd+ create fails (PARTIAL), all = EVERY create fails (TOTAL).
 cat > "$BIN/gh" <<'EOF'
@@ -21,6 +23,9 @@ case "${1:-} ${2:-}" in
       *"-q .title"*) printf 'Ship a small thing';;
       *"-q .body"*)  printf 'The objective body.';;
       *"labels[].name"*) [ "${FAKE_APPROVED:-1}" = 1 ] && printf 'approved\n';;
+      # the ask-once gate's newest-comment read: login<TAB>line-1 of the LAST comment on the bus (the
+      # confirm-gate query below has no 'last' in it, so the two never collide).
+      *last*) [ -s "${BUS:-}" ] && tail -1 "$BUS";;
       *"@tsv"*)
         case "${FAKE_CONFIRMED:-0}" in
           1) printf 'arthur\tCONFIRMED yes\n';;
@@ -38,7 +43,10 @@ case "${1:-} ${2:-}" in
       printf 'CREATEFAIL %s\n' "$*" >> "$GH_LOG"; exit 1
     fi
     printf 'CREATE %s\n' "$*" >> "$GH_LOG"; printf 'https://github.com/oso-gato/fedora-dev/issues/900\n';;
-  "issue comment") printf 'COMMENT %s\n' "$*" >> "$GH_LOG";;
+  "issue comment")
+    printf 'COMMENT %s\n' "$*" >> "$GH_LOG"
+    # the comment LANDS ON THE BUS, as a real one would — line 1, under this box's App identity
+    printf '%s\t%s\n' "${DEV_LOGIN:-oso-gato-nox-claudebox}" "$(printf '%s' "$*" | sed -n 's/.*--body \(.*\)/\1/p' | head -1)" >> "${BUS:-/dev/null}" ;;
   "label create") printf 'LABELCREATE %s\n' "$*" >> "$GH_LOG";;
   "api "*)
     # Log every permission lookup: it is the DISCRIMINATOR the tests assert on. A line-1 token from a
@@ -78,6 +86,9 @@ pass=0; fail=0
 run(){ # <desc> <envs> <expect: CREATE|DEFER|COMMENT-ONLY|NONE> <expected-create-count-or-""> <marker|nomarker|"">
   local desc="$1" envs="$2" expect="$3" ncreate="${4:-}" wantmark="${5:-}"
   export HOME="$ROOT/h-$RANDOM"; mkdir -p "$HOME"; export GH_LOG="$HOME/gh.log"; : > "$GH_LOG"
+  # The BUS (GitHub) is deliberately OUTSIDE $HOME: every run() gets a WIPED box, so anything that
+  # survives across runs survived on the bus alone — which is the whole point of the derivation.
+  export BUS="${KEEP_BUS:+$BUS}"; [ -n "$BUS" ] || { export BUS="$ROOT/bus-$RANDOM"; : > "$BUS"; }
   # shellcheck disable=SC2086
   env $envs PATH="$BIN:$PATH" PLAN_CLAUDE="claude -p" bash "$PLAN" fedora-dev 500 >/dev/null 2>&1 || true
   # grep -c always prints a count (0 on no match) but EXITS 1 when zero — capture the number, ignore rc
@@ -185,6 +196,26 @@ FAKE_EXISTING='Feature one' run "dedup skips already-filed" "FAKE_APPROVED=1 FAK
 echo "== EVERY create fails → surfaces a question (not a silent, endless defer) =="
 run "total create failure asks a human" "FAKE_APPROVED=1 FAKE_PLAN=two FAKE_CREATE_FAIL=all" COMMENT-ONLY "" nomarker
 ck_log "  └─ and the comment is a BLOCKED dev-task question" present 'COMMENT.*BLOCKED'
+# The create-failure question carries its OWN line-1 anchor. The other dev-plan questions (planner-blocked,
+# no-sentinel, no-features) share the generic prefix and are posted on paths that exit BEFORE the create
+# step — so a generic anchor would let a STALE one of those mute this one, the run's only way to tell a
+# human that NOTHING can be filed at all.
+ck_log "  └─ under its own distinct anchor (not the generic BLOCKED prefix)" present 'COMMENT.*issue-create failed'
+
+# --- ASK-ONCE, DERIVED FROM THE BUS (spec #135: no local state anywhere; R14 E2E-KILL: resume from the bus
+# --- alone). A timer must not re-ask the identical question every pass — but the record of "we asked" is
+# --- the QUESTION ITSELF, sitting on the spec issue, not a marker file. run() hands every row a WIPED HOME,
+# --- so this row IS the E2E-KILL case: a fresh box, the same bus, and it must stay quiet.
+echo "== the same failure on a WIPED box does NOT re-ask — the question on the bus is the record =="
+KEEP_BUS=1 run "wiped box + question already on the bus → silent" "FAKE_APPROVED=1 FAKE_PLAN=two FAKE_CREATE_FAIL=all" NONE "" nomarker
+ck_log "  └─ and it posted NO duplicate question" absent '^COMMENT'
+
+# --- …but ask-once must not become ask-NEVER. Once anything lands after it (a maintainer's reply, or the
+# --- `planned:` summary of a later run whose creates worked), the question is no longer the newest comment
+# --- and a FRESH failure asks afresh — the same semantics the deleted marker had, with nothing on disk.
+echo "== after a reply lands, a fresh total failure asks AGAIN (ask-once, not ask-never) =="
+printf 'arthur\tfixed the label, try again\n' >> "$BUS"
+KEEP_BUS=1 run "a reply un-mutes the question" "FAKE_APPROVED=1 FAKE_PLAN=two FAKE_CREATE_FAIL=all" COMMENT-ONLY "" nomarker
 
 echo
 echo "dev-plan-dryrun: $pass passed, $fail failed"
