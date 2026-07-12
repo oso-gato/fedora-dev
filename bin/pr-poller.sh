@@ -363,9 +363,13 @@ run_fixer(){ # <pr> <headref> <sha> <cause:HOST|FITNESS> <reason>
   # the worktree is checked out on the PR's OWN head (FD_BASE_REF=origin/<ref>), not origin/main:
   # a fix iterates the PR's branch, so its base is that branch as ORIGIN currently holds it.
   wt="$(FD_BASE_REF="origin/$ref" "$FRESH_TREE" "$clone" "$ref" 2>>"$LOG")"
-  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
-    log "FIX $SLUG#$pr @ ${sha:0:7} — FRESH-TREE FAILED for origin/$ref (fail-closed: no fix attempted)"
-    surface "$pr" "$sha" "blocked" "could not create an isolated worktree on \`$ref\` — no fix was attempted (the fixer must never run in the shared clone). A maintainer should check the repo clone."
+  # A worktree we cannot ENTER is not isolation. Prove it HERE — the one place the refusal can name its
+  # real cause — because the branch-moved check below reads the tree with `git -C` and would fail on an
+  # unenterable one too, parking the PR on a bogus "the branch moved" instead of the truth. `( cd )`
+  # tests exactly what the model's own `cd` does: a directory can exist, pass -d, and still be unenterable.
+  if [ -z "$wt" ] || [ ! -d "$wt" ] || ! ( cd "$wt" ) 2>/dev/null; then
+    log "FIX $SLUG#$pr @ ${sha:0:7} — FRESH-TREE FAILED (no usable isolated worktree) for origin/$ref (fail-closed: no fix attempted)"
+    surface "$pr" "$sha" "blocked" "could not create a usable isolated worktree on \`$ref\` — no fix was attempted (the fixer must never run in the shared clone). A maintainer should check the repo clone."
     return 0
   fi
 
@@ -431,7 +435,15 @@ FIX_EOF
   # side: the model's stdin IS the prompt pipe now, so it can never drain the sweep's PR list off FD 0.
   # `set +o pipefail` inside the subshell keeps a printf SIGPIPE (a model that exits without draining)
   # from masquerading as the model's own failure.
-  local out; out="$(cd "$wt" && set +o pipefail; printf '%s' "$prompt" | timeout "$FIXER_TIMEOUT" $POLLER_FIXER 2>&1)"
+  #
+  # THE `cd` IS THE LAST STRAND OF THE ISOLATION, SO BIND THE BODY TO IT. `cd "$wt" && set +o pipefail;
+  # <pipeline>` does NOT: `&&` binds to `set` ALONE and the `;` ends the list, so the pipeline would run
+  # even when the cd FAILED — in the POLLER'S OWN cwd (a shared clone), with a prompt telling the model
+  # to commit. That is the 2026-06-28 cross-branch-leak hazard `policy/CLAUDE.md` names by date, and the
+  # shared-clone fallback this file swears it does not have. The BRACE GROUP binds the whole body to the
+  # cd: no worktree, no model. run_fixer already refuses an unenterable tree (and says so), so this is
+  # the structural belt behind that check — it cannot be reasoned away by a future edit up there.
+  local out; out="$(cd "$wt" && { set +o pipefail; printf '%s' "$prompt" | timeout "$FIXER_TIMEOUT" $POLLER_FIXER 2>&1; })"
   local blocked bflag=0
   blocked="$(printf '%s' "$out" | grep -aoE '^FIXER_BLOCKED:.*' | head -1)"; [ -n "$blocked" ] && bflag=1
 
@@ -652,7 +664,17 @@ sweep_repo(){
             surface "$pr" "$sha" "review-failed" \
               "the independent fitness reviewer could not produce a verdict on head \`${sha:0:7}\` — an INFRASTRUCTURE failure, not a judgment. No verdict was posted, so the merge stays blocked (fail-closed). The reviewer harness reported:"$'\n\n```\n'"$(printf '%s' "$ferr" | tail -c 900)"$'\n```\n\n'"The poller will NOT re-attempt the review on this head (that would re-spin every sweep with no signal). Push a new commit — or fix the cause and re-run \`bin/fitness-review.sh --post $POLLER_REPO $pr\`." \
               && : > "$done" ;;
-          *) log "#$pr fitness harness declined (rc=$frc — a precondition, retryable; fail-closed: no PASS ⇒ no merge)" ;;
+          *)
+            # RETRYABLE — but NOT SILENT. Capturing the harness's stderr and then DROPPING it makes the
+            # one path that REPEATS FOREVER the only one that never says WHY. A precondition refusal is
+            # not always self-healing (an unset FITNESS_LOGIN, no --post token, an SoD misconfig refuses
+            # identically every sweep), and before its stderr was captured it at least reached the
+            # service log. So it still does: the reason rides `log` (state file + stderr → the journal),
+            # the same channel every other outcome here reports on. A harness whose thesis is that the
+            # failure report tells the truth must not go quiet on its loudest loop.
+            log "#$pr fitness harness declined (rc=$frc — a precondition, retryable; fail-closed: no PASS ⇒ no merge)"
+            [ -n "$ferr" ] && log "#$pr fitness harness reported: $(printf '%s' "$ferr" | tr '\n' ' ' | tail -c 500)"
+            ;;
         esac
         ;;
       MERGE|MERGE_DRYRUN)

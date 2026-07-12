@@ -319,7 +319,19 @@ log "planning $SLUG#$SPEC '$title' (bounded ${PLAN_TIMEOUT}s, prompt ${#prompt} 
 # argument it would fail to EXEC with E2BIG past MAX_ARG_STRLEN (131072 bytes) and the planner would
 # never run. Feeding it on stdin has no ceiling AND subsumes the old `</dev/null`: the model's stdin is
 # the prompt pipe, so it can drain nothing else (a caller's list can never be swallowed by this run).
-out="$(cd "$OUTDIR" && set +o pipefail; printf '%s' "$prompt" | timeout "$PLAN_TIMEOUT" $PLAN_CLAUDE 2>&1)"
+#
+# THE `cd` IS A FAIL-CLOSED GUARD, SO BIND THE BODY TO IT. `cd "$OUTDIR" && set +o pipefail; <pipe>` does
+# NOT: `&&` binds to `set` alone and the `;` ends the list, so the pipeline runs ANYWAY — in the CALLER'S
+# cwd (a git clone), where a planner told to WRITE FILES would scatter them. The brace group binds the
+# whole body to the cd; a cd that fails runs NOTHING and says so, rather than reaching the no-sentinel
+# branch below and blaming a timeout for a planner that never STARTED. File nothing, leave the spec
+# UNPLANNED (so a re-run re-plans cleanly). `( cd )` tests what the real cd does.
+if ! ( cd "$OUTDIR" ) 2>/dev/null; then
+  log "cannot enter the planner's output dir '$OUTDIR' (fail-closed) — the planner was NOT run; filing nothing"
+  gh issue comment "$SPEC" --repo "$SLUG" --body "**dev-plan → needs a decision (BLOCKED):** the planner's output directory (\`$OUTDIR\`) could not be entered, so the planner was **never run** — no backlog issues were filed and this spec stays unplanned. An infrastructure failure on the dev box (disk / tmp), not a problem with the spec; fix it and re-run \`dev-plan\`."$'\n\n<sub>autonomous planner (R2). A dev-task question, not an approval request.</sub>' >/dev/null 2>&1 || true
+  exit 10
+fi
+out="$(cd "$OUTDIR" && { set +o pipefail; printf '%s' "$prompt" | timeout "$PLAN_TIMEOUT" $PLAN_CLAUDE 2>&1; })"
 sentinel="$(extract_plan_sentinel "$out")"
 case "$sentinel" in
   BLOCKED*)

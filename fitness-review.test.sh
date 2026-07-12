@@ -249,6 +249,11 @@ poller_sweep 1
 poller_sweep 1
 ck "$(grep -q '^SURFACE' "$ACT_LOG" && echo 0 || echo 1)" "a retryable precondition surfaced a question to a human — that is noise, not signal"
 ck "$([ "$(runs)" -eq 2 ] && echo 1 || echo 0)" "the reviewer ran $(runs) times, want 2 — a retryable refusal must be retried next sweep"
+# …and it is RETRIED OUT LOUD. The poller CAPTURES the harness's stderr (to build the rc-3 question), so
+# a branch that logs only `rc=$frc` DISCARDS the reason — and this is the path that repeats every sweep
+# forever. A refusal that is not self-healing (unset FITNESS_LOGIN, no --post token, SoD misconfig)
+# would then retry in silence, on the loudest loop in the harness. The reason must reach the log.
+ck "$(grep -q 'Argument list too long' "$CASE/out.log" && echo 1 || echo 0)" "the retryable refusal did not log WHY the harness declined — the reviewer's own stderr was captured and then dropped"
 done_case
 
 echo

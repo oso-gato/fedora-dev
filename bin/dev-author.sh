@@ -185,7 +185,22 @@ log "spawning bounded author (timeout ${AUTHOR_TIMEOUT}s, prompt ${#prompt} byte
 # (dev-loop still feeds its list on FD 3 and closes stdin: both ends of that hole stay shut.)
 # `set +o pipefail` inside the subshell (it cannot leak out) keeps $rc the MODEL's own — with pipefail
 # on, a model that exits 0 without draining its prompt would make printf die of SIGPIPE and report 141.
-out="$(cd "$WT" && set +o pipefail; printf '%s' "$prompt" | timeout "$AUTHOR_TIMEOUT" $AUTHOR_CLAUDE 2>&1)"; rc=$?
+#
+# THE ISOLATION IS FAIL-CLOSED, AND THE `cd` IS PART OF IT — the model runs in its OWN worktree or it
+# does NOT run. `cd "$WT" && set +o pipefail; <pipe>` does NOT say that: `&&` binds to `set` alone and
+# the `;` ends the list, so the pipeline runs ANYWAY in the CALLER'S cwd — under dev-loop, the shared
+# clone — with a prompt telling it to implement and commit. That is the 2026-06-28 cross-branch-leak
+# hazard `policy/CLAUDE.md` names by date. The BRACE GROUP binds the whole body to the cd. And a cd that
+# fails must SAY SO rather than be read downstream as a model that ran and committed nothing (the
+# no-progress surface below) — the author never STARTED, which is an infrastructure fault, not a stuck
+# feature. Same rc 3 as a failed fresh-tree: an unusable worktree, a question posted, no PR opened.
+# `( cd )` tests what the real cd does (a directory can exist and still be unenterable).
+if ! ( cd "$WT" ) 2>/dev/null; then
+  log "cannot enter isolated worktree '$WT' (fail-closed) — the author was NOT run"
+  surface_blocked "the isolated worktree for this feature could not be entered (\`$WT\`), so the author was **never run** — no code was written and no PR was opened. A maintainer should check the repo clone on the dev box. (Fail-closed by design: the author is NEVER run outside its own worktree.)"
+  exit 3
+fi
+out="$(cd "$WT" && { set +o pipefail; printf '%s' "$prompt" | timeout "$AUTHOR_TIMEOUT" $AUTHOR_CLAUDE 2>&1; })"; rc=$?
 [ "$rc" = 124 ] && log "author run hit the ${AUTHOR_TIMEOUT}s timeout"
 sentinel="$(extract_sentinel "$out")"
 head_sha="$(git -C "$WT" rev-parse HEAD 2>/dev/null)"

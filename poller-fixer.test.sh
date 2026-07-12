@@ -243,6 +243,40 @@ common; never_ran; no_push; surfaced
 logs 'FRESH-TREE FAILED'; notlogs 'FIXER LANDED'
 done_case
 
+# ---------------------------------------------------------------------------------------------------
+# AN UNENTERABLE WORKTREE IS NOT ISOLATION — and it must be refused BY NAME. This is the isolation
+# failure `-d` cannot see: the tree EXISTS, so the fresh-tree guard passes, and everything downstream
+# rests on the `cd` in front of the model run. Two things must hold, and each has its own assertion:
+#   * the model MUST NOT RUN. `cd "$wt" && set +o pipefail; <pipeline>` does NOT guarantee that — `&&`
+#     binds to `set` ALONE and the `;` ends the list, so the pipeline runs even when the cd FAILED, in
+#     the POLLER'S OWN cwd (a shared clone), told to commit: the 2026-06-28 cross-branch-leak hazard,
+#     re-opened by a bash-precedence slip, in the merge path.
+#   * the refusal must name its REAL cause. Before this fix the poller reached its branch-moved check
+#     first (`git -C` cannot read an unenterable tree either), so it parked the PR on a bogus "the
+#     branch moved" and surfaced NOTHING — safe, but lying about why. `notlogs 'BRANCH MOVED'` +
+#     `surfaced` are the discriminators: the pre-fix script fails both.
+echo "== WORKTREE UNENTERABLE: refuse by name — no model, no push, and the TRUE cause reported =="
+DESC="a worktree that exists but cannot be entered runs NO model and is refused by its real cause"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+BADWT="$CASE/unenterable"; mkdir -p "$BADWT"; chmod 000 "$BADWT"
+# Fixture check: as root, chmod cannot make a dir unenterable, and the row would pass vacuously.
+if ( cd "$BADWT" ) 2>/dev/null; then
+  chmod 755 "$BADWT"
+  printf '  SKIP %s: running as root — a chmod-000 dir is still enterable, so this row cannot bite\n' "$DESC"
+else
+  # a fresh-tree that SUCCEEDS (rc 0, prints a real, EXISTING dir) — so only enterability is in question
+  printf '#!/usr/bin/env bash\nprintf %%s "%s"\n' "$BADWT" > "$BIN/fresh-tree-bad.sh"; chmod +x "$BIN/fresh-tree-bad.sh"
+  sweep feat/x "$SHA" FAKE_FIXER=commit FRESH_TREE="$BIN/fresh-tree-bad.sh"
+  never_ran; no_push; surfaced
+  ck "$(clone_intact && echo 1 || echo 0)" "a shared clone was MUTATED — the model ran in the caller's cwd because the cd was not a guard"
+  ck "$([ "$(origin_sha feat/x)" = "$SHA" ] && echo 1 || echo 0)" "origin/feat/x moved — something was pushed from an un-isolated run"
+  logs 'FRESH-TREE FAILED'                       # refused for what it IS: no usable isolated worktree
+  notlogs 'BRANCH MOVED'                         # …not for what it merely LOOKS like from `git -C`
+  notlogs 'FIXER NO-COMMIT'; notlogs 'FIXER LANDED'
+  chmod 755 "$BADWT"
+  done_case
+fi
+
 echo
 echo "poller-fixer-dryrun: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
