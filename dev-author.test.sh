@@ -61,7 +61,12 @@ EOF
 # It runs with CWD = the worktree (dev-author cd's in), so it commits there when asked.
 cat > "$BIN/claude" <<'EOF'
 #!/usr/bin/env bash
-# args: -p "<prompt>"   (we ignore the prompt; behavior is env-driven)
+# FAITHFUL TRANSPORT (#155): the real `claude -p` takes its prompt ON STDIN — an argv prompt past
+# MAX_ARG_STRLEN (131072 bytes) cannot even EXEC, and this one carries an unbounded ISSUE BODY — and it
+# drains stdin to EOF. Record what actually arrived, and on which channel; the PROMPT row below asserts
+# on it, so restoring the argv form in bin/dev-author.sh empties this file and FAILS the suite.
+printf 'PROMPT %s\n' "$(cat | tr '\n' ' ')" >> "$GH_LOG"
+printf 'CLAUDEARGV %s\n' "$*" >> "$GH_LOG"
 case "${FAKE_AUTHOR:-done}" in
   done)    echo change >> f; git add -A >/dev/null 2>&1; git commit -qm "impl" >/dev/null 2>&1;
            echo "did the work"; echo "AUTHOR_DONE: implement the thing";;
@@ -100,7 +105,15 @@ run(){ # <desc> <env-assignments> <expect: PRCREATE|ISSUECOMMENT|NONE> <extra-gr
                   grep -q '^ISSUECOMMENT.*dev-author → shipped:.*pull/999' "$GH_LOG" \
                                                           || { ok=0; echo "  FAIL $desc: no shipped confirmation (with PR URL) on the issue"; }
                   [ "$(grep -c '^ISSUECOMMENT' "$GH_LOG")" -eq 1 ] \
-                                                          || { ok=0; echo "  FAIL $desc: expected exactly one issue comment (the shipped confirmation)"; } ;;
+                                                          || { ok=0; echo "  FAIL $desc: expected exactly one issue comment (the shipped confirmation)"; }
+                  # #155 TRANSPORT: the prompt reaches the model ON STDIN, and NOTHING but the flags
+                  # rides argv — a single argv arg is capped at MAX_ARG_STRLEN (131072 bytes) and this
+                  # prompt carries an unbounded issue body, so the argv form is a latent E2BIG (the
+                  # exec fails, the author never runs). Restore it and BOTH of these rows fail.
+                  grep -q '^PROMPT .*AUTHOR_DONE' "$GH_LOG" \
+                                                          || { ok=0; echo "  FAIL $desc: the author prompt did not reach the model on STDIN"; }
+                  grep -qx 'CLAUDEARGV -p' "$GH_LOG" \
+                                                          || { ok=0; echo "  FAIL $desc: the prompt rode ARGV — E2BIG past 128 KiB (#155)"; } ;;
     ISSUECOMMENT) grep -q '^ISSUECOMMENT' "$GH_LOG" || { ok=0; echo "  FAIL $desc: no BLOCKED comment on issue"; }
                   grep -q '^PRCREATE'    "$GH_LOG" && { ok=0; echo "  FAIL $desc: opened a PR when it should have blocked"; }
                   # a not-DONE outcome must NEVER push a branch — the reviewer's headline assertion.

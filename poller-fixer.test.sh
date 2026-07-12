@@ -71,10 +71,16 @@ EOF
 # ---- stub claude: the "fixer". Records WHERE it ran (the isolation assertion) then acts per case. --
 cat > "$BIN/claude" <<'EOF'
 #!/usr/bin/env bash
+# FAITHFUL TRANSPORT (#155): the real `claude -p` takes its prompt ON STDIN — an argv prompt past
+# MAX_ARG_STRLEN (131072 bytes) cannot even EXEC — and drains it to EOF. Reading it from stdin here is
+# what makes the FIXERPROMPT row BITE on the transport: restore the argv form in bin/pr-poller.sh and
+# the recorded prompt is EMPTY, so `isolated()`'s prompt assertion FAILS.
+prompt="$(cat)"
 { printf 'FIXERCWD %s\n' "$PWD"
   printf 'FIXERBRANCH %s\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
   printf 'FIXERHEAD %s\n'   "$(git rev-parse HEAD 2>/dev/null)"
-  printf 'FIXERPROMPT %s\n' "$(printf '%s' "$*" | tr '\n' ' ')"
+  printf 'FIXERARGV %s\n'   "$*"
+  printf 'FIXERPROMPT %s\n' "$(printf '%s' "$prompt" | tr '\n' ' ')"
 } >> "$FIX_LOG"
 case "${FAKE_FIXER:-commit}" in
   commit)  echo fixed >> f; git add -A >/dev/null 2>&1; git commit -qm "fix the boom" >/dev/null 2>&1
@@ -145,7 +151,10 @@ isolated(){
   ck "$([ "$cwd" = "$WT" ] && echo 1 || echo 0)" "the fixer did not run in the isolated worktree (cwd=$cwd want=$WT)"
   ck "$(grep -qx "FIXERHEAD $SHA" "$FIX_LOG" && echo 1 || echo 0)" "the fixer's tree was not on the PR's GATED head ($SHA)"
   ck "$(grep -qx "FIXERBRANCH $FAKE_REF" "$FIX_LOG" && echo 1 || echo 0)" "the fixer's tree was not on the PR's branch ($FAKE_REF)"
-  ck "$(grep -q "FIXERPROMPT.*Do NOT 'git push'" "$FIX_LOG" && echo 1 || echo 0)" "the model was not told the harness owns the push"
+  ck "$(grep -q "FIXERPROMPT.*Do NOT 'git push'" "$FIX_LOG" && echo 1 || echo 0)" "the model was not told the harness owns the push — ON STDIN (an argv prompt would be EMPTY here, and past 131072 bytes would not even exec: #155)"
+  # …and the prompt reached it ONLY on stdin: nothing but the flags may ride argv (#155). A prompt in
+  # argv is a latent E2BIG — the fixer's prompt carries a gate's own findings and grows with them.
+  ck "$(grep -qx 'FIXERARGV -p' "$FIX_LOG" && echo 1 || echo 0)" "the prompt (or anything else) rode ARGV: $(sed -n 's/^FIXERARGV //p' "$FIX_LOG" | head -1 | cut -c1-60)"
 }
 never_ran(){ ck "$(grep -q '^FIXERCWD' "$FIX_LOG" && echo 0 || echo 1)" "the model RAN when the harness could not isolate/gate it — it must attempt no fix"; }
 no_push(){   ck "$(grep -q '^GITPUSH' "$FIX_LOG" && echo 0 || echo 1)" "something pushed on a non-landing outcome"; }

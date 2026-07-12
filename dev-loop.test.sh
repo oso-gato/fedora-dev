@@ -137,9 +137,17 @@ grep -qF '"$DEV_AUTHOR" "$repo" "$n" </dev/null' "$LOOP" \
   && ck "bin/dev-loop.sh runs dev-author with stdin closed" yes yes \
   || ck "bin/dev-loop.sh runs dev-author with stdin closed" no yes
 if [ -f "$AUTHOR" ]; then
-  grep -qE '\$AUTHOR_CLAUDE .*</dev/null' "$AUTHOR" \
-    && ck "bin/dev-author.sh runs its bounded claude with stdin closed" yes yes \
-    || ck "bin/dev-author.sh runs its bounded claude with stdin closed" no yes
+  # #155 SUBSUMES the old `</dev/null` pin with a STRONGER one: the model's stdin now IS the prompt pipe.
+  # The prompt may never ride argv (a single argv arg dies at MAX_ARG_STRLEN = 131072 bytes, and this one
+  # carries an unbounded issue body — that is how the fitness reviewer was killed on a 141 KB PR), and
+  # piping it in ALSO shuts the inherited-stdin hole `</dev/null` guarded: there is nothing else on FD 0
+  # for the model to drain, so the caller's backlog is unreachable by construction rather than by hygiene.
+  grep -qE 'printf .%s. "\$prompt" \| timeout .* \$AUTHOR_CLAUDE' "$AUTHOR" \
+    && ck "bin/dev-author.sh feeds its bounded claude the prompt ON STDIN (so no inherited stdin, and no E2BIG)" yes yes \
+    || ck "bin/dev-author.sh feeds its bounded claude the prompt ON STDIN (so no inherited stdin, and no E2BIG)" no yes
+  grep -qE '\$AUTHOR_CLAUDE +"\$prompt"' "$AUTHOR" \
+    && ck "bin/dev-author.sh never passes the prompt as an argv argument" no yes \
+    || ck "bin/dev-author.sh never passes the prompt as an argv argument" yes yes
 fi
 
 # --- R9 HALT (#151): no box implements the HALT switch spec #135 requires, and `--watch` is the only way

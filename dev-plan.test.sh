@@ -73,8 +73,11 @@ EOF
 # and "did it re-spend one?" is exactly what the idempotency rows must be able to assert.
 cat > "$BIN/claude" <<'EOF'
 #!/usr/bin/env bash
-cat >/dev/null                              # FAITHFUL: the real `claude -p` drains inherited stdin to EOF
-printf '%s' "${!#}" > "${PROMPT_LOG:-/dev/null}"   # the prompt is the LAST arg — rows below assert on it
+# FAITHFUL TRANSPORT (#155): the real `claude -p` is handed its prompt ON STDIN (an argv prompt past
+# MAX_ARG_STRLEN = 131072 bytes cannot even EXEC), and it drains stdin to EOF. So the stub reads the
+# prompt from stdin — which is what makes the ck_prompt rows below BITE on the transport: restore the
+# argv form in bin/dev-plan.sh and this file is EMPTY, so every row that asserts on the prompt FAILS.
+cat > "${PROMPT_LOG:-/dev/null}"
 printf 'CLAUDE plan=%s\n' "${FAKE_PLAN:-two}" >> "$GH_LOG"
 case "${FAKE_PLAN:-two}" in
   two)     printf '# Feature one\nbody one\n' > feat-01.md

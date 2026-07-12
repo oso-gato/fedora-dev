@@ -313,11 +313,13 @@ If the objective is too vague or cannot be planned, write no files and end with:
     PLAN_BLOCKED: <one concise reason>
 PLAN_EOF
 
-log "planning $SLUG#$SPEC '$title' (bounded ${PLAN_TIMEOUT}s)…"
-# STDIN CLOSED, for the same reason dev-author's run is (see there): `claude -p` drains any stdin it
-# inherits. The planner is a leaf today, but a caller that ever drives it from a loop must not lose its
-# list to this run — the prompt is an argument, the run needs no stdin.
-out="$(cd "$OUTDIR" && timeout "$PLAN_TIMEOUT" $PLAN_CLAUDE "$prompt" </dev/null 2>&1)"
+log "planning $SLUG#$SPEC '$title' (bounded ${PLAN_TIMEOUT}s, prompt ${#prompt} bytes)…"
+# THE PROMPT RIDES STDIN, NEVER ARGV (#155) — same law as dev-author's run (see there for the why). This
+# prompt embeds a SPEC ISSUE BODY plus the already-filed titles, so it grows without bound; as an argv
+# argument it would fail to EXEC with E2BIG past MAX_ARG_STRLEN (131072 bytes) and the planner would
+# never run. Feeding it on stdin has no ceiling AND subsumes the old `</dev/null`: the model's stdin is
+# the prompt pipe, so it can drain nothing else (a caller's list can never be swallowed by this run).
+out="$(cd "$OUTDIR" && set +o pipefail; printf '%s' "$prompt" | timeout "$PLAN_TIMEOUT" $PLAN_CLAUDE 2>&1)"
 sentinel="$(extract_plan_sentinel "$out")"
 case "$sentinel" in
   BLOCKED*)

@@ -70,6 +70,12 @@
 #                     count of iterations.
 #   FRESH_TREE        the isolator (default: bin/fresh-tree.sh). Every fix runs in a throwaway worktree
 #                     off the PR's own head — NEVER the shared clone (#152). Overridable for testing.
+#   FITNESS_REVIEW    the independent fitness harness the REVIEW arm runs (default: bin/fitness-review.sh).
+#                     Overridable for testing. Its exit code is a CONTRACT: 0 = verdict posted; 3 = the
+#                     reviewer could not be RUN / produced no verdict for this head ⇒ the REVIEW arm
+#                     SURFACES the cause once and PARKS that head — a review that cannot run must never
+#                     re-spin at sweep cadence with no signal (#155 R4); anything else = a retryable
+#                     precondition (try again next sweep).
 #   RETIRE_LOOKBACK   how many of the most recently UPDATED merged PRs each sweep scans for
 #                     `Supersedes #N` declarations (default 15; sorted by update recency so a
 #                     long-parked PR that merges late still enters the window; each merged PR is
@@ -273,6 +279,9 @@ FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
 # the isolator the fixer runs in (#152). Overridable so poller-fixer.test.sh can drive the REAL sweep.
 FRESH_TREE="${FRESH_TREE:-$HERE/fresh-tree.sh}"
+# the independent fitness harness the REVIEW arm runs. Overridable (same reason as FRESH_TREE) so
+# fitness-review.test.sh can drive the REAL sweep against a scripted reviewer outcome.
+FITNESS_REVIEW="${FITNESS_REVIEW:-$HERE/fitness-review.sh}"
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
@@ -414,7 +423,15 @@ The findings you must address (from the ${cause} gate):
 
 $reason
 FIX_EOF
-  local out; out="$(cd "$wt" && timeout "$FIXER_TIMEOUT" $POLLER_FIXER "$prompt" 2>&1)"
+  # TRANSPORT — THE PROMPT RIDES STDIN, NEVER ARGV (#155). A single argv argument is capped by the
+  # kernel at MAX_ARG_STRLEN (32 pages = 131072 bytes), and this prompt embeds a GATE'S OWN FINDINGS —
+  # a host candidate log or a reviewer's prose (each `tail -c 6000` today, but bounded only by that
+  # choice) — so the argv form is a latent E2BIG: the exec fails and the fixer NEVER RUNS. stdin has no
+  # such ceiling. It also CLOSES the inherited-stdin hole the old `</dev/null` guarded from the other
+  # side: the model's stdin IS the prompt pipe now, so it can never drain the sweep's PR list off FD 0.
+  # `set +o pipefail` inside the subshell keeps a printf SIGPIPE (a model that exits without draining)
+  # from masquerading as the model's own failure.
+  local out; out="$(cd "$wt" && set +o pipefail; printf '%s' "$prompt" | timeout "$FIXER_TIMEOUT" $POLLER_FIXER 2>&1)"
   local blocked bflag=0
   blocked="$(printf '%s' "$out" | grep -aoE '^FIXER_BLOCKED:.*' | head -1)"; [ -n "$blocked" ] && bflag=1
 
@@ -518,7 +535,7 @@ sweep_repo(){
   # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
   # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
   # --watch flock; FD 3 is free.
-  local pr ref sha comments host tier fit action files fitraw
+  local pr ref sha comments host tier fit action files fitraw ferr frc
   while IFS=$'\t' read -r -u 3 pr ref sha; do
     [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
@@ -615,9 +632,28 @@ sweep_repo(){
       REVIEW)
         [ -f "$done" ] && continue
         log "#$pr GREEN + unreviewed → running fitness harness"
-        FITNESS_LOGIN="$FITNESS_LOGIN" LG_HOST_LOGIN="$LG_HOST_LOGIN" "$HERE/fitness-review.sh" --post "$POLLER_REPO" "$pr" \
-          && log "#$pr fitness posted — next sweep routes on it" \
-          || log "#$pr fitness harness declined/failed (fail-closed: no PASS ⇒ no merge)"
+        # Its STDOUT goes to the log; its STDERR is CAPTURED — that is where the harness reports the
+        # REAL cause of a failed review (#155 R2), and a surfaced question that carries the cause beats
+        # one that shrugs. rc is the harness's own (no pipe), and it is a CONTRACT (fitness-review.sh
+        # header): 0 = verdict posted; 3 = the reviewer could not be RUN / emitted no verdict for THIS
+        # head; anything else = a precondition refused it (retryable — the state can change on its own).
+        ferr="$(FITNESS_LOGIN="$FITNESS_LOGIN" LG_HOST_LOGIN="$LG_HOST_LOGIN" \
+                "$FITNESS_REVIEW" --post "$POLLER_REPO" "$pr" 2>&1 >>"$LOG")"; frc=$?
+        case "$frc" in
+          0) log "#$pr fitness posted — next sweep routes on it" ;;
+          3)
+            # NEVER SPIN SILENTLY (#155 R4 — the silent-spin class of #150). A reviewer that could not
+            # RUN on this head will not start working by being asked again 10 seconds later: re-running
+            # it burns a bounded model run per sweep and signals NOTHING to anyone. So say the true
+            # cause ONCE and PARK this head. The marker is per-(pr,sha), so a NEW commit re-reviews on
+            # its own — the loop is stopped, not the PR.
+            log "#$pr fitness reviewer COULD NOT PRODUCE A VERDICT @ ${sha:0:7} (rc=3) — surfacing the cause; NOT re-attempting on this head"
+            printf '%s\n' "$ferr" >> "$LOG"
+            surface "$pr" "$sha" "review-failed" \
+              "the independent fitness reviewer could not produce a verdict on head \`${sha:0:7}\` — an INFRASTRUCTURE failure, not a judgment. No verdict was posted, so the merge stays blocked (fail-closed). The reviewer harness reported:"$'\n\n```\n'"$(printf '%s' "$ferr" | tail -c 900)"$'\n```\n\n'"The poller will NOT re-attempt the review on this head (that would re-spin every sweep with no signal). Push a new commit — or fix the cause and re-run \`bin/fitness-review.sh --post $POLLER_REPO $pr\`." \
+              && : > "$done" ;;
+          *) log "#$pr fitness harness declined (rc=$frc — a precondition, retryable; fail-closed: no PASS ⇒ no merge)" ;;
+        esac
         ;;
       MERGE|MERGE_DRYRUN)
         [ -f "$done" ] && continue
