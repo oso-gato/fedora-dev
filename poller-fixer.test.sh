@@ -29,6 +29,15 @@ ROOT="$(mktemp -d)"; trap 'rm -rf "$ROOT"' EXIT
 BIN="$ROOT/bin"; mkdir -p "$BIN"
 REALGIT="$(command -v git)"
 
+# ---- the fixture's two trust anchors — ONE source of truth ----------------------------------------
+# The poller reads these from the environment; the gh stub must answer for exactly the logins the
+# poller ASKS about, or the fitness/host fetch silently returns nothing and the PR misroutes. So they
+# are defined ONCE here and handed to BOTH sides by sweep(). Never hardcode a login in the stub: the
+# stub answering `nox` while the poller queried whatever the box exported is precisely the bug this
+# closes (see the HERMETIC note on sweep()).
+FX_HOST_LOGIN=oso-gato-erebus-claudebox
+FX_FITNESS_LOGIN=oso-gato-nox-claudebox
+
 # ---- stub gh: serve one open PR + the host/fitness verdicts + GitHub's mergeability. ---------------
 # FAKE_HOST (RED|GREEN|NONE), FAKE_FITNESS (PASS|RETURN|…, empty = unreviewed) and FAKE_MERGEABLE
 # (MERGEABLE|CONFLICTING|UNKNOWN) drive it. Never touches GitHub.
@@ -46,13 +55,13 @@ case "${1:-} ${2:-}" in
       # the HOST FIX-reason fetch (its jq carries "VERDICT RED"): the host's FULL comment body
       *"VERDICT RED"*)  printf '**Host live-gate (Gate B): VERDICT RED** — fedora-dev @ %s\n\nCandidate log (tail):\n  install.sh: line 3: boom: command not found\n' "$FAKE_SHA";;
       # the host ROUTING fetch: line 1 only, sha-bound (the jq names the host bot login)
-      *"oso-gato-erebus-claudebox"*)
+      *"$LG_HOST_LOGIN"*)
         case "${FAKE_HOST:-RED}" in
           NONE) : ;;                                              # no verdict yet
           *)    printf '**Host live-gate (Gate B): VERDICT %s** — fedora-dev @ %s\n' "${FAKE_HOST:-RED}" "$FAKE_SHA";;
         esac ;;
       # the fitness ROUTING fetch (the jq names the fitness login)
-      *"oso-gato-nox-claudebox"*)
+      *"$FITNESS_LOGIN"*)
         [ -n "${FAKE_FITNESS:-}" ] && printf 'Fitness review: VERDICT %s — head %s\n' "$FAKE_FITNESS" "$FAKE_SHA" ;;
     esac ;;
   "pr comment") printf 'SURFACE %s\n' "$*" >> "$FIX_LOG";;
@@ -127,8 +136,19 @@ setup_case(){
 
 sweep(){ # <ref> <sha-the-poller-thinks-is-head> [env…]
   local ref="$1" sha="$2"; shift 2
+  # HERMETIC — `env -i` scrubs the AMBIENT environment; the subject sees ONLY what is listed here.
+  # A test that inherits the box's env does not test the shipped code, it tests the box: the poller
+  # takes ELEVEN tunables from the environment, and a real fedora-dev exports several of them
+  # (entrypoint.sh sets FITNESS_LOGIN + FITNESS_SAME_IDENTITY; the Quadlet sets POLLER_ARMED=1).
+  # Inheriting FITNESS_LOGIN is what made the DISCRIMINATOR row below fail IN THE BOX (the poller
+  # asked for the box's fitness login; the stub served its own; the fetch came back empty; the PR
+  # routed REVIEW instead of MERGE) — so the CONFLICTING/MERGEABLE pair could not discriminate and
+  # the suite was RED wherever it actually runs. Pinning just that one var would leave the CLASS
+  # open, and the next leak is POLLER_ARMED=1 — an ambient value that would point a test fixture at
+  # the REAL merge path. Nothing ambient gets in. Add a var here or the subject cannot see it.
   # shellcheck disable=SC2086
-  env PATH="$BIN:$PATH" HOME="$HOMEDIR" FIX_LOG="$FIX_LOG" FD_WORKTREES="$WTDIR" \
+  env -i PATH="$BIN:$PATH" HOME="$HOMEDIR" FIX_LOG="$FIX_LOG" FD_WORKTREES="$WTDIR" \
+      LG_HOST_LOGIN="$FX_HOST_LOGIN" FITNESS_LOGIN="$FX_FITNESS_LOGIN" \
       POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FIXER_TIMEOUT=60 \
       POLLER_FIXER="claude -p" FAKE_REF="$ref" FAKE_SHA="$sha" "$@" \
       bash "$POLLER" --once > "$CASE/out.log" 2>&1

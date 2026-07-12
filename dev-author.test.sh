@@ -132,9 +132,14 @@ setup_case(){
 }
 
 run_author(){ # <env…> — drives the REAL dev-author with the REAL fresh-tree against the real origin
+  # HERMETIC — `env -i` scrubs the AMBIENT environment (see the same note on poller-fixer.test.sh's
+  # sweep()). dev-author takes AUTHOR_CLAUDE / AUTHOR_TIMEOUT / BACKLOG_LABEL / FRESH_TREE / VALIDATE /
+  # DEV_AUTHOR_STATE from env; this suite survives an inherited environment today only because its
+  # stubs happen not to key on any of them. That is luck, not isolation — a test whose verdict depends
+  # on the box it runs in has already stopped being a test. The subject sees ONLY what is listed here.
   # shellcheck disable=SC2086
-  env $1 PATH="$BIN:$PATH" HOME="$HOMEDIR" GH_LOG="$GH_LOG" FD_WORKTREES="$WTDIR" \
-      MOVER="$MOVER" MOVE_MAIN="$ROOT/move-main.sh" FAKE_REPO=fedora-dev \
+  env -i $1 PATH="$BIN:$PATH" HOME="$HOMEDIR" GH_LOG="$GH_LOG" FD_WORKTREES="$WTDIR" \
+      REALGIT="$REALGIT" MOVER="$MOVER" MOVE_MAIN="$ROOT/move-main.sh" FAKE_REPO=fedora-dev \
       AUTHOR_CLAUDE="claude -p" FRESH_TREE="$HERE/bin/fresh-tree.sh" VALIDATE="$BIN/validate.sh" \
       bash "$AUTHOR" fedora-dev 42 > "$CASE/out.log" 2>&1
 }
