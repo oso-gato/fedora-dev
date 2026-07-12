@@ -14,6 +14,17 @@
 #   GREEN → run the independent fitness harness (bin/fitness-review.sh); then the merge decision:
 #           Tier A → present to Arthur (never auto); Tier B/C + fitness PASS → bin/auto-merge.sh.
 #
+#   CONFLICTING → the THIRD route (#150). A PR whose base moved under it can be host-GREEN and
+#           fitness-PASS and STILL be mechanically unmergeable — both gates judge the PR's own head,
+#           which compiles and reviews fine IN ISOLATION; only the MERGE is impossible. The old state
+#           machine modelled two gates and no mergeability, so such a PR routed to MERGE every sweep,
+#           auto-merge failed every sweep, and the loop span forever with NO surfaced question and NO
+#           fixer iteration (observed live 2026-07-12 on #149). Now the sweep reads GitHub's own
+#           `mergeable` and treats CONFLICTING as a FIRST-CLASS state: never MERGE — route to the
+#           FIXER with a truthful RECONCILE reason (R6's "findings are generative", applied to a third
+#           cause). UNKNOWN (GitHub has not finished computing it) is NOOP-and-wait — fail-closed: the
+#           poller never merges a PR whose mergeability it could not read.
+#
 #   RETIRE → each sweep FIRST retires SUPERSEDED PRs: a MERGED PR whose body carries a WHOLE LINE that
 #           is exactly `Supersedes #N[, #M…]` (same-repo, case-insensitive, nothing else on the line)
 #           closes a still-OPEN #N with an explanatory comment. The authorizing event is the
@@ -70,6 +81,11 @@
 #                     count of iterations.
 #   FRESH_TREE        the isolator (default: bin/fresh-tree.sh). Every fix runs in a throwaway worktree
 #                     off the PR's own head — NEVER the shared clone (#152). Overridable for testing.
+#   STALL_SWEEPS      consecutive sweeps a PR may show the SAME observed state (head sha, both
+#                     verdicts, mergeability, routed action) before the poller SURFACES it as stuck
+#                     (default 360 ≈ 1h at the 10s cadence; 0 disables). The backstop behind every
+#                     fail-closed "wait" above — a loop that cannot progress and does not say so is
+#                     the failure mode R13 exists to prevent (#150 req 4).
 #   RETIRE_LOOKBACK   how many of the most recently UPDATED merged PRs each sweep scans for
 #                     `Supersedes #N` declarations (default 15; sorted by update recency so a
 #                     long-parked PR that merges late still enters the window; each merged PR is
@@ -102,15 +118,31 @@ fitness_verdict(){ grep -oE '^Fitness review: VERDICT (PASS|RETURN|ESCALATE)' | 
 supersede_targets(){ tr -d '\r' | awk '/^ {0,3}(```|~~~)/{f=!f; next} !f' | grep -ioE '^ {0,3}supersedes:?[[:space:]]+#[0-9]+([[:space:]]*,[[:space:]]*#[0-9]+)*[[:space:]]*$' | grep -oE '#[0-9]+' | tr -d '#' | sort -un; }
 
 # plan <host:GREEN|RED|NONE> <tier:A|B|C|""> <fitness:PASS|RETURN|ESCALATE|NONE> <armed:0|1>
+#      <mergeable:MERGEABLE|CONFLICTING|UNKNOWN>
 #   -> NOOP | FIX | REVIEW | MERGE | MERGE_DRYRUN | PRESENT
 # The single source of truth for "given the gates, what does the poller DO". Fail-closed toward the
-# human: any ambiguity (unknown tier, no host verdict) resolves to NOOP or PRESENT, never to a merge.
+# human: any ambiguity (unknown tier, no host verdict, unreadable mergeability) resolves to NOOP or
+# PRESENT, never to a merge.
 plan(){
-  local host="$1" tier="$2" fit="$3" armed="$4"
+  local host="$1" tier="$2" fit="$3" armed="$4" mrg="${5:-UNKNOWN}"
   case "$host" in
     RED)  echo FIX; return;;                          # host says broken → iterate a fix
     GREEN) : ;;                                        # fall through to the merge decision
     *)    echo NOOP; return;;                          # no host verdict yet (NONE) → wait
+  esac
+  # MERGEABILITY IS A GATE-INDEPENDENT AXIS (#150). Both gates judge the PR's OWN head in isolation, so
+  # a PR whose base moved under it is GREEN + PASS and STILL unmergeable. Decide it BEFORE fitness:
+  #   * CONFLICTING → FIX (never MERGE — the merge is mechanically impossible; and never REVIEW either:
+  #     the reconcile rewrites the head, which invalidates any verdict a review would have posted, so a
+  #     review here is a wasted model run whose PASS dies on arrival).
+  #   * UNKNOWN → NOOP. GitHub computes `mergeable` LAZILY (the first read of a fresh head returns
+  #     UNKNOWN and kicks off the computation; the next sweep, 10s later, has the answer). Waiting is
+  #     fail-closed — we never merge a PR whose mergeability we could not read — and self-resolving. A
+  #     mergeability that NEVER resolves is a stall, and stall_state() surfaces it rather than spinning.
+  case "$mrg" in
+    CONFLICTING) echo FIX;  return;;
+    MERGEABLE)   : ;;
+    *)           echo NOOP; return;;
   esac
   # ZERO-GATE (2026-07-10, Arthur's decision): tier NO LONGER routes to a human PRESENT. Every GREEN
   # PR flows by its fitness verdict alone (host-GREEN + fitness-PASS auto-merges ANY tier, control-
@@ -145,57 +177,109 @@ fix_outcome(){
   printf 'LANDED'
 }
 
-# fix_cause <host> <fitness> -> HOST | FITNESS | UNKNOWN
-# WHICH gate sent this PR to the fixer. plan() returns FIX from TWO different routes — host RED and
-# fitness RETURN — and the fixer is a bounded `claude -p` that can only fix what it is TOLD. Feeding a
-# fitness RETURN the canned "host live-gate RED" line made it chase a build failure that never happened
-# (the build is GREEN on a RETURN), so it could never make progress and the PR parked on a FALSE
-# "blocked — host live-gate RED" surface. This is R6: "findings are generative — RETURN reasons feed
-# the fixer's next iteration". PURE + selftested, so a future plan() route cannot silently inherit the
-# wrong prompt: an unrecognised pairing is UNKNOWN, and the caller then refuses to guess.
+# fix_cause <host> <fitness> <mergeable> -> HOST | CONFLICT | FITNESS | UNKNOWN
+# WHICH gate sent this PR to the fixer. plan() returns FIX from THREE different routes — host RED,
+# an unmergeable base (#150), and fitness RETURN — and the fixer is a bounded `claude -p` that can only
+# fix what it is TOLD. Feeding a fitness RETURN the canned "host live-gate RED" line made it chase a
+# build failure that never happened (the build is GREEN on a RETURN), so it could never make progress
+# and the PR parked on a FALSE "blocked — host live-gate RED" surface. This is R6: "findings are
+# generative — RETURN reasons feed the fixer's next iteration". PURE + selftested, so a future plan()
+# route cannot silently inherit the wrong prompt: an unrecognised pairing is UNKNOWN, and the caller
+# then refuses to guess.
+# ORDER MIRRORS plan(): host RED first (a broken build is fixed on whatever base it sits on — a
+# reconcile cannot make a RED candidate GREEN), then CONFLICTING (decided before fitness there too).
 fix_cause(){
-  case "$1:$2" in
-    RED:*)    printf 'HOST';;                          # host verdict RED (fitness is not even read yet)
-    *:RETURN) printf 'FITNESS';;                       # host GREEN, reviewer wants rework
-    *)        printf 'UNKNOWN';;                       # not a FIX route → never guess a reason
-  esac
+  local host="$1" fit="$2" mrg="${3:-UNKNOWN}"
+  [ "$host" = RED ]       && { printf 'HOST';     return; }  # host verdict RED (fitness is not even read yet)
+  [ "$mrg" = CONFLICTING ] && { printf 'CONFLICT'; return; }  # host GREEN, but the base moved under it
+  [ "$fit" = RETURN ]     && { printf 'FITNESS';  return; }  # host GREEN, reviewer wants rework
+  printf 'UNKNOWN'                                           # not a FIX route → never guess a reason
+}
+
+# stall_state <fingerprint> <prev-fingerprint> <prev-count> <limit> -> "<count> OK|STALL"
+# NO SILENT SPINNING, EVER (#150 requirement 4 / R13). Every gate above is fail-closed toward "wait",
+# and waiting forever is indistinguishable — from the outside — from working. So the sweep fingerprints
+# each PR's whole observed state (head sha + both verdicts + mergeability + the action it routed to)
+# and counts CONSECUTIVE sweeps that changed NOTHING. Past the limit the PR is not progressing and the
+# poller SAYS SO (one idempotent surface per head) instead of re-deciding the same non-decision every
+# 10s. Any state change — a new head, a verdict, a mergeability that finally computes — resets it, so a
+# PR moving through the pipeline normally never trips it. PURE: the count arithmetic is the whole
+# mechanism, so it is selftested rather than trusted.
+stall_state(){
+  local fp="$1" prev="$2" n="${3:-0}" limit="$4"
+  case "$n" in ''|*[!0-9]*) n=0;; esac                 # unreadable/absent counter → start over
+  if [ "$fp" = "$prev" ]; then n=$((n+1)); else n=1; fi
+  if [ "$limit" -gt 0 ] 2>/dev/null && [ "$n" -ge "$limit" ]; then printf '%s STALL' "$n"
+  else printf '%s OK' "$n"; fi
 }
 
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
-  ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
-  ck "no verdict"         NONE  B   NONE 0 NOOP
-  ck "red"                RED   B   NONE 0 FIX
-  ck "red ignores tier"   RED   A   PASS 1 FIX
-  ck "green tierA merges" GREEN A   PASS 1 MERGE          # ZERO-GATE: A now merges like B/C
-  ck "green tierA disarm" GREEN A   PASS 0 MERGE_DRYRUN   # ZERO-GATE: A routes by fitness, not tier
-  ck "green B unreviewed" GREEN B   NONE 0 REVIEW
-  ck "green C unreviewed" GREEN C   NONE 0 REVIEW
-  ck "green B pass armed" GREEN B   PASS 1 MERGE
-  ck "green B pass disarm" GREEN B  PASS 0 MERGE_DRYRUN
-  ck "green C pass armed" GREEN C   PASS 1 MERGE
-  ck "green B return"     GREEN B   RETURN 1 FIX
-  ck "green B escalate"   GREEN B   ESCALATE 1 PRESENT
-  ck "green unknown tier" GREEN ""  PASS 1 MERGE          # ZERO-GATE: unknown tier no longer gates
-  ck "green unknown fit"  GREEN B   WAT  1 PRESENT
-  # R6 — the fixer must be told WHICH gate failed. plan() returns FIX from two routes; fix_cause pins
-  # the mapping so a fitness RETURN can never again be handed a canned "host live-gate RED" prompt.
-  fc(){ local got; got="$(fix_cause "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — fix_cause($2,$3)=$got want $4"; fail=1; }; }
-  fc "RED → HOST"                  RED   NONE     HOST
-  fc "RED before fitness is read"  RED   ""       HOST
-  fc "GREEN+RETURN → FITNESS"      GREEN RETURN   FITNESS
-  fc "GREEN+PASS → never a FIX"    GREEN PASS     UNKNOWN
-  fc "GREEN+NONE → never a FIX"    GREEN NONE     UNKNOWN
+  ck(){ local got; got="$(plan "$2" "$3" "$4" "$5" "$6")"; [ "$got" = "$7" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5,$6)=$got want $7"; fail=1; }; }
+  ck "no verdict"         NONE  B   NONE 0 MERGEABLE NOOP
+  ck "red"                RED   B   NONE 0 MERGEABLE FIX
+  ck "red ignores tier"   RED   A   PASS 1 MERGEABLE FIX
+  ck "green tierA merges" GREEN A   PASS 1 MERGEABLE MERGE          # ZERO-GATE: A now merges like B/C
+  ck "green tierA disarm" GREEN A   PASS 0 MERGEABLE MERGE_DRYRUN   # ZERO-GATE: A routes by fitness, not tier
+  ck "green B unreviewed" GREEN B   NONE 0 MERGEABLE REVIEW
+  ck "green C unreviewed" GREEN C   NONE 0 MERGEABLE REVIEW
+  ck "green B pass armed" GREEN B   PASS 1 MERGEABLE MERGE
+  ck "green B pass disarm" GREEN B  PASS 0 MERGEABLE MERGE_DRYRUN
+  ck "green C pass armed" GREEN C   PASS 1 MERGEABLE MERGE
+  ck "green B return"     GREEN B   RETURN 1 MERGEABLE FIX
+  ck "green B escalate"   GREEN B   ESCALATE 1 MERGEABLE PRESENT
+  ck "green unknown tier" GREEN ""  PASS 1 MERGEABLE MERGE          # ZERO-GATE: unknown tier no longer gates
+  ck "green unknown fit"  GREEN B   WAT  1 MERGEABLE PRESENT
+  # #150 — UNMERGEABLE IS A FIRST-CLASS STATE. The headline claim: a CONFLICTING PR can NEVER reach a
+  # MERGE, however green and however passed — it goes to the fixer to be reconciled with current main.
+  ck "conflict never merges"    GREEN B PASS   1 CONFLICTING FIX
+  ck "conflict disarmed too"    GREEN B PASS   0 CONFLICTING FIX
+  ck "conflict tierA too"       GREEN A PASS   1 CONFLICTING FIX
+  ck "conflict beats review"    GREEN B NONE   1 CONFLICTING FIX   # reconcile first — a review of a doomed head is wasted
+  ck "conflict beats escalate"  GREEN B ESCALATE 1 CONFLICTING FIX
+  ck "conflict+return → FIX"    GREEN B RETURN 1 CONFLICTING FIX
+  ck "RED+conflict still FIX"   RED   B NONE   1 CONFLICTING FIX
+  ck "unknown mergeability waits" GREEN B PASS 1 UNKNOWN     NOOP  # fail-closed: never merge what we could not read
+  ck "unreadable mergeability"  GREEN B PASS   1 ""          NOOP
+  # a caller that OMITS the axis entirely must fail closed too (the arg defaults to UNKNOWN, not to
+  # "mergeable") — so a future call site that forgets it can never merge blind.
+  got4="$(plan GREEN B PASS 1)"
+  [ "$got4" = NOOP ] && echo "ok: omitting the mergeability arg fails closed" \
+    || { echo "FAIL: plan() with no mergeability arg = $got4 — want NOOP (fail-closed)"; fail=1; }
+  # R6 — the fixer must be told WHICH gate failed. plan() returns FIX from three routes; fix_cause pins
+  # the mapping so a fitness RETURN can never again be handed a canned "host live-gate RED" prompt, and
+  # a CONFLICTING PR is never told to hunt a build failure that does not exist.
+  fc(){ local got; got="$(fix_cause "$2" "$3" "$4")"; [ "$got" = "$5" ] && echo "ok: $1" || { echo "FAIL: $1 — fix_cause($2,$3,$4)=$got want $5"; fail=1; }; }
+  fc "RED → HOST"                  RED   NONE   MERGEABLE   HOST
+  fc "RED before fitness is read"  RED   ""     MERGEABLE   HOST
+  fc "RED wins over a conflict"    RED   NONE   CONFLICTING HOST
+  fc "GREEN+CONFLICTING → CONFLICT" GREEN NONE  CONFLICTING CONFLICT
+  fc "conflict wins over RETURN"   GREEN RETURN CONFLICTING CONFLICT
+  fc "GREEN+RETURN → FITNESS"      GREEN RETURN MERGEABLE   FITNESS
+  fc "GREEN+PASS → never a FIX"    GREEN PASS   MERGEABLE   UNKNOWN
+  fc "GREEN+NONE → never a FIX"    GREEN NONE   MERGEABLE   UNKNOWN
   # every plan()=FIX route must map to a KNOWN cause — the guard against a future route silently
-  # inheriting the wrong prompt (the exact defect this fixes). The host axis spans the UNKNOWN/absent
-  # tokens too (NONE = no verdict yet, WAT = an unrecognised one), so the claim the loop prints is the
-  # claim it actually tests: no host token whatsoever can reach the fixer without a truthful cause.
+  # inheriting the wrong prompt (the exact defect this fixes). The axes span the UNKNOWN/absent tokens
+  # too (NONE = no verdict yet, WAT = an unrecognised one), so the claim the loop prints is the claim it
+  # actually tests: no state whatsoever can reach the fixer without a truthful cause.
   for h in RED GREEN NONE WAT ""; do for f in NONE PASS RETURN ESCALATE WAT ""; do
-    if [ "$(plan "$h" B "$f" 1)" = FIX ] && [ "$(fix_cause "$h" "$f")" = UNKNOWN ]; then
-      echo "FAIL: plan($h,$f)=FIX but fix_cause=UNKNOWN — the fixer would get no truthful reason"; fail=1
-    fi
+    for m in MERGEABLE CONFLICTING UNKNOWN WAT ""; do
+      if [ "$(plan "$h" B "$f" 1 "$m")" = FIX ] && [ "$(fix_cause "$h" "$f" "$m")" = UNKNOWN ]; then
+        echo "FAIL: plan($h,$f,$m)=FIX but fix_cause=UNKNOWN — the fixer would get no truthful reason"; fail=1
+      fi
+    done
   done; done
   echo "ok: every FIX route has a known cause"
+  # #150 requirement 4 — a PR whose state never changes must SURFACE, not spin. The count resets on ANY
+  # observed change, so the normal pipeline (which changes state constantly) never trips it.
+  ss(){ local got; got="$(stall_state "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — stall_state($2,$3,$4,$5)=$got want $6"; fail=1; }; }
+  ss "first sight"              'a|GREEN' ''        ''  3  '1 OK'
+  ss "state changed → reset"    'b|GREEN' 'a|GREEN' 9   3  '1 OK'
+  ss "unchanged → increments"   'a|GREEN' 'a|GREEN' 1   3  '2 OK'
+  ss "reaching the limit stalls" 'a|GREEN' 'a|GREEN' 2  3  '3 STALL'
+  ss "past the limit stays stalled" 'a|GREEN' 'a|GREEN' 7 3 '8 STALL'
+  ss "garbage counter is safe"  'a|GREEN' 'a|GREEN' 'x' 3  '1 OK'
+  ss "limit 0 disables"         'a|GREEN' 'a|GREEN' 99  0  '100 OK'
   # #152 — the fixer's outcome is DETERMINED, never assumed. The landing is verified against ORIGIN, so
   # rc-0-but-nothing-landed ("push lied") and origin-unreadable are FAILURES, not silent successes.
   fo(){ local got; got="$(fix_outcome "$2" "$3" "$4" "$5" "$6")"; [ "$got" = "$7" ] && echo "ok: $1" || { echo "FAIL: $1 — fix_outcome($2,$3,$4,$5,$6)=$got want $7"; fail=1; }; }
@@ -271,6 +355,11 @@ POLL_INTERVAL="${POLL_INTERVAL:-10}"
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
 FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
+# NO SILENT SPINNING (#150 req 4): consecutive no-state-change sweeps on one PR before it SURFACES.
+# 360 × the 10s cadence ≈ 1h — long enough that every legitimate wait (a host build, a fitness run,
+# GitHub computing `mergeable`) completes inside it, short enough that a genuinely stuck PR reaches a
+# human the same hour. 0 disables the detector.
+STALL_SWEEPS="${STALL_SWEEPS:-360}"
 # the isolator the fixer runs in (#152). Overridable so poller-fixer.test.sh can drive the REAL sweep.
 FRESH_TREE="${FRESH_TREE:-$HERE/fresh-tree.sh}"
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
@@ -393,6 +482,26 @@ looking for a build or live-gate failure; there isn't one. Address the reviewer'
 the reviewer's PROSE (advisory, not a machine signal): treat them as the requirements to satisfy, use your
 own judgment on HOW, and if you believe a finding is wrong, say so via FIXER_BLOCKED rather than
 half-fixing it."
+  elif [ "$cause" = CONFLICT ]; then
+    # The ONE mechanical instruction that matters: MERGE main IN, do not rebase. The harness pushes
+    # 'HEAD:refs/heads/<ref>' WITHOUT --force (by design — a push that can only fast-forward can never
+    # rewrite or destroy a branch), so a rebase would rewrite this branch's history and the push would
+    # be REJECTED as non-fast-forward: the fix would be perfect and land nothing. A merge commit is a
+    # descendant of the current head, so it fast-forwards — and the PR is squash-merged at the end, so
+    # the merge commit never reaches main's history anyway.
+    what="Nothing is broken with your code: the build is GREEN and there are no review findings. This branch
+is simply STALE — 'main' moved after it was cut, and GitHub reports it as CONFLICTING, so this PR can never
+be merged in its current shape.
+
+Your job is to RECONCILE this branch with CURRENT main, preserving BOTH sides' intent:
+  1. 'git fetch origin' then 'git merge origin/main' in this worktree.
+  2. Resolve every conflict by KEEPING BOTH intents — the change that landed on main AND this PR's change.
+     Read what main's commits actually did before you resolve; never delete another PR's work to make the
+     conflict go away, and never revert main.
+  3. Commit the merge. Sanity-check the merged tree still does what this PR set out to do.
+DO NOT rebase, and do not force anything: the harness pushes this branch fast-forward-only, so a rewritten
+history would land NOTHING. A merge commit is what makes it mergeable. If the conflict cannot be resolved
+without losing one side's intent, that is a real decision — say so via FIXER_BLOCKED."
   else
     what="The HOST LIVE-GATE returned RED — the candidate failed to build or failed its live probes.
 Address the failure below."
@@ -510,18 +619,25 @@ sweep_repo(){
   # re-fetches duplicated fields this same list already carried (2 calls/PR saved). Branch names
   # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
   # number (no torn read across a mid-sweep push).
+  # `mergeable` rides the SAME list call — a free axis, no extra API cost (#150). It is GitHub's own
+  # verdict on whether the PR can merge AT ALL (MERGEABLE|CONFLICTING|UNKNOWN), which neither gate
+  # answers: both judge the PR's own head in isolation. Deliberately NOT `mergeStateStatus` — it adds
+  # nothing to this routing axis and its GraphQL field requires push access, so a permission hiccup on
+  # ANY swept repo would fail the WHOLE list query and take every sweep down with it. One axis, the
+  # cheapest one that answers the question.
   local rows
-  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid \
-          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)"' 2>/dev/null)" \
+  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid,mergeable \
+          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\(.mergeable)"' 2>/dev/null)" \
     || { log "pr list failed — skipping sweep"; return 0; }
   [ -n "$rows" ] || return 0                       # zero open PRs — quiet (rc 0 distinguishes it)
   # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
   # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
   # --watch flock; FD 3 is free.
-  local pr ref sha comments host tier fit action files fitraw
-  while IFS=$'\t' read -r -u 3 pr ref sha; do
+  local pr ref sha mrg comments host tier fit action files fitraw amrc fp sfile scount sprev sres
+  while IFS=$'\t' read -r -u 3 pr ref sha mrg; do
     [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
+    mrg="${mrg:-UNKNOWN}"                          # absent/blank ⇒ UNKNOWN ⇒ plan() waits (fail-closed)
     # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — bound to THIS
     # head's FULL sha, and read from the comment's FIRST LINE only (the machine-owned header carries
     # "<repo> @ <full-sha>"): a fresh, ungated head must never inherit a previous head's GREEN
@@ -532,7 +648,10 @@ sweep_repo(){
     host="$(printf '%s' "$comments" | host_verdict)"; host="${host:-NONE}"
     # dedup: act on each (pr,sha,host-verdict) at most once for the terminal actions; REVIEW/FIX manage
     # their own re-entry (fitness marker; progress signature), so only gate the whole sweep-action here.
-    local done="$STATE/acted-${pr}-${sha}-${host}.done"
+    # the marker key spans MERGEABILITY too (#150): a PR parked on a GREEN decision whose base then
+    # moves under it is a DIFFERENT state (MERGEABLE → CONFLICTING), and must re-route to the fixer
+    # rather than stay parked on a decision that can no longer be executed.
+    local done="$STATE/acted-${pr}-${sha}-${host}-${mrg}.done"
     # TERMINAL-STATE SKIP: once (pr,sha,GREEN) has ACTED (PRESENT posted / dry-run decided / merge
     # attempted), no further action exists for this tuple — the case arms below would only hit
     # their own `[ -f "$done" ] && continue`. Skip the GREEN-moment fetches too, so a PARKED GREEN
@@ -541,7 +660,7 @@ sweep_repo(){
     # REVIEW-pending PR never holds this marker (fitness re-entry unaffected); FIX never writes it.
     # NB (pre-existing semantics, unchanged): a dry-run marker also blocks a later ARMED merge of
     # the same (pr,sha) — arming re-routes only new heads; part of the #96 flip discussion.
-    [ -f "$done" ] && { log "#$pr ${sha:0:7} host=$host — acted, parked"; continue; }
+    [ -f "$done" ] && { log "#$pr ${sha:0:7} host=$host mergeable=$mrg — acted, parked"; continue; }
     # BATCHED gate reads: plan() consults tier + fitness ONLY on GREEN — so fetch them ONLY then
     # (a NOOP/RED PR costs exactly one comments call per sweep). Both GREEN-moment fetches are
     # rc-checked and SKIP this PR for THIS sweep on a transient failure (retry next sweep) — they
@@ -549,8 +668,12 @@ sweep_repo(){
     # auto-mergeable PR and stick via the acted marker; a failed fitness fetch reading as NONE
     # would spuriously re-run the review harness. rc is only distinguishable on an UNPIPED
     # capture, hence the fetch-to-var-then-filter shape.
+    # …and ONLY while the PR is actually MERGEABLE: a CONFLICTING PR routes to the reconcile-fixer on
+    # the mergeability axis alone (plan()/fix_cause() ignore tier + fitness there), so fetching them
+    # would be two API calls per sweep spent on a decision they cannot influence — and a fitness verdict
+    # posted against a head the reconcile is about to rewrite dies with it anyway.
     tier=""; fit="NONE"
-    if [ "$host" = "GREEN" ]; then
+    if [ "$host" = "GREEN" ] && [ "$mrg" = "MERGEABLE" ]; then
       files="$(gh pr view "$pr" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null)" \
         || { log "#$pr: files fetch failed — skip this sweep, retry next"; continue; }
       # newline-TERMINATE the captured paths ($(…) strips the final newline; an unterminated last
@@ -569,15 +692,33 @@ sweep_repo(){
         fit="$(printf '%s' "$fitraw" | fitness_verdict)"; fit="${fit:-NONE}"
       fi
     fi
-    action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED")"
-    log "#$pr ${sha:0:7} host=$host tier=$tier fitness=$fit ⇒ $action"
+    action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED" "$mrg")"
+    log "#$pr ${sha:0:7} host=$host tier=$tier fitness=$fit mergeable=$mrg ⇒ $action"
+
+    # NO SILENT SPINNING (#150 req 4 / R13). Fingerprint everything we observed + what we decided; if
+    # that has not changed for $STALL_SWEEPS consecutive sweeps, this PR is not moving and the poller
+    # SAYS SO (once per head — surface() is idempotent). It keeps routing normally afterwards: the point
+    # is that a stuck PR is never silent, not that the loop stops. Any change — a new head, a verdict, a
+    # mergeability that finally computes — resets the count, so a healthy PR never trips it.
+    fp="$sha|$host|$fit|$mrg|$action"
+    sfile="$STATE/stall-${POLLER_REPO}-${pr}"
+    scount=0; sprev=""
+    [ -f "$sfile" ] && read -r scount sprev < "$sfile"
+    sres="$(stall_state "$fp" "$sprev" "$scount" "$STALL_SWEEPS")"
+    printf '%s %s\n' "${sres% *}" "$fp" > "$sfile"
+    if [ "${sres#* }" = STALL ]; then
+      log "#$pr ${sha:0:7} STALLED — ${sres% *} consecutive sweeps with no state change ($fp)"
+      surface "$pr" "$sha" "stalled" "this PR has not changed state for ${sres% *} consecutive poller sweeps (host=$host, fitness=$fit, mergeable=$mrg ⇒ $action). The loop is re-examining it and getting nowhere — it cannot make progress on its own. A human decision is needed."
+    fi
+
     case "$action" in
       NOOP) : ;;
       FIX)
-        # R6 — FINDINGS ARE GENERATIVE. plan() routes FIX from TWO causes; derive the reason from the one
-        # that ACTUALLY fired, and in BOTH cases from that gate's OWN COMMENT BODY.
+        # R6 — FINDINGS ARE GENERATIVE. plan() routes FIX from THREE causes; derive the reason from the
+        # one that ACTUALLY fired — for the two GATE causes from that gate's OWN COMMENT BODY, and for
+        # CONFLICT (#150) from GitHub's own mergeability verdict, which no gate ever comments on.
         #
-        # TRUST BOUNDARY (G2), and it holds for both arms: the VERDICT is read from LINE 1 ONLY (the
+        # TRUST BOUNDARY (G2), and it holds for both gate arms: the VERDICT is read from LINE 1 ONLY (the
         # machine-owned header, sha-bound — that is what routed us here and what $comments holds). The
         # fetches below pull the gate's FULL comment body purely as PROMPT material for the fixer, bound
         # to THIS head's sha + that gate's own login, so prose can never flip a gate — it can only say
@@ -588,8 +729,17 @@ sweep_repo(){
         # the whole defect — a fitness RETURN found no host 'VERDICT RED' line at all and fell back to a
         # canned "host live-gate RED" (sending the fixer after a build failure that never happened),
         # while a host RED handed the fixer its own verdict token and called it "the findings".
-        local cause reason; cause="$(fix_cause "$host" "$fit")"
+        local cause reason; cause="$(fix_cause "$host" "$fit" "$mrg")"
         case "$cause" in
+          CONFLICT)
+            # The one FIX cause with NO gate comment to quote: the finding is GitHub's own mergeability
+            # verdict, and the poller states it itself rather than inventing a gate failure. Truthful by
+            # construction — no fetch, nothing to forge.
+            reason="GitHub reports this PR as **mergeable = CONFLICTING**: the branch conflicts with \`main\` as
+origin currently holds it. Both gates are satisfied — the host live-gate is GREEN and there are no review
+findings — because both judge THIS HEAD IN ISOLATION, where nothing is wrong. The MERGE is what is
+impossible: \`main\` moved after this branch was cut, so this PR can never merge in its current shape.
+Reconcile it with current \`main\`, preserving both sides' intent (see the instructions above)." ;;
           HOST)
             # `contains`, NOT `startswith`: the host header is markdown-bold (`**Host live-gate …**`),
             # so a startswith("Host live-gate") match silently returns EMPTY. Verified against the live
@@ -606,8 +756,8 @@ sweep_repo(){
                        2>/dev/null | head -c 6000)"
             reason="${reason:-the independent fitness review RETURNed this head; see its verdict comment on the PR}" ;;
           *)
-            log "#$pr: FIX routed with no known cause (host=$host fitness=$fit) — refusing to invent a reason"
-            surface "$pr" "$sha" "blocked" "the poller routed this PR to the fixer but cannot tell which gate failed (host=$host, fitness=$fit) — a human decision is needed."
+            log "#$pr: FIX routed with no known cause (host=$host fitness=$fit mergeable=$mrg) — refusing to invent a reason"
+            surface "$pr" "$sha" "blocked" "the poller routed this PR to the fixer but cannot tell what failed (host=$host, fitness=$fit, mergeable=$mrg) — a human decision is needed."
             continue ;;
         esac
         run_fixer "$pr" "$ref" "$sha" "$cause" "$reason"
@@ -622,17 +772,27 @@ sweep_repo(){
       MERGE|MERGE_DRYRUN)
         [ -f "$done" ] && continue
         local flag=""; [ "$action" = MERGE ] && flag="--commit"
-        log "#$pr GREEN+B/C+PASS → auto-merge.sh $flag"
+        log "#$pr GREEN+PASS+MERGEABLE → auto-merge.sh $flag"
         # a REFUSE here (rc 1) despite GREEN+PASS routing means the MERGER disagrees with the
         # poller's reads — misconfigured anchors, same-identity while armed, or a gate its stricter
         # parse rejects. SURFACE it (idempotent) so a quietly dead merge path reaches Arthur instead
         # of sitting parked in poller.log; the marker lands only once surfacing succeeded.
-        if LG_HOST_LOGIN="$LG_HOST_LOGIN" FITNESS_LOGIN="$FITNESS_LOGIN" "$HERE/auto-merge.sh" $flag "$POLLER_REPO" "$pr" | tee -a "$LOG"; then
-          : > "$done"
-        else
-          surface "$pr" "$sha" "refused" "auto-merge REFUSED despite GREEN+PASS routing — trust-anchor/SoD config mismatch or a gate its stricter parse rejects (see poller.log)." \
-            && : > "$done"
-        fi
+        LG_HOST_LOGIN="$LG_HOST_LOGIN" FITNESS_LOGIN="$FITNESS_LOGIN" "$HERE/auto-merge.sh" $flag "$POLLER_REPO" "$pr" | tee -a "$LOG"
+        amrc=$?     # pipefail is on: auto-merge's rc survives the tee
+        case "$amrc" in
+          0) : > "$done" ;;
+          3)
+            # UNMERGEABLE (#150) — categorically NOT a gate refusal: the gates said yes and the merge is
+            # mechanically impossible (the base moved between this sweep's read and the merge attempt).
+            # DELIBERATELY NOT PARKED: parking it here would re-create the exact silent spin this fixes —
+            # a PR that can never merge, sitting on a terminal marker with no fixer and no question. The
+            # next sweep reads mergeable=CONFLICTING from GitHub and routes it to the reconcile-fixer.
+            log "#$pr UNMERGEABLE — auto-merge refused a MECHANICALLY IMPOSSIBLE merge; the next sweep routes it to the reconcile-fixer"
+            surface "$pr" "$sha" "unmergeable" "both gates PASS but the merge is MECHANICALLY IMPOSSIBLE (GitHub reports the branch unmergeable against \`main\`) — the base moved under this PR. No merge was attempted; the poller is routing it to the reconcile-fixer, and will say so again if that cannot make progress." ;;
+          *)
+            surface "$pr" "$sha" "refused" "auto-merge REFUSED despite GREEN+PASS routing — trust-anchor/SoD config mismatch or a gate its stricter parse rejects (see poller.log)." \
+              && : > "$done" ;;
+        esac
         ;;
       PRESENT)
         # the acted marker is gated on surface()'s rc: a FAILED comment POST must NOT park the

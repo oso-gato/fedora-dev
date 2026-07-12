@@ -23,18 +23,35 @@
 # Else the gate is UNVERIFIABLE ⇒ REFUSE (fail-closed — a forgeable gate is treated as no gate).
 # Only verified (B|C) AND GREEN AND PASS ⇒ merge. The ratified "Tier B/C auto-merges" — nothing else.
 #
+# AND THE MERGE MUST BE MECHANICALLY POSSIBLE (#150). The gates prove the change is SAFE; they say
+# nothing about whether it CAN merge — both judge the PR's own head in isolation, so a PR whose base
+# moved under it is GREEN + PASS and still unmergeable. That is a THIRD axis (GitHub's own `mergeable`),
+# not a fourth gate: CONFLICTING (or an unreadable UNKNOWN) ⇒ decision UNMERGEABLE ⇒ exit 3 — a LOUD,
+# DISTINCT outcome, never a silent retry and never confused with a gate refusal.
+#
 # SAFE BY DEFAULT: --dry-run (the default) prints the DECISION and merges nothing. --commit actually
 # merges. So wiring it up changes nothing until explicitly armed.
 #
 # Usage:
 #   auto-merge.sh <repo> <pr>                 # dry-run: print decision
 #   auto-merge.sh --commit <repo> <pr>        # actually merge if all three gates pass
-#   auto-merge.sh --decide <tier> <gate> <fit>  # TEST the pure decision fn (no network)
+#   auto-merge.sh --decide <tier> <gate> <fit> <mergeable>   # TEST the pure decision fn (no network)
+#
+# Exit: 0 = MERGE (or would-merge) · 1 = REFUSE (a gate is missing/unverifiable) · 3 = UNMERGEABLE.
 set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 
 # ---- the PURE decision function (no I/O — testable in isolation) -----------------------------------
-# decide <tier:A|B|C> <livegate:GREEN|RED|NONE> <fitness:PASS|RETURN|ESCALATE|NONE> -> MERGE|HUMAN|REFUSE
+# decide <tier:A|B|C> <livegate:GREEN|RED|NONE> <fitness:PASS|RETURN|ESCALATE|NONE>
+#        <mergeable:MERGEABLE|CONFLICTING|UNKNOWN> -> MERGE | UNMERGEABLE | REFUSE
+#
+# UNMERGEABLE IS NOT REFUSE (#150 req 3). A merge refused because a GATE is missing and a merge refused
+# because it is MECHANICALLY IMPOSSIBLE are categorically different failures — the first says "not yet
+# proven safe", the second says "this can never happen, no matter how many times you try". Collapsing
+# them into one REFUSE is what let #149 be re-attempted every 10s forever with no distinct signal: both
+# gates passed, `gh pr merge` failed, and the poller logged a generic refusal it had no reason to act on.
+# So it gets its OWN decision, its OWN exit code (3), and its OWN loud line — and the caller routes it
+# to the reconcile-fixer instead of retrying a merge that cannot happen.
 decide(){
   # ZERO-GATE (2026-07-10, Arthur's decision): tier NO LONGER gates the merge. The old
   # `A → HUMAN` click was built on a misrepresented requirement (the real red line is throwaway
@@ -45,14 +62,18 @@ decide(){
   # exfiltrates the credential FAILS review). So the merge rests on the two INDEPENDENT gates only:
   # host live-gate GREEN + independent fitness PASS. `tier` is retained purely for the caller's
   # report/digest — it is not read here.
-  local tier="$1" gate="$2" fit="$3"
+  local tier="$1" gate="$2" fit="$3" mrg="${4:-UNKNOWN}"
   [ "$gate" = GREEN ] || { echo REFUSE; return; }   # host must have live-gated GREEN
   [ "$fit"  = PASS  ] || { echo REFUSE; return; }   # independent fitness must PASS
+  # the gates say yes — but CAN it merge? CONFLICTING = it provably cannot; UNKNOWN = we could not read
+  # whether it can, and a merge we cannot pre-verify is one we do not attempt (fail-closed; the arg
+  # DEFAULTS to UNKNOWN, so a caller that forgets the axis refuses rather than merges blind).
+  [ "$mrg"  = MERGEABLE ] || { echo UNMERGEABLE; return; }
   echo MERGE
 }
 
 # ---- --decide: exercise the pure function (used by the test) --------------------------------------
-if [ "${1:-}" = "--decide" ]; then decide "${2:-}" "${3:-}" "${4:-}"; exit 0; fi
+if [ "${1:-}" = "--decide" ]; then decide "${2:-}" "${3:-}" "${4:-}" "${5:-}"; exit 0; fi
 
 # ---- real path: gather the three gates from GitHub, then decide -----------------------------------
 COMMIT=0; [ "${1:-}" = "--commit" ] && { COMMIT=1; shift; }
@@ -100,8 +121,21 @@ fi
 # HEAD PIN — verdicts are per-head, so every gate below is bound to THIS sha (a new, ungated head
 # must never inherit the previous head's GREEN/PASS), and the merge itself carries
 # --match-head-commit so a commit racing in between the checks and the merge cannot land unverified.
+# MERGEABILITY rides the same call (#150): CAN this merge at all? Neither gate answers that — both
+# judge the head in isolation — so a stale-base PR is GREEN + PASS and still mechanically unmergeable.
 head_sha="$(gh pr view "$PR" --repo "$SLUG" --json headRefOid -q .headRefOid 2>/dev/null)"
 [ -n "$head_sha" ] || { echo "[auto-merge] cannot read head sha — REFUSE (fail-closed)"; exit 1; }
+
+# GitHub computes `mergeable` LAZILY: the first read of a fresh head returns UNKNOWN and merely KICKS
+# OFF the computation. So poll it a bounded few times rather than treating a not-yet-computed answer as
+# a verdict — but never merge on UNKNOWN (fail-closed: an unverifiable mergeability is not a mergeable
+# PR). Bounded by construction: MERGE_STATE_TRIES × MERGE_STATE_WAIT seconds, then decide on what we have.
+merge_state(){ gh pr view "$PR" --repo "$SLUG" --json mergeable -q .mergeable 2>/dev/null; }
+mrg="$(merge_state)"; tries=1
+while [ "$mrg" != MERGEABLE ] && [ "$mrg" != CONFLICTING ] && [ "$tries" -lt "${MERGE_STATE_TRIES:-3}" ]; do
+  sleep "${MERGE_STATE_WAIT:-2}"; mrg="$(merge_state)"; tries=$((tries+1))
+done
+mrg="${mrg:-UNKNOWN}"
 
 # hdr_verdict <login> <sha-anchor> <verdict-ERE> (G2): BOTH the sha-anchor SELECTION and the verdict
 # EXTRACTION read ONLY THE FIRST LINE (the machine-owned header) of each comment authored by <login>,
@@ -144,18 +178,41 @@ else
   echo "[auto-merge] fitness trust anchor unset or == PR author — fitness unverifiable (fail-closed)"
 fi
 
-decision="$(decide "$tier" "$gate" "$fit")"
-echo "[auto-merge] $SLUG#$PR — tier=$tier live-gate=$gate fitness=$fit ⇒ $decision"
+decision="$(decide "$tier" "$gate" "$fit" "$mrg")"
+echo "[auto-merge] $SLUG#$PR — tier=$tier live-gate=$gate fitness=$fit mergeable=$mrg ⇒ $decision"
+
+# LOUD, DISTINCT, and ACTIONABLE (#150 req 3): a mechanically impossible merge is announced as exactly
+# that — never as a gate refusal, and never as a silent retry. Exit 3 is its own code so the caller can
+# route it (the poller sends it to the reconcile-fixer) instead of hammering a merge that cannot happen.
+unmergeable(){ # <why>
+  echo "[auto-merge] UNMERGEABLE $SLUG#$PR — the gates PASS but the merge is MECHANICALLY IMPOSSIBLE: $1"
+  echo "  This is NOT a gate refusal. Retrying it will fail identically, forever. The branch must be"
+  echo "  reconciled with current 'main' (the poller routes this to the reconcile-fixer). Nothing merged."
+  exit 3
+}
 
 case "$decision" in
   MERGE)
     if [ "$COMMIT" = 1 ]; then
-      gh pr merge "$PR" --repo "$SLUG" --squash --delete-branch --match-head-commit "$head_sha" \
-        && echo "[auto-merge] MERGED $SLUG#$PR (Tier $tier, GREEN, fitness PASS)" \
-        || { echo "[auto-merge] merge command failed"; exit 1; }
+      if gh pr merge "$PR" --repo "$SLUG" --squash --delete-branch --match-head-commit "$head_sha"; then
+        echo "[auto-merge] MERGED $SLUG#$PR (Tier $tier, GREEN, fitness PASS)"
+      else
+        # The merge command failed. WHY matters: if the base moved between the check above and this
+        # call (the race this whole change is about), the PR is now unmergeable and no retry will ever
+        # succeed — say so distinctly. Anything else is a genuine, retryable command failure.
+        post="$(merge_state)"
+        [ "$post" = MERGEABLE ] || unmergeable "the merge was attempted and GitHub now reports mergeable=${post:-UNKNOWN} (the base moved under it)"
+        echo "[auto-merge] merge command failed (PR still reports mergeable) — no merge; see the error above"
+        exit 1
+      fi
     else
       echo "[auto-merge] DRY-RUN — would merge (pass --commit to arm). Nothing merged."
     fi;;
+  UNMERGEABLE)
+    case "$mrg" in
+      CONFLICTING) unmergeable "GitHub reports mergeable=CONFLICTING — the branch conflicts with 'main'";;
+      *)           unmergeable "GitHub could not tell us whether it can merge (mergeable=$mrg after $tries reads) — we never merge what we cannot pre-verify";;
+    esac;;
   REFUSE) echo "[auto-merge] gates not all green — REFUSE (fail-closed). No merge.";;
 esac
-[ "$decision" = MERGE ]   # exit 0 for MERGE, 1 for REFUSE (HUMAN is gone under zero-gate)
+[ "$decision" = MERGE ]   # exit 0 for MERGE, 1 for REFUSE, 3 for UNMERGEABLE (exited above)

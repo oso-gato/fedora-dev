@@ -29,23 +29,34 @@ ROOT="$(mktemp -d)"; trap 'rm -rf "$ROOT"' EXIT
 BIN="$ROOT/bin"; mkdir -p "$BIN"
 REALGIT="$(command -v git)"
 
-# ---- stub gh: serve one open RED PR + the host's verdict/body. Never touches GitHub. ---------------
+# ---- stub gh: serve one open PR + the host/fitness verdicts + GitHub's mergeability. ---------------
+# FAKE_HOST (RED|GREEN|NONE), FAKE_FITNESS (PASS|RETURN|…, empty = unreviewed) and FAKE_MERGEABLE
+# (MERGEABLE|CONFLICTING|UNKNOWN) drive it. Never touches GitHub.
 cat > "$BIN/gh" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
   "pr list")
     case "$*" in
       *"--state merged"*) : ;;                                    # retire pass: nothing merged
-      *"--state open"*)   printf '%s\t%s\t%s\n' 1 "$FAKE_REF" "$FAKE_SHA";;
+      *"--state open"*)   printf '%s\t%s\t%s\t%s\n' 1 "$FAKE_REF" "$FAKE_SHA" "${FAKE_MERGEABLE:-MERGEABLE}";;
     esac ;;
   "pr view")
     case "$*" in
-      # the FIX-reason fetch (its jq carries "VERDICT RED"): the host's FULL comment body
+      *"--json files"*) printf 'README.md\n';;                     # tier feed (tier C — never routes)
+      # the HOST FIX-reason fetch (its jq carries "VERDICT RED"): the host's FULL comment body
       *"VERDICT RED"*)  printf '**Host live-gate (Gate B): VERDICT RED** — fedora-dev @ %s\n\nCandidate log (tail):\n  install.sh: line 3: boom: command not found\n' "$FAKE_SHA";;
-      # the ROUTING fetch: line 1 only, sha-bound
-      *"--json comments"*) printf '**Host live-gate (Gate B): VERDICT RED** — fedora-dev @ %s\n' "$FAKE_SHA";;
+      # the host ROUTING fetch: line 1 only, sha-bound (the jq names the host bot login)
+      *"oso-gato-erebus-claudebox"*)
+        case "${FAKE_HOST:-RED}" in
+          NONE) : ;;                                              # no verdict yet
+          *)    printf '**Host live-gate (Gate B): VERDICT %s** — fedora-dev @ %s\n' "${FAKE_HOST:-RED}" "$FAKE_SHA";;
+        esac ;;
+      # the fitness ROUTING fetch (the jq names the fitness login)
+      *"oso-gato-nox-claudebox"*)
+        [ -n "${FAKE_FITNESS:-}" ] && printf 'Fitness review: VERDICT %s — head %s\n' "$FAKE_FITNESS" "$FAKE_SHA" ;;
     esac ;;
   "pr comment") printf 'SURFACE %s\n' "$*" >> "$FIX_LOG";;
+  "pr merge")   printf 'GHMERGE %s\n' "$*" >> "$FIX_LOG";;         # must NEVER fire on a conflicting PR
   *)            printf 'GH %s\n' "$*" >> "$FIX_LOG";;
 esac
 exit 0
@@ -232,6 +243,65 @@ setup_case feat/x; FAKE_REF=feat/ghost                 # origin has no such ref 
 sweep feat/ghost "$SHA" FAKE_FIXER=commit
 common; never_ran; no_push; surfaced
 logs 'FRESH-TREE FAILED'; notlogs 'FIXER LANDED'
+done_case
+
+# ===================================================================================================
+# #150 — UNMERGEABLE IS A FIRST-CLASS STATE. A PR whose base moved under it is host-GREEN (the gate
+# builds its head, which compiles fine in isolation) and fitness-PASS (the diff is sound) and STILL
+# cannot merge. The old state machine had no mergeability axis, so it routed such a PR to MERGE every
+# single sweep, forever, with no fixer and no question. These two cases are a MATCHED PAIR: the ONLY
+# difference between them is GitHub's `mergeable`, and it must be the difference between "merge it" and
+# "reconcile it". The MERGEABLE half is the discriminator — it proves the CONFLICTING half is not
+# passing vacuously (i.e. that this fixture really would have reached the merge path).
+# ===================================================================================================
+echo "== CONFLICTING: GREEN + PASS but unmergeable → the RECONCILE-fixer, and NEVER a merge =="
+DESC="a CONFLICTING PR is routed to the fixer to be reconciled, never to MERGE"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+sweep feat/x "$SHA" FAKE_FIXER=commit FAKE_HOST=GREEN FAKE_FITNESS=PASS FAKE_MERGEABLE=CONFLICTING
+isolated; common
+# THE HEADLINE ASSERTION: both gates said yes, and the merge path was never even entered.
+notlogs 'auto-merge'
+ck "$(grep -q '^GHMERGE' "$FIX_LOG" && echo 0 || echo 1)" 'a CONFLICTING PR reached "gh pr merge" — it can NEVER merge'
+logs 'mergeable=CONFLICTING ⇒ FIX'; logs 'cause=CONFLICT'
+# …and the fixer was told the TRUTH: nothing is broken, the base moved (R6 — findings are generative).
+ck "$(grep -q 'FIXERPROMPT.*CONFLICTING' "$FIX_LOG" && echo 1 || echo 0)" "the fixer was not told the branch conflicts with main"
+ck "$(grep -q 'FIXERPROMPT.*git merge origin/main' "$FIX_LOG" && echo 1 || echo 0)" "the fixer was not told HOW to reconcile (merge main in)"
+ck "$(grep -q 'FIXERPROMPT.*DO NOT rebase' "$FIX_LOG" && echo 1 || echo 0)" "the fixer was not warned off a rebase (the harness pushes fast-forward-only, so a rewrite lands nothing)"
+ck "$(grep -q 'FIXERPROMPT.*live-gate returned RED' "$FIX_LOG" && echo 0 || echo 1)" "the fixer was sent hunting a build failure that does not exist"
+# a review of a head the reconcile is about to rewrite is a wasted model run — don't spend it
+notlogs 'running fitness harness'
+# the reconcile itself lands on the feature branch (and main is never touched)
+logs 'FIXER LANDED'
+ck "$([ "$(origin_sha feat/x)" != "$SHA" ] && echo 1 || echo 0)" "the reconcile did not land on the feature branch"
+ck "$([ "$(origin_sha main)" = "$MAIN_SHA" ] && echo 1 || echo 0)" "origin/main moved — the fixer must NEVER touch main"
+done_case
+
+echo "== DISCRIMINATOR: the SAME PR, mergeable → DOES reach the merge path (so the case above bites) =="
+DESC="an identical GREEN+PASS PR that IS mergeable reaches auto-merge"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+sweep feat/x "$SHA" FAKE_FIXER=commit FAKE_HOST=GREEN FAKE_FITNESS=PASS FAKE_MERGEABLE=MERGEABLE
+logs 'mergeable=MERGEABLE'; logs 'auto-merge.sh'      # routed to MERGE_DRYRUN (disarmed → nothing merges)
+never_ran                                             # …and NOT to the fixer
+done_case
+
+# ===================================================================================================
+# #150 req 4 — NO SILENT SPINNING. Every gate is fail-closed toward "wait", and waiting forever looks
+# exactly like working. A PR whose state does not change for STALL_SWEEPS consecutive sweeps must SAY
+# so. Here GitHub never resolves `mergeable` (a permanent UNKNOWN): the poller correctly refuses to
+# merge what it cannot pre-verify — and must not do that silently until the end of time.
+# ===================================================================================================
+echo "== STALL: an unchanging PR surfaces instead of spinning (and never merges on UNKNOWN) =="
+DESC="a PR that cannot progress surfaces after N unchanged sweeps"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+sweep feat/x "$SHA" FAKE_HOST=GREEN FAKE_FITNESS=PASS FAKE_MERGEABLE=UNKNOWN STALL_SWEEPS=2
+ck "$(grep -q '^SURFACE' "$FIX_LOG" && echo 0 || echo 1)" "surfaced on the FIRST sweep — a single wait is not a stall (that would be pure noise)"
+notlogs 'auto-merge'                                  # fail-closed: unreadable mergeability never merges
+sweep feat/x "$SHA" FAKE_HOST=GREEN FAKE_FITNESS=PASS FAKE_MERGEABLE=UNKNOWN STALL_SWEEPS=2
+logs 'STALLED'
+ck "$(grep -q 'SURFACE.*stalled' "$FIX_LOG" && echo 1 || echo 0)" "the stalled PR never surfaced — the loop would spin on it in silence"
+ck "$(grep -q 'SURFACE.*not changed state' "$FIX_LOG" && echo 1 || echo 0)" "the surfaced question does not say WHY (no state change)"
+notlogs 'auto-merge'
+never_ran
 done_case
 
 echo

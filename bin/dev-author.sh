@@ -15,8 +15,15 @@
 #      told to NEVER push, NEVER merge, NEVER touch main/the merge gate — the harness owns git plumbing.
 #      Promptlessness is 100% ambient (the box's managed-settings: Bash(*) + defaultMode default); NO
 #      permission flags are passed. Bounded by `timeout` (R13).
-#   4. Gate the author's own work IN-BOX before spending a host build: `bin/validate.sh` (build +
+#   4. Reconcile with main AS IT IS NOW (#150): the worktree was cut off origin/main at START, the
+#      author run takes minutes, and PRs run CONCURRENTLY by design — so main can move underneath it.
+#      Re-fetch + rebase onto current origin/main BEFORE gating/pushing, so the PR is MERGEABLE AT THE
+#      MOMENT IT IS OPENED. A rebase conflict is a genuine collision with another PR's landed work →
+#      surface a dev-task question and open NO PR. A known-unmergeable PR is never opened: both gates
+#      would still pass it (each judges this head in isolation) and only the MERGE would be impossible.
+#   4b. Gate the author's own work IN-BOX before spending a host build: `bin/validate.sh` (build +
 #      assembly + lint, the nested-engine ceiling). RED in-box → surface BLOCKED, do not push noise.
+#      Runs AFTER the reconcile, so what is validated is exactly what is shipped.
 #   5. Hand off: push the branch, open the PR (draft at first push per R3, then mark ready), label it
 #      `live-validate`, and confirm the ship with ONE best-effort comment on the backlog issue (R5
 #      audit loop — the ticket shows its own outcome, symmetric with the BLOCKED question below).
@@ -200,7 +207,35 @@ if [ "$committed" = 0 ]; then
   exit 5
 fi
 
-# 4b) IN-BOX GATE — cheap build+assembly+lint before spending a host build. RED here → surface, no push.
+# 4b) RECONCILE WITH CURRENT main — a PR must be MERGEABLE AT THE MOMENT IT IS OPENED (#150 req 1).
+# The worktree was cut off origin/main at START; a bounded author run takes MINUTES, and the apparatus
+# is DESIGNED to run PRs concurrently — so another PR can (and did, 2026-07-12) merge in that window and
+# move main underneath us. Nothing downstream catches it: the host live-gate builds this PR's OWN head
+# (fine in isolation ⇒ GREEN), fitness reviews the diff (sound ⇒ PASS), and only the merge itself is
+# impossible. So we RE-FETCH and REBASE onto main AS IT IS NOW, and we do it BEFORE the in-box gate so
+# what we validate is exactly what we ship (validating the pre-rebase tree would prove the wrong tree).
+# Rebase — not merge — because this branch has never been pushed: its history is ours to rewrite, and a
+# linear branch off current main is the cleanest thing to hand the gates. (The POLLER's reconcile-fixer
+# does the opposite for an ALREADY-PUSHED branch: it merges main in, because the harness pushes
+# fast-forward-only.) A conflict here is a REAL collision with another PR's landed work — a decision,
+# not a mechanical fix: abort, surface it on the issue, open NO PR. We NEVER open a known-unmergeable PR.
+git -C "$WT" fetch -q origin 2>/dev/null \
+  || { log "fetch failed (fail-closed) — cannot prove the base is current"; surface_blocked "authored '$branch' but could not fetch \`origin\` to reconcile with current \`main\` — the base could not be proven current, so no PR was opened (a stale-base PR can never merge). A maintainer should check network/credentials."; exit 9; }
+new_base="$(git -C "$WT" rev-parse origin/main 2>/dev/null)"
+if [ -n "$new_base" ] && [ "$new_base" != "$base_sha" ]; then
+  log "main moved during the author run (${base_sha:0:7} → ${new_base:0:7}) — rebasing onto current origin/main"
+  if git -C "$WT" -c core.editor=true rebase -q origin/main >/dev/null 2>&1; then
+    log "rebased cleanly onto ${new_base:0:7}"
+  else
+    git -C "$WT" rebase --abort >/dev/null 2>&1 || true
+    log "rebase onto current main CONFLICTS — surfacing; no PR opened"
+    surface_blocked "\`main\` moved while this feature was being authored (\`${base_sha:0:7}\` → \`${new_base:0:7}\`), and the authored branch \`$branch\` does NOT rebase onto it cleanly — it collides with work that landed in the meantime. Reconciling the two intents is a real decision, so no PR was opened (a stale-base PR can never merge). Re-run the author on the current base, or resolve the collision by hand."
+    exit 9
+  fi
+fi
+
+# 4c) IN-BOX GATE — cheap build+assembly+lint before spending a host build. RED here → surface, no push.
+# Runs on the RECONCILED tree (see 4b), so a GREEN here is a GREEN for the code we actually ship.
 log "in-box validate.sh before push…"
 if ! ( cd "$WT" && DISCARD=1 "$VALIDATE" "$WT" >/dev/null 2>&1 ); then
   log "in-box validate RED — not pushing; surfacing for iteration"
