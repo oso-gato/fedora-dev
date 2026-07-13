@@ -23,6 +23,11 @@
 # dirty/diverged clone leaves the clone untouched and relaunches the CURRENT code. The supervisor itself
 # is NOT re-exec'd — a poller-service.sh change still takes effect on the next box bounce; the poller and
 # every bin/*.sh it invokes (the bulk of the machinery) reload here.
+#
+# LOCK LIVENESS (#173): pr-poller adjudicates its own flock singleton (a dead or previous-box-generation
+# holder is taken over, never deferred to) and a genuine deferral exits POLLER_DEFER_RC — this loop names
+# that rc for what it is instead of logging a healthy-looking `rc=0` restart forever (the 2026-07-13
+# incident: a box recreate left an orphan holding the lock; four hours of zero sweeps, zero signal).
 set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 STATE="$HOME/.local/state/claudebox"
@@ -32,6 +37,10 @@ log(){ echo "[$(date -u +%FT%TZ 2>/dev/null || date)] poller-service: $*" | tee 
 
 # ── SELF-REFRESH (#162) config + the ONLY writer of the clone ────────────────────────────────────────
 POLLER_RELOAD_RC="${POLLER_RELOAD_RC:-90}"               # SHARED CONTRACT with bin/pr-poller.sh
+# LOCK LIVENESS (#173): the rc pr-poller exits when it DEFERS to another lock holder — never 0, so a
+# deferral can never again read as a healthy no-op (2026-07-13: four hours of `exited (rc=0) —
+# restarting in 30s` while the singleton was dead). SHARED CONTRACT with bin/pr-poller.sh.
+POLLER_DEFER_RC="${POLLER_DEFER_RC:-91}"
 SELF_REFRESH_CLONE="${SELF_REFRESH_CLONE:-$(dirname "$HERE")}"  # bin/ sits inside the clone
 SELF_REFRESH_REMOTE="${SELF_REFRESH_REMOTE:-origin}"
 SELF_REFRESH_BRANCH="${SELF_REFRESH_BRANCH:-main}"
@@ -91,6 +100,15 @@ while :; do
   if [ "$rc" = "$POLLER_RELOAD_RC" ]; then
     log "pr-poller requested a self-refresh reload (rc=$rc) — ff-pulling the clone + relaunching on the new code"
     self_refresh_pull
+    continue
+  fi
+  if [ "$rc" = "$POLLER_DEFER_RC" ]; then
+    # #173 — NOT a healthy no-op: another --watch holds the lock. poller.log carries the holder
+    # adjudication and the deferral count; a dead or previous-generation holder is TAKEN OVER (never
+    # deferred to), and a persistent streak surfaces its own question. Retry on the same cadence —
+    # 30 s is also the recovery latency once the live holder exits.
+    log "pr-poller DEFERRED to a live lock holder (rc=$rc) — the singleton did NOT start; see poller.log for the adjudication. Retrying in 30s"
+    sleep 30
     continue
   fi
   log "pr-poller --watch exited (rc=$rc) — restarting in 30s"
