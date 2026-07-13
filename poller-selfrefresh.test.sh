@@ -94,7 +94,7 @@ run_watch(){ # <secs> extra env…
   OUT="$CASE/watch.out"
   # shellcheck disable=SC2086
   env HOME="$HOMEDIR" SELF_REFRESH_CLONE="$CLONE" PATH="$BIN:$PATH" \
-      POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 \
+      POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FLEET_HALT=true \
       POLL_INTERVAL=1 SELF_REFRESH_EVERY=2 "$@" \
       timeout "$secs" bash "$POLLER" --watch >"$OUT" 2>&1
   RC=$?

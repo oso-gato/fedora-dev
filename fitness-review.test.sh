@@ -232,7 +232,7 @@ chmod +x "$BIN"/*
 TRIES=3; BACKOFF=0; FITV=""
 poller_sweep(){ # <fitness-harness rc> — one --once sweep against the same fake HOME (state persists)
   env PATH="$BIN:$PATH" HOME="$CASE/home" ACT_LOG="$ACT_LOG" FAKE_SHA="$SHA" FAKE_FIT="$FITV" \
-      POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 \
+      POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FLEET_HALT=true \
       LG_HOST_LOGIN=host-bot FITNESS_LOGIN=fit-bot FITNESS_REVIEW="$BIN/fitness-stub" \
       FITNESS_REVIEW_TRIES="$TRIES" FITNESS_RETRY_BACKOFF="$BACKOFF" \
       FAKE_FITRC="$1" bash "$POLLER" --once >> "$CASE/out.log" 2>&1

@@ -81,6 +81,7 @@ cat > "$BIN/dev-author.sh" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null            # FAITHFUL: the real author's `claude -p` drains any stdin it inherits, to EOF
 printf 'AUTHOR %s %s\n' "$1" "$2" >> "$AUTHOR_LOG"
+[ -n "${FAKE_TOUCH_HALT:-}" ] && : > "$HALT_FLAG"   # a HALT thrown while THIS pass is already in flight
 post_question(){   # what surface_blocked() does: one comment, line 1 = the machine-owned anchor
   [ -n "${FAKE_POST_FAILS:-}" ] && return 0
   printf '%s\t%s the author run could not finish.\n' "$DEV_LOGIN" "$ANCHOR" >> "$STORE/$2"
@@ -97,6 +98,16 @@ if [ "$2" = "${FAKE_AUTHOR_FAIL:-}" ]; then post_question "$@"; exit 4; fi
 printf 'https://github.com/oso-gato/fedora-dev/pull/%s\n' "$((900 + $2))"
 exit 0
 EOF
+# fleet-halt stub — the R9 HALT reader's CONTRACT, not its internals (bin/fleet-halt.sh has its own
+# suite): rc 0 + RUN is the only "go"; HALT is asserted when $HALT_FLAG exists or FAKE_HALT is set (the
+# flag-file form lets a row flip the switch MID-PASS, to prove in-flight work is not killed).
+cat > "$BIN/fleet-halt-stub" <<'EOF'
+#!/usr/bin/env bash
+if [ -n "${FAKE_HALT:-}" ] || [ -f "${HALT_FLAG:-/nonexistent}" ]; then
+  echo "HALT — test switch"; exit 10
+fi
+echo RUN; exit 0
+EOF
 chmod +x "$BIN"/*
 export ANCHOR
 
@@ -105,6 +116,8 @@ fresh(){
   export AUTHOR_LOG="$ROOT/author-$RANDOM.log"; : > "$AUTHOR_LOG"
   export STORE="$ROOT/bus-$RANDOM"; rm -rf "$STORE"; mkdir -p "$STORE"
   export FAKE_BACKLOG="" FAKE_AUTHOR_FAIL="" FAKE_AUTHOR_SKIP="" FAKE_AUTHOR_RC="" FAKE_POST_FAILS=""
+  export FAKE_HALT="" HALT_FLAG="$ROOT/halt-flag-$RANDOM" FAKE_TOUCH_HALT=""
+  rm -f "$HALT_FLAG"
   unset MAX_PER_PASS
 }
 # reply <issue> <login> — a REPLY lands on the issue AFTER the question: the answer that un-parks it.
@@ -114,7 +127,8 @@ reply(){ printf '%s\t%s\n' "$2" "thanks — scope it to one probe." >> "$STORE/$
 drive(){ # <desc> <expected-author-invocations, space-separated>
   local desc="$1" want="$2"
   : > "$AUTHOR_LOG"
-  PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" bash "$LOOP" fedora-dev >/dev/null 2>&1 || true
+  PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$BIN/fleet-halt-stub" \
+    bash "$LOOP" fedora-dev >/dev/null 2>&1 || true
   local got; got="$(awk '{print $3}' "$AUTHOR_LOG" | sort -n | tr '\n' ' ' | sed 's/ $//')"
   ck "$desc" "$got" "$want"
 }
@@ -150,17 +164,59 @@ if [ -f "$AUTHOR" ]; then
     || ck "bin/dev-author.sh never passes the prompt as an argv argument" yes yes
 fi
 
-# --- R9 HALT (#151): no box implements the HALT switch spec #135 requires, and `--watch` is the only way
-# --- this script could spawn bounded model runs on a clock with nothing able to stop them mid-sweep. It
-# --- REFUSES until HALT exists — a real interlock, not a comment saying one is missing.
-echo "== --watch REFUSES until the R9 HALT switch exists (#151) =="
+# --- R9 FLEET HALT (#151). The old --watch hard-refusal is LIFTED BY #151 ITSELF (its req 9) and
+# --- replaced by the REAL interlock it stood in for: one_pass() reads the fleet HALT switch
+# --- (bin/fleet-halt.sh — its own contract suite is fleet-halt.test.sh) at the TOP of every pass,
+# --- BEFORE any author model run spawns. rc 0 alone is GO; HALT/PAUSE/a dead checker ⇒ OBSERVE-ONLY.
+# --- These rows are the mutation detectors requirement 8 demands: delete the halt check from
+# --- one_pass() and every one of them fails (authors spawn under HALT).
+echo "== R9 FLEET HALT (#151): a HALTED pass spawns NO author run — observe-only =="
+fresh; FAKE_BACKLOG=$'3\n7\n12'; export FAKE_HALT=1
+drive "halted pass: nothing authored" ""
+# …and the queue is still OBSERVED: the operator sees what a halted pass WOULD have done.
+HALTLOG="$ROOT/halted-pass.log"
+PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$BIN/fleet-halt-stub" \
+  bash "$LOOP" fedora-dev >/dev/null 2>"$HALTLOG" || true
+ck "…while the halted pass still logs the queue (one 'would author' per issue)" \
+   "$(grep -c 'would author' "$HALTLOG" | tr -d ' ')" "3"
+
+echo "== un-halting resumes on the next pass — no restart, nothing lost =="
+export FAKE_HALT=""
+drive "the same backlog is authored in full once the halt clears" "3 7 12"
+
+echo "== a HALT thrown MID-PASS does not kill in-flight work (stop starting, not stop running) =="
+fresh; FAKE_BACKLOG=$'3\n7\n12'; export FAKE_TOUCH_HALT=1   # the first author run flips the switch
+drive "pass 1 completes every author run it had already started offering" "3 7 12"
+export FAKE_TOUCH_HALT=""
+drive "pass 2 (the flag now stands) takes nothing new" ""
+
+echo "== the checker FAILS CLOSED: a checker that cannot run is never a GO =="
 fresh; FAKE_BACKLOG=$'3\n7'
-# `timeout 10` is the point of the row, not decoration: if the refusal ever regresses, --watch is an
-# INFINITE author-spawning loop, and an unbounded call here would HANG the suite instead of failing it
-# (it did exactly that against the pre-fix script). rc 124 ≠ 2 ⇒ a loud FAIL in ten seconds.
-PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" timeout 10 bash "$LOOP" --watch fedora-dev >/dev/null 2>&1
-ck "--watch exits 2 (refused; a regression would loop forever → rc 124)" "$?" "2"
-ck "…and it spawns no author run at all" "$(wc -l < "$AUTHOR_LOG" | tr -d ' ')" "0"
+: > "$AUTHOR_LOG"
+PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$ROOT/no-such-checker" \
+  bash "$LOOP" fedora-dev >/dev/null 2>&1 || true
+ck "a MISSING fleet-halt checker spawns no author run (rc 127 ≠ 0 ⇒ observe-only)" \
+   "$(wc -l < "$AUTHOR_LOG" | tr -d ' ')" "0"
+
+echo "== --watch RUNS now — HALT-gated per pass, flock-singleton, stopped only from outside =="
+fresh; FAKE_BACKLOG=$'3\n7'
+# `timeout` is the point, not decoration: --watch is an infinite loop by design; rc 124 (killed by the
+# test timeout) IS the pass condition — an early exit would be a regression toward the old refusal.
+PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$BIN/fleet-halt-stub" \
+  DEV_LOOP_LOCK="$ROOT/watch-a.lock" LOOP_INTERVAL=1 \
+  timeout 5 bash "$LOOP" --watch fedora-dev >/dev/null 2>&1
+ck "--watch loops until stopped from outside (rc 124 = the test timeout, not an exit)" "$?" "124"
+got="$(awk '{print $3}' "$AUTHOR_LOG" | sort -nu | tr '\n' ' ' | sed 's/ $//')"
+ck "…and it drove the pass: the backlog was authored on the clock" "$got" "3 7"
+
+echo "== --watch under a standing HALT keeps running (un-halt must need no restart) and spawns NOTHING =="
+fresh; FAKE_BACKLOG=$'3\n7'; export FAKE_HALT=1
+PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$BIN/fleet-halt-stub" \
+  DEV_LOOP_LOCK="$ROOT/watch-b.lock" LOOP_INTERVAL=1 \
+  timeout 5 bash "$LOOP" --watch fedora-dev >/dev/null 2>&1
+ck "--watch under HALT stays up (rc 124 — it must NOT exit; the halt clears without a restart)" "$?" "124"
+ck "…and spawns no author run across every halted pass" "$(wc -l < "$AUTHOR_LOG" | tr -d ' ')" "0"
+export FAKE_HALT=""
 
 echo "== a stuck (non-zero) author does NOT wedge the rest =="
 fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_FAIL=7

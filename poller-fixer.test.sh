@@ -122,10 +122,12 @@ setup_case(){
 
 sweep(){ # <ref> <sha-the-poller-thinks-is-head> [env…]
   local ref="$1" sha="$2"; shift 2
+  # FLEET_HALT=true pins the R9 gate OPEN (#151) so every row below tests what it means to test; the
+  # HALTED row overrides it with FLEET_HALT=false (later env assignments win) to pin the gate SHUT.
   # shellcheck disable=SC2086
   env PATH="$BIN:$PATH" HOME="$HOMEDIR" FIX_LOG="$FIX_LOG" FD_WORKTREES="$WTDIR" \
       POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FIXER_TIMEOUT=60 \
-      POLLER_FIXER="claude -p" FAKE_REF="$ref" FAKE_SHA="$sha" "$@" \
+      POLLER_FIXER="claude -p" FLEET_HALT=true FAKE_REF="$ref" FAKE_SHA="$sha" "$@" \
       bash "$POLLER" --once > "$CASE/out.log" 2>&1
 }
 
@@ -233,6 +235,25 @@ ck "$([ "$(origin_sha feat/x)" != "$SHA" ] && echo 1 || echo 0)" "the fix did no
 ck "$([ "$(git -C "$LIVECLONE" rev-parse --abbrev-ref HEAD)" = main ] && [ "$(git -C "$LIVECLONE" rev-parse HEAD)" = "$MAIN_SHA" ] && echo 1 || echo 0)" "the live clone's HEAD moved — a worktree must never disturb the tree the poller runs from"
 ck "$(grep -qx "FIXERCWD $WT" "$FIX_LOG" && echo 1 || echo 0)" "the fixer did not run in the isolated worktree"
 ck "$([ ! -d "$WT" ] && echo 1 || echo 0)" "the throwaway worktree was not reaped"
+done_case
+
+# ---------------------------------------------------------------------------------------------------
+# R9 FLEET HALT (#151): the switch is read at the TOP of every tick, BEFORE any model run — a halted
+# sweep is OBSERVE-ONLY: it still logs the routing decision (the operator sees the queue) but spawns no
+# fixer, pushes nothing, posts nothing. FLEET_HALT=false stands in for every non-GO outcome at once
+# (HALT, PAUSE, a dead checker: rc ≠ 0 is the whole contract). This row is the mutation detector
+# requirement 8 demands for THIS sweeper: delete the halt check from sweep()/sweep_repo() and it fails
+# (the fixer runs and the RED PR is acted on under HALT).
+echo "== R9 FLEET HALT (#151): a HALTED tick is OBSERVE-ONLY — no fixer, no push, no comment =="
+DESC="a fleet HALT spawns no model run on a RED PR (observed, logged, untouched)"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+sweep feat/x "$SHA" FAKE_FIXER=commit FLEET_HALT=false
+common; never_ran; no_push
+ck "$(grep -q '^SURFACE' "$FIX_LOG" && echo 0 || echo 1)" "a HALTED sweep posted a comment — observe-only must write nothing"
+logs 'FLEET HALT'                                    # the tick says it is halted…
+logs 'HALTED — FIX not taken'                        # …and logs the decision it did NOT act on
+notlogs 'FIXER LANDED'
+ck "$([ "$(origin_sha feat/x)" = "$SHA" ] && echo 1 || echo 0)" "origin/feat/x moved during a HALTED sweep"
 done_case
 
 echo "== FRESH-TREE FAILS: fail-closed — no isolation ⇒ NO fix attempted (no shared-clone fallback) =="

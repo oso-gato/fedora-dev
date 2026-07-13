@@ -61,6 +61,18 @@ prompts on nothing (the hook and classifier WERE the per-iteration human clicks 
 box-rebuild/assemble machinery · key-sync · `*sudoers*`. Merges via the poller like any change (no
 standalone-click rule — the ZERO-GATE decision removed it); the fitness reviewer still scrutinises them.
 
+**FLEET HALT (R9, fedora-dev#151)** — the fleet-wide, maintainer-thrown SOFT STOP. A repo MAINTAINER
+(admin|maintain) applies the `halt` label to the FLEET HALT CONTROL issue in the control repo
+(`oso-gato/fedora-bootstrap`, discovered by title — live: #128); every sweeper (`bin/pr-poller.sh`,
+`bin/dev-loop.sh`, the host watcher) reads it via `bin/fleet-halt.sh` at the TOP of every sweep, BEFORE
+any model run is spawned or merge taken, and goes OBSERVE-ONLY while it stands (logs what it WOULD do;
+acts on nothing; does NOT exit — un-halting needs no restart). MAINTAINER-BOUND both directions from
+the label's own timeline events (an App identity can neither halt nor UN-halt the loop), and the ONE
+gate that fails CLOSED TOWARD STOPPING — a deliberate inversion of the loop's fail-safe-toward-progress
+bias, softened so a blip is not an outage: an unreadable signal PAUSES that sweep, only K consecutive
+unreadable reads HALT; the control issue ABSENT is a definite "no halt asserted". HALT stops NEW action
+only (in-flight work completes); the hard stop is App-key revocation, per R9.
+
 ## THE LOOP — dev↔host, two-tier validation
 
 **PURPOSE:** `fedora-dev` (develop·build·merge) + `fedora-bootstrap` (operate·live-gate) are ONE
