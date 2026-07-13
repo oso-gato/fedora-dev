@@ -98,6 +98,8 @@ HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 DEV_AUTHOR="${DEV_AUTHOR:-$HERE/dev-author.sh}"
 # the R9 fleet HALT reader (#151) — rc 0 is the ONLY "go"; see the header. Overridable for the mock test.
 FLEET_HALT="${FLEET_HALT:-$HERE/fleet-halt.sh}"
+# the R16 operating-scope reader (#167) — rc 0 is the ONLY "in scope"; see bin/repo-scope.sh.
+REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
 LOOP_INTERVAL="${LOOP_INTERVAL:-300}"
 
 # The machine-owned line-1 anchor of dev-author's surface_blocked() comment — the ONLY record of "a
@@ -198,6 +200,13 @@ fi
 # ---- ONE PASS over the backlog --------------------------------------------------------------------
 one_pass(){ # <repo>
   local repo="$1" slug="$ORG/$1"
+  # R16 OPERATING SCOPE (#167) — checked FIRST, every pass (a local file read; the scope can change
+  # through a confirmed merge, so --watch must re-read it like the halt switch): an out-of-scope
+  # repo gets NO enumeration and NO author run — one loud line. rc≠0 (127 included) is never a go.
+  if ! "$REPO_SCOPE" check "$repo" 2>/dev/null; then
+    log "R16 SCOPE: repo '$repo' is outside the maintainer-confirmed operating scope — pass refused (no enumeration, no author run, nothing filed)"
+    return 0
+  fi
   # R9 FLEET HALT (#151) — read at the TOP of every pass, BEFORE any author model run is spawned (R9's
   # bound is "within one sweep"). rc 0 alone means GO; a maintainer HALT, an unreadable-signal PAUSE, or
   # a checker that cannot run at all (fail-closed toward stopping BY CONSTRUCTION — rc 127 is not rc 0)

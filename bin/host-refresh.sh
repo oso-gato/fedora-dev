@@ -161,6 +161,9 @@ LOOKBACK="${HOST_REFRESH_LOOKBACK:-15}"
 MAX_AGE="${HOST_REFRESH_MAX_AGE:-172800}"
 WORKFLOW="${HOST_REFRESH_WORKFLOW:-build.yml}"
 HOST_TICKET="${HOST_TICKET:-$HERE/host-ticket.sh}"
+# the R16 operating-scope reader (#167) — every scanned repo is checked before ANY read/ticket/
+# comment against it; rc≠0 (127 included) is never a go (fail-closed).
+REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
 STATE="$HOME/.local/state/host-refresh"
 log(){ echo "host-refresh: $*" >&2; }
 
@@ -181,6 +184,11 @@ too_old(){
 
 scan_workload(){ # <workload == repo name>
   local repo="$1" slug="$ORG/$1" rows
+  # R16 (#167): an out-of-scope workload gets NO scan and NO redeploy ticket — one loud line.
+  if ! "$REPO_SCOPE" check "$repo" 2>/dev/null; then
+    log "R16 SCOPE: workload '$repo' is outside the maintainer-confirmed operating scope — skipped (no scan, no ticket)"
+    return 0
+  fi
   rows="$(merged_rows "$slug")" \
     || { log "$slug: merged-PR list failed — skipping this scan (retry next; the monthly timer is the backstop)"; return 0; }
   [ -n "$rows" ] || return 0
@@ -232,6 +240,11 @@ scan_workload(){ # <workload == repo name>
 
 scan_control(){ # <control repo>
   local repo="$1" slug="$ORG/$1" rows
+  # R16 (#167): same gate as the workload arm — no scan, no question, on an out-of-scope repo.
+  if ! "$REPO_SCOPE" check "$repo" 2>/dev/null; then
+    log "R16 SCOPE: control repo '$repo' is outside the maintainer-confirmed operating scope — skipped (no scan, no question)"
+    return 0
+  fi
   rows="$(merged_rows "$slug")" \
     || { log "$slug: merged-PR list failed — skipping this scan (retry next)"; return 0; }
   [ -n "$rows" ] || return 0

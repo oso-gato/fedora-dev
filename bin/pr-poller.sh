@@ -45,6 +45,12 @@
 #   pr-poller.sh --selftest            # exercise the pure plan()/verdict extractors (no network/model)
 #
 # Config (env):
+#   POLLER_REPOS      the repos one tick sweeps. DEFAULT: derived from the R16 operating scope
+#                     (bin/repo-scope.sh list → policy/scope.conf — #167), never a hardcoded list.
+#                     An explicit value can narrow/reorder but NOT expand: every repo is re-checked
+#                     against the scope each tick (out of scope ⇒ skipped, one loud line).
+#   REPO_SCOPE        the R16 scope reader (default: bin/repo-scope.sh — see its header; #167).
+#                     Any non-zero rc — a missing reader included — is "not in scope": fail-closed.
 #   POLLER_REPO       repo to watch (default: fedora-dev — the poller watches its OWN repo's PRs)
 #   LG_HOST_LOGIN     host bot login whose verdict is trusted (default: oso-gato-erebus-claudebox[bot])
 #   FITNESS_LOGIN     fitness bot login (passed through to fitness-review.sh + auto-merge.sh)
@@ -350,13 +356,18 @@ fi
 # ===================================================================================================
 POLLER_REPO="${POLLER_REPO:-fedora-dev}"
 SLUG="oso-gato/$POLLER_REPO"
-# ORG-WIDE (P0 uniform loop): the poller sweeps EVERY fleet repo, not just its own — so a
-# fedora-bootstrap or fedora-desktop PR auto-merges through the SAME harness as a fedora-dev one
-# (Arthur's "same harness for the host"). fedora-desktop joined for the fleet-wide unshackle parity
-# port (managed-settings.json must stay byte-identical across all three — fleet-guard-parity CHECK 1 —
-# so its port PR needs the same zero-click path). Space-separated; sweep() re-sets POLLER_REPO/SLUG
-# per repo each tick.
-POLLER_REPOS="${POLLER_REPOS:-fedora-dev fedora-bootstrap fedora-desktop e2e-alpha}"
+# R16 OPERATING SCOPE (#167): the sweep list DERIVES from the maintainer-confirmed scope config
+# (policy/scope.conf via bin/repo-scope.sh — config-as-code), NEVER a hardcoded list buried here:
+# the 2026-07-13 incident was exactly a one-line PR editing this default to enroll a repo the
+# maintainer had scoped away, and no layer noticed. An explicit POLLER_REPOS env can still narrow
+# or reorder (testing), but can never EXPAND: sweep() re-checks EVERY repo against the scope each
+# tick, so an env var, a stale process, or a mutated default cannot reach a foreign repo. The
+# reader is fail-closed (its header): unreadable config ⇒ only the apparatus's own two repos;
+# missing reader ⇒ check rc 127 ⇒ nothing swept at all. Zero API calls — a local file read.
+REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
+if [ -z "${POLLER_REPOS:-}" ]; then
+  POLLER_REPOS="$("$REPO_SCOPE" list)" || POLLER_REPOS=""
+fi
 # login MUST be the GraphQL form (no `[bot]` suffix) — that is what `gh pr view --json comments`
 # returns and what auto-merge.sh matches against. REST's `.user.login` adds `[bot]`; do NOT use it.
 LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
@@ -489,6 +500,13 @@ reap_tree(){ # <clone> <worktree>
 # the proven pattern (isolate via fresh-tree.sh → model commits, never pushes → harness owns git).
 run_fixer(){ # <pr> <headref> <sha> <cause:HOST|FITNESS> <reason>
   local pr="$1" ref="$2" sha="$3" cause="$4" reason="$5"
+  # R16 belt (#167): sweep() already scope-gates every swept repo; re-check HERE, before a worktree
+  # is cut, so no future caller/route can walk a fixer into a foreign repo (the incident's exact
+  # blast: a bot commit pushed onto a foreign feature branch). Normally unreachable — belt, not path.
+  if ! "$REPO_SCOPE" check "$POLLER_REPO" >/dev/null 2>&1; then
+    log "FIX $SLUG#$pr @ ${sha:0:7} REFUSED — '$POLLER_REPO' is outside the operating scope (R16); no worktree cut, no fix attempted"
+    return 0
+  fi
   # Signature spans BOTH cause and reason: a host RED and a fitness RETURN on the same head are
   # DIFFERENT failures and must not collide onto one no-progress signature.
   local sig; sig="$(printf '%s%s' "$cause" "$reason" | tr -cd '[:alnum:]' | tail -c 40)"
@@ -723,7 +741,18 @@ sweep(){
     POLLER_HALTED=1
     log "FLEET HALT: ${_hmsg:-halt checker unavailable (fail-closed toward stopping)} — OBSERVE-ONLY tick: no fixer, no review, no merge, no retire, no comment"
   fi
-  for _r in $POLLER_REPOS; do POLLER_REPO="$_r"; SLUG="oso-gato/$_r"; sweep_repo; done
+  # R16 OPERATING SCOPE (#167): every swept repo is re-checked against the maintainer-confirmed
+  # scope EVERY tick, whatever put it in $POLLER_REPOS (env, a stale process, a mutated default).
+  # Out of scope ⇒ NO action of any kind — no sweep, no fixer, no review, no merge, no retire —
+  # and ONE loud log line. A non-zero rc from the reader (127 included) is never a "go".
+  [ -n "${POLLER_REPOS// /}" ] || log "R16 SCOPE: the operating scope resolved EMPTY (config emptied, or reader+config unavailable) — sweeping NOTHING (fail-closed)"
+  for _r in $POLLER_REPOS; do
+    if ! "$REPO_SCOPE" check "$_r" 2>/dev/null; then
+      log "R16 SCOPE: repo '$_r' is NOT in the maintainer-confirmed operating scope (policy/scope.conf) — SKIPPED: no sweep, no fixer, no review, no merge, no retire"
+      continue
+    fi
+    POLLER_REPO="$_r"; SLUG="oso-gato/$_r"; sweep_repo
+  done
   host_refresh_tick
 }
 sweep_repo(){

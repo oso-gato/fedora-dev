@@ -94,8 +94,11 @@ review(){
   local script="$1"; shift
   RECV="$CASE/received.txt"; RECV_ARGV="$CASE/received-argv.txt"; : > "$RECV"; : > "$RECV_ARGV"
   # shellcheck disable=SC2086
+  # REPO_SCOPE pinned to the real reader: the MUT rows run a sed-COPY of the harness from $CASE,
+  # where the default $HERE/repo-scope.sh does not exist — and a missing reader is a fail-closed
+  # refusal (R16/#167) that would pass those rows VACUOUSLY, for the wrong reason.
   env PATH="$BIN:$PATH" HOME="$CASE/home" ACT_LOG="$ACT_LOG" DIFF_FILE="$DIFF" FAKE_SHA="$SHA" \
-      RECV="$RECV" RECV_ARGV="$RECV_ARGV" \
+      RECV="$RECV" RECV_ARGV="$RECV_ARGV" REPO_SCOPE="$HERE/bin/repo-scope.sh" \
       FITNESS_CLAUDE="reviewer -p" FITNESS_LOGIN=fit-bot LG_HOST_LOGIN= "$@" \
       bash "$script" fedora-dev 1 > "$CASE/out.log" 2> "$CASE/err.log"
   RC=$?
