@@ -63,7 +63,10 @@
 #                     acted-marker-parked, precisely so a hand-posted verdict is still seen — no
 #                     model run is spent on it, only the reads. Against the dev App's 5k/h REST budget (SHARED with the fixer,
 #                     fitness reviewer and auto-merge): N=10 open PRs ≈ 4.3k/h — the ceiling is
-#                     ~10 sustained open PRs (was 2-3 unbatched). On exhaustion gh calls fail and
+#                     ~10 sustained open PRs (was 2-3 unbatched). The R9 fleet-halt read (#151)
+#                     adds 2 calls per TICK, not per repo (1 title-search + 1 timeline ≈ +720/h;
+#                     the search API has its own 30/min budget, of which this uses 6/min).
+#                     On exhaustion gh calls fail and
 #                     sweeps degrade to NOOP until the window resets — fail-closed,
 #                     self-recovering; GREEN-moment fetch failures skip that PR for that sweep
 #                     (retry next), never a misroute. Escalation if ever needed: one GraphQL
@@ -73,6 +76,11 @@
 #                     count of iterations.
 #   FRESH_TREE        the isolator (default: bin/fresh-tree.sh). Every fix runs in a throwaway worktree
 #                     off the PR's own head — NEVER the shared clone (#152). Overridable for testing.
+#   FLEET_HALT        the R9 fleet HALT reader (default: bin/fleet-halt.sh — see its header; #151).
+#                     Read at the TOP of every tick, BEFORE any model run / merge / retire / comment.
+#                     rc 0 alone means GO; ANY other outcome (maintainer HALT, unreadable-signal PAUSE,
+#                     a missing/crashed checker) makes the whole tick OBSERVE-ONLY — fail-closed toward
+#                     stopping BY CONSTRUCTION. Overridable for testing.
 #   FITNESS_REVIEW    the independent fitness harness the REVIEW arm runs (default: bin/fitness-review.sh).
 #                     Overridable for testing. Its exit code is a CONTRACT: 0 = verdict posted; 3 = the
 #                     reviewer could not be RUN / produced no verdict for this head; anything else = a
@@ -361,6 +369,10 @@ FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
 # the isolator the fixer runs in (#152). Overridable so poller-fixer.test.sh can drive the REAL sweep.
 FRESH_TREE="${FRESH_TREE:-$HERE/fresh-tree.sh}"
+# the R9 fleet HALT reader (#151). Overridable so the mock suites can pin both directions
+# (poller-fixer.test.sh drives a halted sweep with FLEET_HALT=false, a normal one with FLEET_HALT=true).
+FLEET_HALT="${FLEET_HALT:-$HERE/fleet-halt.sh}"
+POLLER_HALTED=0
 # the independent fitness harness the REVIEW arm runs. Overridable (same reason as FRESH_TREE) so
 # fitness-review.test.sh can drive the REAL sweep against a scripted reviewer outcome.
 FITNESS_REVIEW="${FITNESS_REVIEW:-$HERE/fitness-review.sh}"
@@ -656,10 +668,31 @@ retire_superseded(){
 
 # ORG-WIDE wrapper (P0 uniform loop): one tick sweeps EVERY apparatus repo through the SAME harness,
 # re-setting POLLER_REPO/SLUG per repo. sweep_repo() is the original single-repo body unchanged.
-sweep(){ local _r; for _r in $POLLER_REPOS; do POLLER_REPO="$_r"; SLUG="oso-gato/$_r"; sweep_repo; done; }
+#
+# R9 FLEET HALT (#151): the fleet-wide stop switch is read ONCE at the TOP of every tick — BEFORE any
+# model run is spawned, any merge taken, any retire close, any comment posted (R9's bound is "within
+# one sweep"). rc 0 alone means GO; ANY other outcome — a maintainer HALT, an unreadable-signal PAUSE,
+# a checker that is missing or crashed — makes the whole tick OBSERVE-ONLY: sweep_repo still enumerates
+# and logs what it WOULD do, so the operator sees the queue, but acts on nothing and writes no state
+# marker. That is fail-closed TOWARD STOPPING (R9's deliberate inversion of the loop's usual
+# fail-safe-toward-progress; the checker itself softens it — one blip PAUSES, only K consecutive
+# unreadable reads HALT: bin/fleet-halt.sh). The poller does NOT exit: HALT stops NEW action, not
+# running work (in-flight fixer/merge completes; the hard kill is App-key revocation, per R9), and a
+# maintainer removing the label resumes action on the very next sweep — no restart, no re-arm.
+sweep(){
+  local _r _hmsg
+  if _hmsg="$("$FLEET_HALT" 2>>"$LOG")"; then
+    POLLER_HALTED=0
+  else
+    POLLER_HALTED=1
+    log "FLEET HALT: ${_hmsg:-halt checker unavailable (fail-closed toward stopping)} — OBSERVE-ONLY tick: no fixer, no review, no merge, no retire, no comment"
+  fi
+  for _r in $POLLER_REPOS; do POLLER_REPO="$_r"; SLUG="oso-gato/$_r"; sweep_repo; done
+}
 sweep_repo(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"
-  retire_superseded
+  # R9 HALT (#151): a halted tick retires nothing — a close is an ACTION, reversible or not.
+  [ "${POLLER_HALTED:-0}" = 1 ] || retire_superseded
   # BATCHED list: ONE call yields number+ref+sha as TSV — the old per-PR headRefName/headRefOid
   # re-fetches duplicated fields this same list already carried (2 calls/PR saved). Branch names
   # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
@@ -725,6 +758,13 @@ sweep_repo(){
     fi
     action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED")"
     log "#$pr ${sha:0:7} host=$host tier=$tier fitness=$fit ⇒ $action"
+    # R9 HALT (#151): OBSERVE-ONLY — the decision above is LOGGED (the operator sees the queue) but not
+    # acted on: no fixer model run, no review model run, no merge, no PRESENT/blocked comment — and no
+    # state marker is written, so a halted sweep can never park, dedup or no-progress-signature a PR.
+    if [ "${POLLER_HALTED:-0}" = 1 ]; then
+      [ "$action" = NOOP ] || log "#$pr ${sha:0:7} HALTED — $action not taken (R9 fleet HALT; resumes the sweep after the halt clears)"
+      continue
+    fi
     case "$action" in
       NOOP) : ;;
       FIX)
