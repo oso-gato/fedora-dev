@@ -16,10 +16,21 @@
 #   exit 0 = no `.live-gate` (nothing to lint), OR it is well-formed and every target resolves to
 #            a sane, host-runnable contract.
 #   exit 1 = a problem the host gate would hit — printed per-target so the agent iterates in-box.
+#        lint-live-gate.sh --cfile <repo-dir>
+#   print the FIRST declared target's resolved build file (CFILE) and exit 0 — the repo's OWN
+#   contract, resolved by the SAME vendored lg_load the host uses. validate.sh consumes this (#180)
+#   so a non-image repo that declares its build target (fedora-bootstrap's shellgate =>
+#   Containerfile.livegate) is built from IT, never from a hardcoded second filename convention.
+#   exit 1 + nothing on stdout when there is no .live-gate or it does not parse (the LINT mode,
+#   which T0 gates, is where a parse failure gets EXPLAINED — this mode only answers "what file").
 set -uo pipefail
-REPO="${1:?usage: lint-live-gate.sh <repo-dir>}"
+MODE=lint; [ "${1:-}" = --cfile ] && { MODE=cfile; shift; }
+REPO="${1:?usage: lint-live-gate.sh [--cfile] <repo-dir>}"
 LG="$REPO/.live-gate"
-[ -f "$LG" ] || { echo "lint-live-gate: no .live-gate in $REPO — nothing to lint"; exit 0; }
+if [ ! -f "$LG" ]; then
+  [ "$MODE" = cfile ] && exit 1
+  echo "lint-live-gate: no .live-gate in $REPO — nothing to lint"; exit 0
+fi
 fail=0; lg_reason=""
 bad(){ echo "  [FAIL] $*"; fail=1; }
 ok(){  echo "  [ok]   $*"; }
@@ -98,6 +109,16 @@ pt(){ local v="${1}_${2}"; printf '%s' "${!v:-$3}"; }
 # ============================================================================================
 # end vendored
 # ============================================================================================
+
+# --cfile mode (#180): answer "what file does this repo say to build" and nothing else. lg_load's
+# WARN lines (non-schema keys) go to stdout, so they are silenced here — the caller wants ONE token;
+# the lint mode below is where contract problems get explained (and T0 gates it).
+if [ "$MODE" = cfile ]; then
+  lg_load "$LG" >/dev/null 2>&1 || exit 1
+  read -r -a targets <<< "${LIVE_GATE_TARGETS:-default}"
+  printf '%s\n' "$(pt CFILE "${targets[0]}" "${CAND_CFILE:-Containerfile}")"
+  exit 0
+fi
 
 echo "== lint-live-gate: $LG =="
 
