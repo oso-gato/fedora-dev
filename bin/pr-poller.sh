@@ -92,6 +92,12 @@
 #                     scanned only once — state marker). Residual: if the poller is DOWN while more
 #                     than this many merged PRs receive updates, older declarations fall out of the
 #                     window unscanned — degrades to status quo (the PR stays open for a human).
+#   SELF_REFRESH*     the SELF-REFRESH mechanism (#162 — the running poller deploys its OWN merged code).
+#                     SELF_REFRESH=1 (on) · SELF_REFRESH_CLONE (the clone we execute; default one level
+#                     up from bin/) · SELF_REFRESH_REMOTE/BRANCH (origin/main) · SELF_REFRESH_EVERY
+#                     (fetch once per N sweeps; default 30) · SELF_REFRESH_FETCH_TIMEOUT (60s) ·
+#                     POLLER_RELOAD_RC (the exit code that asks poller-service.sh to ff-pull + relaunch;
+#                     default 90 — a SHARED default with bin/poller-service.sh). See refresh_decision().
 set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 
@@ -199,6 +205,30 @@ review_due(){
   [ "$since" -ge "$backoff" ] && printf 'RUN' || printf 'WAIT'
 }
 
+# refresh_decision <clean:0|1> <running-sha> <origin-sha> <origin-is-descendant-of-running:0|1>
+#   -> NOFETCH | UPTODATE | DIRTY | DIVERGED | RELOAD
+# THE SELF-REFRESH DECISION (#162). The dev loop merges improvements to THIS machinery — the poller, the
+# fitness harness, dev-{plan,author,loop}, tier-classify, auto-merge — and nothing used to pull the live
+# clone, so the RUNNING poller kept executing the OLD code until a human ran `git pull` + bounced --watch.
+# This pure core decides, given what origin holds vs. what we run, whether the poller should STEP ASIDE
+# so poller-service.sh can fast-forward the clone + relaunch us on the new code. FAIL-SAFE TOWARD PROGRESS
+# is baked in: every verdict but RELOAD means "leave the poller running unchanged" (req 3 — a refresh
+# that cannot happen must never stop the loop). Only a CLEAN clone that origin strictly FAST-FORWARDS
+# reloads — never a rebase/merge that could rewrite a human's clone; a dirty or diverged clone is left
+# untouched (req 1). PURE + selftested.
+#   NOFETCH  — origin sha unknown (the fetch failed / branch unresolvable) → never reload.
+#   UPTODATE — origin == running → nothing merged since → silent no-op (req 5).
+#   DIRTY    — the clone carries local edits → a human touched it → never clobber, leave it.
+#   DIVERGED — origin is NOT a fast-forward of what we run (rewritten history / local commits) → leave.
+#   RELOAD   — clean, and origin strictly fast-forwards past what we run → step aside for a reload.
+refresh_decision(){
+  local clean="$1" run="$2" org="$3" desc="$4"
+  [ -n "$org" ] || { printf 'NOFETCH'; return; }        # no resolvable origin tip → can't reload
+  [ "$run" = "$org" ] && { printf 'UPTODATE'; return; } # current already (regardless of a dirty tree)
+  [ "$clean" = 1 ] || { printf 'DIRTY'; return; }       # human edits present → never clobber
+  [ "$desc" = 1 ] && printf 'RELOAD' || printf 'DIVERGED'
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -253,6 +283,17 @@ if [ "${1:-}" = "--selftest" ]; then
   rd "exhausted → parked"           3 99999 3 300 PARKED
   rd "parked stays parked"          9 99999 3 300 PARKED
   rd "tries=1 parks after one"      1 99999 1 0   PARKED
+  # #162 — the self-refresh decision. Only a CLEAN, strictly-fast-forward clone reloads; every other
+  # verdict leaves the poller running unchanged (fail-safe toward progress). Removing the reload path
+  # (restoring the no-refresh behaviour) makes the RELOAD row fail.
+  rf(){ local got; got="$(refresh_decision "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — refresh_decision($2,$3,$4,$5)=$got want $6"; fail=1; }; }
+  rf "no fetch (empty origin)"      1 aaa ""  0 NOFETCH
+  rf "up to date"                   1 aaa aaa 1 UPTODATE
+  rf "clean + ff ahead → reload"    1 aaa bbb 1 RELOAD
+  rf "dirty blocks the reload"      0 aaa bbb 1 DIRTY
+  rf "diverged (not a ff) → leave"  1 aaa bbb 0 DIVERGED
+  rf "dirty even when diverged"     0 aaa bbb 0 DIRTY
+  rf "uptodate beats dirty"         0 aaa aaa 1 UPTODATE
   vg(){ local got; got="$(printf '%s' "$2" | host_verdict)"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
   vg "host green"  'Host live-gate (Gate B): VERDICT GREEN'                                 GREEN
   vg "host latest" $'…VERDICT RED\nHost live-gate (Gate B): VERDICT GREEN'                   GREEN
@@ -329,6 +370,23 @@ FITNESS_REVIEW="${FITNESS_REVIEW:-$HERE/fitness-review.sh}"
 # API 5xx / rate-limit window, short enough that a genuinely broken reviewer reaches a human promptly.
 FITNESS_REVIEW_TRIES="${FITNESS_REVIEW_TRIES:-3}"
 FITNESS_RETRY_BACKOFF="${FITNESS_RETRY_BACKOFF:-300}"
+# ── SELF-REFRESH (#162): the running poller deploys its OWN merged code, no human pull + bounce ──────
+# At a SAFE POINT (the top of a sweep cycle — no fixer/review/merge in flight; they ALL run synchronously
+# INSIDE sweep()), the poller fetches and, if origin/<branch> has fast-forwarded past the code it runs on
+# a CLEAN clone, STEPS ASIDE (exits POLLER_RELOAD_RC). poller-service.sh then ff-pulls the clone +
+# relaunches --watch on the new code (the flock singleton survives: the old poller fully exits, freeing
+# its lock, before the new one starts). The poller NEVER writes the clone — detection only (req 4).
+SELF_REFRESH="${SELF_REFRESH:-1}"                          # 1 = on; 0 disables the whole mechanism
+# the clone whose code we execute: bin/ sits inside it, so its root is one level up from $HERE. In
+# production this is fedora-dev's LIVE spec clone ($HOME/.local/share/fedora-dev). Overridable for tests.
+SELF_REFRESH_CLONE="${SELF_REFRESH_CLONE:-$(dirname "$HERE")}"
+SELF_REFRESH_REMOTE="${SELF_REFRESH_REMOTE:-origin}"
+SELF_REFRESH_BRANCH="${SELF_REFRESH_BRANCH:-main}"
+SELF_REFRESH_EVERY="${SELF_REFRESH_EVERY:-30}"            # fetch once per N sweeps (cheap, rate-limited; req 5)
+SELF_REFRESH_FETCH_TIMEOUT="${SELF_REFRESH_FETCH_TIMEOUT:-60}"
+# the exit code the poller uses to ask poller-service.sh to ff-pull + relaunch. SHARED CONTRACT: the same
+# default lives in bin/poller-service.sh; override via env in BOTH (the service passes its env through).
+POLLER_RELOAD_RC="${POLLER_RELOAD_RC:-90}"
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
@@ -793,14 +851,69 @@ sweep_repo(){
   done 3<<< "$rows"
 }
 
+# self_refresh_check — the SELF-REFRESH I/O (#162). Called at a SAFE POINT (the top of the --watch loop,
+# between sweeps). Fetches (bounded + fail-safe), then refresh_decision() says whether to step aside.
+# Returns 0 to CONTINUE the loop unchanged; returns POLLER_RELOAD_RC to ask --watch to exit for a
+# supervised reload. It NEVER writes the clone — the ff-pull is poller-service.sh's job (req 4). Every
+# failure path (off, not-a-clone, fetch failure, dirty, diverged) returns 0 and LEAVES THE POLLER RUNNING
+# UNCHANGED (req 3): a refresh that cannot happen must never stop the loop.
+self_refresh_check(){
+  [ "$SELF_REFRESH" = 1 ] || return 0
+  local clone="$SELF_REFRESH_CLONE"
+  [ -d "$clone/.git" ] || return 0                        # not a git clone → nothing to refresh
+  local running origin clean desc
+  running="$(git -C "$clone" rev-parse HEAD 2>/dev/null)"
+  if ! timeout "$SELF_REFRESH_FETCH_TIMEOUT" git -C "$clone" fetch -q "$SELF_REFRESH_REMOTE" 2>>"$LOG"; then
+    log "self-refresh: git fetch ($SELF_REFRESH_REMOTE) FAILED — leaving the running poller unchanged (fail-safe toward progress)"
+    return 0
+  fi
+  origin="$(git -C "$clone" rev-parse "refs/remotes/$SELF_REFRESH_REMOTE/$SELF_REFRESH_BRANCH" 2>/dev/null)"
+  if [ -z "$(git -C "$clone" status --porcelain 2>/dev/null)" ]; then clean=1; else clean=0; fi
+  git -C "$clone" merge-base --is-ancestor "$running" "$origin" 2>/dev/null && desc=1 || desc=0
+  case "$(refresh_decision "$clean" "$running" "$origin" "$desc")" in
+    RELOAD)
+      log "self-refresh: origin/$SELF_REFRESH_BRANCH advanced ${running:0:7} → ${origin:0:7} — stepping aside at a safe point for a supervised reload"
+      return "$POLLER_RELOAD_RC" ;;
+    DIRTY)
+      log "self-refresh: clone $clone is DIRTY (locally modified) — left untouched, poller stays on ${running:0:7} (a human edited it; not clobbering)" ;;
+    DIVERGED)
+      log "self-refresh: clone $clone DIVERGED from origin/$SELF_REFRESH_BRANCH (not a fast-forward) — left untouched, poller stays on ${running:0:7}" ;;
+    NOFETCH)
+      log "self-refresh: could not resolve origin/$SELF_REFRESH_BRANCH after fetch — leaving the poller unchanged" ;;
+    UPTODATE) : ;;                                         # already current → silent no-op (req 5)
+  esac
+  return 0
+}
+
 case "${1:-}" in
   --once) sweep;;
+  --self-refresh-check)                                    # test seam (#162): run ONE self-refresh check
+    self_refresh_check; exit $?;;                          # exit 0 = continue, POLLER_RELOAD_RC = reload
   --watch)
     exec 9>"$STATE/poller.lock"
     flock -n 9 || { echo "another pr-poller --watch holds the lock; exiting" >&2; exit 0; }
     trap 'log "poller stopping (signal)"; exit 0' TERM INT HUP
-    log "pr-poller --watch up (repo=$SLUG interval=${POLL_INTERVAL}s armed=$POLLER_ARMED)"
-    while :; do sweep || log "sweep error (continuing)"; sleep "$POLL_INTERVAL"; done
+    log "pr-poller --watch up (repo=$SLUG interval=${POLL_INTERVAL}s armed=$POLLER_ARMED self-refresh=$SELF_REFRESH every=${SELF_REFRESH_EVERY} sweeps)"
+    sweeps=0
+    while :; do
+      # SELF-REFRESH (#162) AT A SAFE POINT. This check sits at the TOP of the loop, OUTSIDE sweep(), so
+      # it can only fire BETWEEN sweeps — never mid-fixer/review/merge (all synchronous inside sweep(), so
+      # "never mid-sweep" IS "never mid-fixer"). Rate-limited to once per SELF_REFRESH_EVERY sweeps (req
+      # 5). The counter starts at 0, so the FIRST check is SELF_REFRESH_EVERY sweeps in — after a
+      # supervised relaunch that keeps a (rare) failed ff-pull from re-exiting immediately: real work
+      # runs before the loop re-checks, so a stuck refresh is bounded to once per N sweeps, never a spin.
+      sweeps=$((sweeps+1))
+      if [ "$sweeps" -ge "$SELF_REFRESH_EVERY" ]; then
+        sweeps=0
+        self_refresh_check; rc=$?
+        if [ "$rc" = "$POLLER_RELOAD_RC" ]; then
+          log "self-refresh: exiting for a supervised reload (rc=$rc) — poller-service.sh will ff-pull + relaunch on the new code"
+          exit "$POLLER_RELOAD_RC"
+        fi
+      fi
+      sweep || log "sweep error (continuing)"
+      sleep "$POLL_INTERVAL"
+    done
     ;;
-  *) echo "usage: pr-poller.sh --once | --watch | --selftest" >&2; exit 2;;
+  *) echo "usage: pr-poller.sh --once | --watch | --self-refresh-check | --selftest" >&2; exit 2;;
 esac
