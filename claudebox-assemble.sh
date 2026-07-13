@@ -13,7 +13,9 @@ set -euo pipefail
     echo "claudebox-assemble.sh must run as core (uid 1000)" >&2; exit 1
 }
 
-LIVE=/home/core/.local/share/fedora-dev
+# ASSEMBLE_LIVE is a TEST SEAM only (assemble-stamp.test.sh drives this real script
+# against a fixture spec + stub podman/distrobox); production callers never set it.
+LIVE="${ASSEMBLE_LIVE:-/home/core/.local/share/fedora-dev}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 cd "$LIVE"
@@ -152,9 +154,32 @@ sed -e "/<!--FLEET-CORE-->/r ${LIVE}/policy/fleet-core.md" \
     -e "/<!--FLEET-CORE-->/d" \
     "${LIVE}/policy/CLAUDE.md" > "$_law"
 podman exec claudebox cp "/run/host${_law}" /etc/claude-code/CLAUDE.md
-rm -f "$_law"
 podman exec claudebox cp \
     "/run/host$LIVE/policy/managed-settings.json" /etc/claude-code/managed-settings.json
+# mktemp creates 0600 and in-box cp carries the SOURCE mode onto a new dest (an
+# EXISTING dest keeps whatever mode it already had) — so without an explicit mode the
+# root-owned law lands unreadable by the session user: stamped, fresh mtime, and
+# completely INERT (observed live 2026-07-13, #175). Root ownership is the point (the
+# agent must not edit its own law); world-readable is the function (it must LOAD it).
+podman exec claudebox chmod 644 \
+    /etc/claude-code/CLAUDE.md /etc/claude-code/managed-settings.json
+
+echo "==== post-assemble: verify the stamp is loadable by the session user (#175) ===="
+# 'Stamped' means READABLE AND CURRENT as the uid that loads it — not 'a file exists'.
+# Read the law back AS core and compare it byte-for-byte against what was just
+# assembled; any failure (permission denied, truncation, stale content) aborts BEFORE
+# the .assembled marker, and the EXIT trap surfaces it as .assemble-failed (#11).
+if ! podman exec --user core claudebox cat /etc/claude-code/CLAUDE.md | cmp -s - "$_law"; then
+    echo "FATAL: /etc/claude-code/CLAUDE.md is unreadable as core or does not match" \
+         "the assembled law — the stamp would be INERT (#175)." >&2
+    rm -f "$_law"
+    exit 1
+fi
+rm -f "$_law"
+podman exec --user core claudebox test -r /etc/claude-code/managed-settings.json || {
+    echo "FATAL: /etc/claude-code/managed-settings.json is unreadable as core (#175)." >&2
+    exit 1
+}
 
 # UNSHACKLED (P0, 2026-07-11): the gate-push PreToolUse hook is RETIRED — policy/hooks/ no longer
 # exists and managed-settings.json registers no PreToolUse hook (merge safety = the require-PR
