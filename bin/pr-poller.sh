@@ -106,6 +106,11 @@
 #                     (fetch once per N sweeps; default 30) · SELF_REFRESH_FETCH_TIMEOUT (60s) ·
 #                     POLLER_RELOAD_RC (the exit code that asks poller-service.sh to ff-pull + relaunch;
 #                     default 90 — a SHARED default with bin/poller-service.sh). See refresh_decision().
+#   HOST_REFRESH*     the HOST half of self-refresh (#163 — a merged IMAGE-BAKED change auto-redeploys
+#                     the running host, and a merged control-repo change surfaces its host apply):
+#                     HOST_REFRESH_SCAN (the scanner, default bin/host-refresh.sh — its header carries
+#                     the whole design) · HOST_REFRESH_EVERY (scan once per N sweeps; default 30;
+#                     0 disables). Runs at the END of a sweep tick, gated by THAT tick's R9 halt read.
 set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 
@@ -399,6 +404,18 @@ SELF_REFRESH_FETCH_TIMEOUT="${SELF_REFRESH_FETCH_TIMEOUT:-60}"
 # the exit code the poller uses to ask poller-service.sh to ff-pull + relaunch. SHARED CONTRACT: the same
 # default lives in bin/poller-service.sh; override via env in BOTH (the service passes its env through).
 POLLER_RELOAD_RC="${POLLER_RELOAD_RC:-90}"
+# ── HOST-REFRESH (#163): the HOST half of self-refresh — a merged IMAGE-BAKED change redeploys the ───
+# running host through the PROVEN dev→host seam (bin/host-refresh.sh → host-ticket.sh → the host
+# agent's `redeploy <workload>` → container-refresh.sh's health-gate + digest auto-rollback — R10 stays
+# where it already lives). The scan runs at the END of a sweep tick: a safe point (all sweep_repo work
+# is synchronous and done) with THIS tick's R9 halt read in hand — filing a ticket is an ACTION, so a
+# halted tick skips it. Rate-limited to once per HOST_REFRESH_EVERY sweeps (0 disables; a `--once`
+# fires it only under HOST_REFRESH_EVERY=1 — the manual catch-up / test seam, since each --once is a
+# fresh process whose counter starts at 0). FAIL-SAFE: a scan failure logs and never stops the loop —
+# a missed redeploy degrades to the status quo (the monthly workload-refresh timer).
+HOST_REFRESH_SCAN="${HOST_REFRESH_SCAN:-$HERE/host-refresh.sh}"
+HOST_REFRESH_EVERY="${HOST_REFRESH_EVERY:-30}"
+HOST_REFRESH_TICKS=0
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
@@ -666,6 +683,25 @@ retire_superseded(){
   done
 }
 
+# HOST-REFRESH tick (#163) — see the HOST_REFRESH config block above; the design lives in
+# bin/host-refresh.sh's header. Called at the END of sweep(), so POLLER_HALTED is THIS tick's halt
+# read (filing a redeploy ticket / surfacing a host-apply question is an ACTION — R9 gates it like
+# every other action) and no sweep work is in flight. Failures are logged and SWALLOWED: a missed
+# scan degrades to the status quo (the monthly workload-refresh timer), never to a stopped loop.
+host_refresh_tick(){
+  [ "${HOST_REFRESH_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
+  HOST_REFRESH_TICKS=$((HOST_REFRESH_TICKS+1))
+  [ "$HOST_REFRESH_TICKS" -ge "$HOST_REFRESH_EVERY" ] || return 0
+  HOST_REFRESH_TICKS=0
+  if [ "${POLLER_HALTED:-0}" = 1 ]; then
+    log "host-refresh: R9 HALT — scan skipped this tick (no ticket filed, no comment posted; resumes when the halt clears)"
+    return 0
+  fi
+  "$HOST_REFRESH_SCAN" --once 2>&1 | tee -a "$LOG" >&2 \
+    || log "host-refresh: scan failed (continuing — a missed redeploy degrades to the monthly timer)"
+  return 0
+}
+
 # ORG-WIDE wrapper (P0 uniform loop): one tick sweeps EVERY apparatus repo through the SAME harness,
 # re-setting POLLER_REPO/SLUG per repo. sweep_repo() is the original single-repo body unchanged.
 #
@@ -688,6 +724,7 @@ sweep(){
     log "FLEET HALT: ${_hmsg:-halt checker unavailable (fail-closed toward stopping)} — OBSERVE-ONLY tick: no fixer, no review, no merge, no retire, no comment"
   fi
   for _r in $POLLER_REPOS; do POLLER_REPO="$_r"; SLUG="oso-gato/$_r"; sweep_repo; done
+  host_refresh_tick
 }
 sweep_repo(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"
