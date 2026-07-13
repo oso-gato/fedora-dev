@@ -120,6 +120,31 @@
 #                     HOST_REFRESH_SCAN (the scanner, default bin/host-refresh.sh — its header carries
 #                     the whole design) · HOST_REFRESH_EVERY (scan once per N sweeps; default 30;
 #                     0 disables). Runs at the END of a sweep tick, gated by THAT tick's R9 halt read.
+#   POLLER_DEFER_RC / LOCK_DEFER_MAX / LOCK_DEFER_WINDOW / POLLER_BOX_GEN_FILE / POLLER_BOX_GEN
+#                     the LOCK-LIVENESS contract (#173 — the flock singleton must survive a box
+#                     recreate). The --watch lock lives on the HOME VOLUME, which OUTLIVES the poller
+#                     process: a claudebox-rebuild can orphan a running poller (the box shares
+#                     fedora-dev's PID namespace, so `distrobox rm` does not reap what it spawned)
+#                     whose lingering process/FD keeps the flock held while sweeping NOTHING — and the
+#                     fresh poller then deferred rc=0 every 30 s, forever (observed live 2026-07-13,
+#                     08:27→12:23: FOUR HOURS of zero sweeps that every log read as healthy). So the
+#                     holder RECORDS `pid boot-id starttime box-generation` in the lock file and a
+#                     would-be starter ADJUDICATES the record (lock_verdict, pure): DEFER only to a
+#                     POSITIVELY-confirmed live, same-generation holder; everything else — no/garbled
+#                     record (the bare-flock era wrote none), dead pid, recycled pid (starttime is the
+#                     anti-masquerade token), previous kernel boot, previous box generation — is a
+#                     TAKEOVER: rotate the lock file (unlink + re-flock a FRESH inode, so a lingering
+#                     FD gates nothing) and TERM only a provably-live previous-generation orphan.
+#                     FAIL DIRECTION: liveness in doubt ⇒ START (a brief double-sweep is idempotent,
+#                     sha-bound and gate-checked; a silently dead poller is unrecoverable). A DEFER is
+#                     never silent and NEVER rc=0 (req 2): it exits POLLER_DEFER_RC (91 — shared with
+#                     poller-service.sh, distinct from the reload rc 90), and LOCK_DEFER_MAX (10 ≈
+#                     5 min at the supervisor's 30 s restart cadence) CONSECUTIVE deferrals (within
+#                     LOCK_DEFER_WINDOW, 3600 s — a stray manual defer from hours ago never
+#                     pre-charges the streak) surface ONE gh-issue question naming the holder. Box
+#                     generation = inode.mtime of POLLER_BOX_GEN_FILE (default the claudebox
+#                     `.assembled` marker, `touch`ed by every assemble); POLLER_BOX_GEN injects the
+#                     token directly (test seam).
 set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 
@@ -258,6 +283,56 @@ refresh_decision(){
   [ "$desc" = 1 ] && printf 'RELOAD' || printf 'DIVERGED'
 }
 
+# lock_verdict <record-line> <current-boot-id> <holder-starttime-now|""> <current-box-generation>
+#   -> DEFER | TAKEOVER_NORECORD | TAKEOVER_BOOT | TAKEOVER_DEAD | TAKEOVER_RECYCLED | TAKEOVER_GENERATION
+# THE LOCK-LIVENESS ADJUDICATION (#173). A held flock proves only that SOME process/FD is alive
+# somewhere on this kernel — NOT that a poller is sweeping: the lock file sits on the home volume,
+# which outlives every box recreate, and the 2026-07-13 incident's holder was an orphan of a torn-down
+# claudebox that held the lock for four hours while sweeping nothing (the fresh poller deferred rc=0
+# every 30 s and no log said the loop was down). So the record the HOLDER wrote is adjudicated:
+#   * DEFER — the ONLY verdict that yields: the recorded process is POSITIVELY confirmed live (same
+#     kernel boot, pid exists, starttime matches — pid+starttime+boot uniquely name a process, so a
+#     recycled pid cannot masquerade) AND not provably from a previous box generation. Two pollers
+#     must never both run; a proven-live peer wins.
+#   * TAKEOVER_NORECORD — no/garbled record (the bare-flock era wrote none; a truncated write). A
+#     record that cannot CONFIRM a live holder confirms nothing → START (req 3's fail direction: a
+#     brief double-sweep is idempotent + sha-bound + gate-checked; a silently dead poller is not
+#     recoverable).
+#   * TAKEOVER_BOOT — recorded before a different kernel boot: pid+starttime are per-boot coordinates;
+#     nothing written under another boot can name a live process now.
+#   * TAKEOVER_DEAD / TAKEOVER_RECYCLED — the recorded process is gone (pid missing, or the pid now
+#     wears a DIFFERENT starttime: a stranger reused it). The flock lingers on an inherited FD only.
+#   * TAKEOVER_GENERATION — alive, but recorded under a previous BOX generation: an orphan of a
+#     torn-down box (THE incident class — the box shares fedora-dev's PID namespace, so the orphan
+#     stays visible and signalable), never the singleton's healthy peer. The caller may TERM exactly
+#     this class: it is the one takeover whose target provably IS the recorded poller.
+# Generation ambiguity (either side unrecorded/unreadable, written as '-') is NEUTRAL — by that point
+# liveness is already POSITIVELY confirmed, so deferring is the safe direction for a proven-live
+# holder; a persistent wrong defer still surfaces via the deferral streak (req 2). PURE + selftested.
+lock_verdict(){
+  local rec="$1" boot="$2" nowstart="$3" gen="$4"
+  local rpid rboot rstart rgen _rest
+  read -r rpid rboot rstart rgen _rest <<<"$rec"
+  # '-' is the writer's explicit empty-field placeholder (the record is whitespace-framed, so a truly
+  # empty field would silently shift its neighbours into the wrong columns)
+  [ "${rboot:-}" = "-" ] && rboot=""; [ "${rstart:-}" = "-" ] && rstart=""; [ "${rgen:-}" = "-" ] && rgen=""
+  case "${rpid:-}" in ''|*[!0-9]*) printf 'TAKEOVER_NORECORD'; return;; esac
+  case "${rstart:-}" in ''|*[!0-9]*) printf 'TAKEOVER_NORECORD'; return;; esac
+  [ -n "${rboot:-}" ] || { printf 'TAKEOVER_NORECORD'; return; }
+  [ "$rboot" = "$boot" ] || { printf 'TAKEOVER_BOOT'; return; }
+  [ -n "$nowstart" ] || { printf 'TAKEOVER_DEAD'; return; }
+  case "$nowstart" in *[!0-9]*) printf 'TAKEOVER_DEAD'; return;; esac   # garbled read confirms nothing
+  # /proc starttime FLUTTERS ±1 clock tick between reads of the SAME process (measured on this kernel:
+  # the boottime→clock_t conversion rounds differently read-to-read), so an EXACT match would misjudge
+  # a genuinely live holder as a recycled pid sporadically. Compare with a ±2-tick tolerance: a truly
+  # recycled pid differs by the whole gap between the dead poller's start and the stranger's —
+  # seconds-to-months, never ticks.
+  local d=$(( nowstart - rstart )); [ "$d" -lt 0 ] && d=$(( -d ))
+  [ "$d" -le 2 ] || { printf 'TAKEOVER_RECYCLED'; return; }
+  if [ -n "$rgen" ] && [ -n "$gen" ] && [ "$rgen" != "$gen" ]; then printf 'TAKEOVER_GENERATION'; return; fi
+  printf 'DEFER'
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -325,6 +400,23 @@ if [ "${1:-}" = "--selftest" ]; then
   rf "diverged (not a ff) → leave"  1 aaa bbb 0 DIVERGED
   rf "dirty even when diverged"     0 aaa bbb 0 DIRTY
   rf "uptodate beats dirty"         0 aaa aaa 1 UPTODATE
+  # #173 — the lock-liveness adjudication. ONLY a positively-confirmed live, same-generation holder
+  # defers a start; every doubt resolves toward STARTING (a silently dead poller is unrecoverable).
+  lk(){ local got; got="$(lock_verdict "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — lock_verdict('$2','$3','$4','$5')=$got want $6"; fail=1; }; }
+  lk "live same-gen holder → defer"          '123 b1 777 g1' b1 777 g1 DEFER
+  lk "dead holder (pid gone) → take"         '123 b1 777 g1' b1 ''  g1 TAKEOVER_DEAD
+  lk "recycled pid (starttime moved) → take" '123 b1 777 g1' b1 999 g1 TAKEOVER_RECYCLED
+  lk "starttime read-flutter +1 → still live" '123 b1 777 g1' b1 778 g1 DEFER
+  lk "starttime read-flutter -2 → still live" '123 b1 777 g1' b1 775 g1 DEFER
+  lk "past the flutter tolerance → take"     '123 b1 777 g1' b1 780 g1 TAKEOVER_RECYCLED
+  lk "previous kernel boot → take"           '123 b0 777 g1' b1 777 g1 TAKEOVER_BOOT
+  lk "previous box generation → take"        '123 b1 777 g0' b1 777 g1 TAKEOVER_GENERATION
+  lk "gen unrecorded THERE → liveness rules" '123 b1 777 -'  b1 777 g1 DEFER
+  lk "gen unreadable HERE → liveness rules"  '123 b1 777 g1' b1 777 '' DEFER
+  lk "empty record (bare-flock era) → take"  ''              b1 ''  g1 TAKEOVER_NORECORD
+  lk "garbage record → take"                 'not a record'  b1 ''  g1 TAKEOVER_NORECORD
+  lk "placeholder starttime → take"          '123 b1 - g1'   b1 777 g1 TAKEOVER_NORECORD
+  lk "dead beats generation in the verdict"  '123 b1 777 g0' b1 ''  g1 TAKEOVER_DEAD
   vg(){ local got; got="$(printf '%s' "$2" | host_verdict)"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
   vg "host green"  'Host live-gate (Gate B): VERDICT GREEN'                                 GREEN
   vg "host latest" $'…VERDICT RED\nHost live-gate (Gate B): VERDICT GREEN'                   GREEN
@@ -450,6 +542,129 @@ HOST_REFRESH_TICKS=0
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
+
+# ── LOCK LIVENESS (#173): the flock singleton must survive a box recreate ───────────────────────────
+# The --watch lock lives on the HOME VOLUME, which outlives the poller process. A claudebox-rebuild
+# can orphan a running poller (the box shares fedora-dev's PID namespace, so `distrobox rm` does not
+# reap what it spawned): the orphan's process/FD keeps the flock held while sweeping NOTHING, and the
+# fresh box's poller then found the lock held and politely exited 0 — every 30 s, forever. Observed
+# live 2026-07-13 (08:27→12:23): FOUR HOURS of `exited (rc=0) — restarting in 30s`, zero sweeps, zero
+# merges, and nothing anywhere said "the poller is down". The singleton exists to prevent TWO pollers;
+# it produced ZERO and reported success. So the holder now RECORDS its identity in the lock file and a
+# contender ADJUDICATES the record (lock_verdict, pure) instead of trusting the flock alone.
+LOCKFILE="$STATE/poller.lock"
+POLLER_DEFER_RC="${POLLER_DEFER_RC:-91}"        # the deferral exit code — NEVER 0 (#173 req 2: rc=0
+                                                # must not mean "I did nothing and will keep doing
+                                                # nothing"). SHARED CONTRACT with bin/poller-service.sh;
+                                                # distinct from POLLER_RELOAD_RC (90).
+LOCK_DEFER_MAX="${LOCK_DEFER_MAX:-10}"          # consecutive deferrals before ONE question is surfaced
+                                                # (~5 min at the supervisor's 30 s restart cadence)
+LOCK_DEFER_WINDOW="${LOCK_DEFER_WINDOW:-3600}"  # seconds two deferrals may sit apart and still count as
+                                                # CONSECUTIVE: a real dead-lock streak arrives every
+                                                # ~30 s; a stray manual defer from hours ago must not
+                                                # pre-charge the streak toward a false alarm.
+# the box-GENERATION token: every claudebox assemble `touch`es the .assembled marker, so its
+# inode.mtime names the box incarnation this process belongs to. A holder recorded under a PREVIOUS
+# generation is an orphan of a torn-down box — taken over even while alive. Missing/unreadable (tests,
+# running outside the box) degrades to liveness-only adjudication (neutral, never a takeover cause).
+POLLER_BOX_GEN_FILE="${POLLER_BOX_GEN_FILE:-$HOME/.local/state/claudebox/.assembled}"
+boot_id(){ cat /proc/sys/kernel/random/boot_id 2>/dev/null || :; }
+box_gen(){
+  if [ -n "${POLLER_BOX_GEN:-}" ]; then printf '%s' "$POLLER_BOX_GEN"; return 0; fi   # test seam
+  stat -c '%i.%Y' "$POLLER_BOX_GEN_FILE" 2>/dev/null || :
+}
+# starttime (field 22 of /proc/<pid>/stat) of a live pid; EMPTY when no such process. Parsed AFTER the
+# last ')' — comm may contain spaces/parens, so counting whitespace fields from the front is wrong.
+proc_start(){ # <pid>
+  local s
+  s="$(cat "/proc/${1:-0}/stat" 2>/dev/null)" || return 0
+  s="${s##*) }"; set -- $s
+  printf '%s' "${20:-}"
+}
+
+# lock_won <fresh|takeover> — we hold fd 9: record our identity + reset the deferral streak.
+lock_won(){
+  local b s g
+  b="$(boot_id)"; s="$(proc_start "$$")"; g="$(box_gen)"
+  # '-' placeholders keep the whitespace-framed record parseable when a field is unreadable
+  printf '%s %s %s %s\n' "$$" "${b:--}" "${s:--}" "${g:--}" > "$LOCKFILE"
+  local n=0 cf="$STATE/lock-defer.count"
+  if [ -f "$cf" ]; then
+    n="$(cat "$cf" 2>/dev/null)"; case "$n" in ''|*[!0-9]*) n=0;; esac
+    [ "$n" -gt 0 ] && log "lock: ACQUIRED ($1) after $n deferral(s) — the deferral streak resets"
+  fi
+  rm -f "$STATE/lock-defer.count" "$STATE/lock-defer.surfaced"
+  return 0
+}
+
+# lock_defer <why> <holder-record> — count the CONSECUTIVE streak, surface at the bound, exit
+# POLLER_DEFER_RC. Deferring is fine ONCE (a healthy peer holds the lock); what must never happen
+# again is a silent, rc=0, unbounded deferral loop (#173 req 2) — so every defer logs the holder
+# adjudication, exits non-zero, and a streak of LOCK_DEFER_MAX surfaces ONE question.
+lock_defer(){
+  local why="$1" rec="${2:-}" cf="$STATE/lock-defer.count" mk="$STATE/lock-defer.surfaced" n=0 last=0 now
+  now="$(date +%s)"
+  if [ -f "$cf" ]; then
+    n="$(cat "$cf" 2>/dev/null)"; case "$n" in ''|*[!0-9]*) n=0;; esac
+    last="$(stat -c %Y "$cf" 2>/dev/null)"; case "$last" in ''|*[!0-9]*) last=0;; esac
+    # the streak the question claims is CONSECUTIVE — make that claim true: a defer older than the
+    # window is a different event, not part of this incident.
+    [ $(( now - last )) -gt "$LOCK_DEFER_WINDOW" ] && { n=0; rm -f "$mk"; }
+  fi
+  n=$((n+1)); printf '%s' "$n" > "$cf"
+  log "lock DEFER #$n: $why — exiting rc=$POLLER_DEFER_RC, not starting (a dead or previous-generation holder would have been TAKEN OVER; this one adjudicated LIVE)"
+  if [ "$n" -ge "$LOCK_DEFER_MAX" ] && [ ! -f "$mk" ]; then
+    # asked ONCE per incident (marker), but RE-ATTEMPTED until a post succeeds — a throttled create
+    # must not become a lost question (the review_question discipline).
+    if gh issue create --repo "$SLUG" \
+         --title "poller: --watch has deferred $n consecutive starts — the lock is held and the singleton may be DOWN" \
+         --body "**Poller → operator [lock-deferral streak]:** \`pr-poller --watch\` has deferred **$n consecutive** start attempts because \`$LOCKFILE\` is flock-held by a holder it adjudicates as LIVE and same-generation: \`${rec:-no record}\` (pid boot-id starttime generation). While this stands the supervisor's restart loop starts NOTHING. If no healthy poller is actually sweeping (check \`$LOG\`), the holder is wedged or the adjudication is wrong: \`kill <pid>\` frees the flock within one 30 s restart (proven 2026-07-13), or remove \`$LOCKFILE\` to force a rotation. A dead or previous-box-generation holder is taken over automatically — this question exists because a LIVE one cannot be (two pollers must never both run)."$'\n\n<sub>dev-side poller lock liveness (#173); no start taken — needs an operator look.</sub>' >/dev/null 2>&1; then
+      : > "$mk"
+      log "lock DEFER: surfaced the $n-deferral streak as an issue on $SLUG"
+    else
+      log "lock DEFER: could NOT surface the deferral streak (gh issue create failed) — will re-attempt on the next deferral"
+    fi
+  fi
+  exit "$POLLER_DEFER_RC"
+}
+
+# lock_acquire — the --watch entry: adjudicated flock (#173). Returns holding fd 9, or exits
+# POLLER_DEFER_RC via lock_defer. TAKEOVER mechanics: the stale flock rides a lingering FD we cannot
+# make its owner drop, but flock binds to the INODE — unlink the path and re-flock a fresh file, and
+# the lingering lock gates nothing (the orphaned inode dies with its holder). Only a provably-live
+# previous-generation orphan is first sent SIGTERM (the poller traps TERM and exits cleanly, freeing
+# its own flock); dead/recycled/no-record holders get NO signal — a recycled pid is an innocent
+# stranger.
+lock_acquire(){
+  # APPEND-mode open: a contender must NEVER truncate a live holder's record (the old `exec 9>` did
+  # exactly that, which is one reason no record could have lived in the bare-flock lock file).
+  exec 9>>"$LOCKFILE"
+  if flock -n 9; then lock_won fresh; return 0; fi
+  local rec rpid verdict
+  rec="$(head -n1 "$LOCKFILE" 2>/dev/null)"
+  rpid="${rec%% *}"
+  verdict="$(lock_verdict "$rec" "$(boot_id)" "$(proc_start "$rpid")" "$(box_gen)")"
+  if [ "$verdict" = DEFER ]; then
+    lock_defer "the lock is held by a LIVE same-generation pr-poller (pid=$rpid)" "$rec"   # exits
+  fi
+  log "lock TAKEOVER ($verdict): the flock is held but the recorded holder (${rec:-no record}) is not a live same-generation poller — rotating the lock file (fail-safe toward STARTING: a brief double-sweep is idempotent + gate-checked; a silently dead poller cost 4 h of rc=0 on 2026-07-13)"
+  if [ "$verdict" = TAKEOVER_GENERATION ]; then
+    kill -TERM "$rpid" 2>/dev/null && log "lock TAKEOVER: sent SIGTERM to the previous-generation orphan pid=$rpid (it traps TERM and exits cleanly)"
+  fi
+  exec 9>&-
+  rm -f "$LOCKFILE"
+  exec 9>>"$LOCKFILE"
+  flock -n 9 || lock_defer "lost the takeover race — another starter flocked the rotated lock first (live by construction)" "$(head -n1 "$LOCKFILE" 2>/dev/null)"
+  # unlink-rotation race guard: if a SECOND rotator unlinked the inode we just flocked and created its
+  # own, the path no longer names our file — two "winners" would both sweep. The path's inode must be
+  # the one our fd holds.
+  local ino_fd ino_path
+  ino_fd="$(stat -Lc %i /proc/self/fd/9 2>/dev/null)"; ino_path="$(stat -c %i "$LOCKFILE" 2>/dev/null)"
+  if [ -z "$ino_fd" ] || [ "$ino_fd" != "$ino_path" ]; then
+    lock_defer "lost the takeover race — the rotated lock was re-rotated by another starter" "$(head -n1 "$LOCKFILE" 2>/dev/null)"
+  fi
+  lock_won takeover
+}
 
 # Surface a decision to Arthur WITHOUT merging: a single idempotent comment per (pr,sha,kind). The
 # poller never clicks — it makes the human touchpoint visible and stops churning.
@@ -1022,8 +1237,11 @@ case "${1:-}" in
                                                            # head — a fresh process's capture would equal
                                                            # the clone HEAD, hiding exactly the defect)
   --watch)
-    exec 9>"$STATE/poller.lock"
-    flock -n 9 || { echo "another pr-poller --watch holds the lock; exiting" >&2; exit 0; }
+    # #173 — ADJUDICATED singleton: a dead/foreign-generation holder's lingering flock is TAKEN OVER;
+    # only a POSITIVELY-live same-generation holder defers a start — loudly, rc=POLLER_DEFER_RC, never
+    # 0 (the bare `flock -n || exit 0` read a box-recreate orphan as a healthy peer: 4 h of silent
+    # no-op, 2026-07-13). lock_acquire returns holding fd 9, or exits via lock_defer.
+    lock_acquire
     trap 'log "poller stopping (signal)"; exit 0' TERM INT HUP
     log "pr-poller --watch up (repo=$SLUG interval=${POLL_INTERVAL}s armed=$POLLER_ARMED self-refresh=$SELF_REFRESH every=${SELF_REFRESH_EVERY} sweeps running=${LAUNCH_HEAD:0:7})"
     sweeps=0
