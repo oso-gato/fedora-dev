@@ -12,12 +12,20 @@
 #   * a PR adding an unconfirmed repo to scope RETURNs in fitness — DETERMINISTICALLY, the reviewer
 #     model never runs (its inbox is asserted EMPTY), while a maintainer-CONFIRMED one proceeds and a
 #     non-maintainer's CONFIRMED (the fleet-App case: role `write`) stays inert;
+#   * the confirmation is NAME-BOUND (98e1194 finding 2): a bare or prose CONFIRMED confirms nothing,
+#     a post-confirmation head that SWAPS or EXTENDS the adds re-gates UNCONFIRMED on the uncovered
+#     names, partial coverage RETURNs naming exactly what is uncovered, and maintainer confirmations
+#     UNION so the incremental flow works;
+#   * the crafted-hunk ESCAPE is dead (98e1194 finding 1): an added line whose text mimics a
+#     `+++ b/…` header can neither hide the adds behind it (driven through the REAL fitness gate)
+#     nor forge an entry into the scope file — the parser is hunk-stateful;
 #   * every other actuator (auto-merge, dev-plan, dev-loop, dev-author, host-ticket, host-refresh)
 #     refuses an out-of-scope repo with NO gh call recorded at all;
-#   * MUTATION-CHECK: restoring the hardcoded-default behavior fails the suite — the poller's sweep
-#     scope-gate and the fitness diff-adds detector are each mechanically neutralized (the sed must
-#     genuinely change the copy, else the row fails as vacuous) and the foreign repo must then get
-#     swept / the unconfirmed expansion must then PASS, proving the real rows discriminate.
+#   * MUTATION-CHECK: restoring the pre-fix behaviors fails the suite — the poller's sweep
+#     scope-gate, the fitness diff-adds detector AND the parser's hunk state are each mechanically
+#     neutralized (the sed must genuinely change the copy, else the row fails as vacuous) and the
+#     foreign repo must then get swept / the unconfirmed expansion must then PASS / the escape must
+#     then hide the add, proving the real rows discriminate.
 #
 # HOW IT BITES: only `gh` and the reviewer are stubbed (the gh stub RECORDS every call — the "zero
 # actions" rows assert on what was actually asked of GitHub, not on log prose); the scripts under test
@@ -228,13 +236,13 @@ ck "$([ ! -f "$RAN" ] && echo 1 || echo 0)" "the reviewer MODEL ran — a struct
 out_has 'R16 OPERATING SCOPE'
 out_has 'knowledge-desktop'
 out_has 'CONFIRMED'                                     # the remediation is spelled out
-err_has 'NO maintainer-recorded confirmation'
+err_has 'NO maintainer confirmation NAMING them'
 ck "$([ "$(gh_names '^POSTED')" = 0 ] && echo 1 || echo 0)" "dry-run POSTED something"
 done_case
 
-DESC="a MAINTAINER's line-1 CONFIRMED on the PR unlocks the expansion → the model reviews it"; OK=1
+DESC="a MAINTAINER's line-1 CONFIRMED naming the repo unlocks the expansion → the model reviews it"; OK=1
 setup_case; printf 'fedora-dev\n' > "$SCOPE_FIX"; expansion_diff
-printf 'arthur\tCONFIRMED — expand the scope for this objective\n' > "$CASE/comments.tsv"
+printf 'arthur\tCONFIRMED knowledge-desktop\n' > "$CASE/comments.tsv"
 printf 'admin\n' > "$CASE/roles/arthur"
 fitness_env COMMENTS_TSV="$CASE/comments.tsv" -- bash "$FITNESS" fedora-dev 1
 ck "$([ "$RC" = 0 ] && echo 1 || echo 0)" "rc=$RC want 0"
@@ -251,6 +259,103 @@ fitness_env COMMENTS_TSV="$CASE/comments.tsv" -- bash "$FITNESS" fedora-dev 1
 ck "$(grep -qx "Fitness review: VERDICT RETURN — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "an App's CONFIRMED unlocked a scope expansion"
 ck "$([ ! -f "$RAN" ] && echo 1 || echo 0)" "the reviewer ran despite the unconfirmed expansion"
 err_has 'ignoring line-1 CONFIRMED'
+done_case
+
+echo "== FITNESS: the confirmation is NAME-BOUND (98e1194 finding 2 — it covers repos, not the PR) =="
+DESC="a bare CONFIRMED confirms NOTHING (nothing bounds what it would cover) → RETURN"; OK=1
+setup_case; printf 'fedora-dev\n' > "$SCOPE_FIX"; expansion_diff
+printf 'arthur\tCONFIRMED\n' > "$CASE/comments.tsv"
+printf 'admin\n' > "$CASE/roles/arthur"
+fitness_env COMMENTS_TSV="$CASE/comments.tsv" -- bash "$FITNESS" fedora-dev 1
+ck "$(grep -qx "Fitness review: VERDICT RETURN — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "a name-less CONFIRMED unlocked a scope expansion"
+ck "$([ ! -f "$RAN" ] && echo 1 || echo 0)" "the reviewer ran despite the unbounded confirmation"
+err_has 'names NO repos'
+done_case
+
+DESC="prose after CONFIRMED voids the line (words must never become confirmable names) → RETURN"; OK=1
+setup_case; printf 'fedora-dev\n' > "$SCOPE_FIX"; expansion_diff
+printf 'arthur\tCONFIRMED — expand the scope for this objective\n' > "$CASE/comments.tsv"
+printf 'admin\n' > "$CASE/roles/arthur"
+fitness_env COMMENTS_TSV="$CASE/comments.tsv" -- bash "$FITNESS" fedora-dev 1
+ck "$(grep -qx "Fitness review: VERDICT RETURN — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "a prose CONFIRMED unlocked a scope expansion"
+ck "$([ ! -f "$RAN" ] && echo 1 || echo 0)" "the reviewer ran on a prose-voided confirmation"
+done_case
+
+DESC="a head that SWAPS the confirmed add for another repo re-gates UNCONFIRMED → RETURN"; OK=1
+setup_case; printf 'fedora-dev\n' > "$SCOPE_FIX"
+cat > "$DIFF" <<'DIFF_EOF'
+diff --git a/policy/scope.conf b/policy/scope.conf
+--- a/policy/scope.conf
++++ b/policy/scope.conf
+@@ -1,2 +1,3 @@
+ fedora-dev
+ fedora-bootstrap
++evil-repo
+DIFF_EOF
+printf 'arthur\tCONFIRMED knowledge-desktop\n' > "$CASE/comments.tsv"
+printf 'admin\n' > "$CASE/roles/arthur"
+fitness_env COMMENTS_TSV="$CASE/comments.tsv" -- bash "$FITNESS" fedora-dev 1
+ck "$(grep -qx "Fitness review: VERDICT RETURN — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "the standing confirmation covered a SWAPPED add"
+ck "$([ ! -f "$RAN" ] && echo 1 || echo 0)" "the reviewer ran on a swapped, uncovered add"
+out_has 'evil-repo'
+done_case
+
+DESC="PARTIAL coverage: two adds, one confirmed → RETURN naming exactly the uncovered one"; OK=1
+setup_case; printf 'fedora-dev\n' > "$SCOPE_FIX"
+cat > "$DIFF" <<'DIFF_EOF'
+diff --git a/policy/scope.conf b/policy/scope.conf
+--- a/policy/scope.conf
++++ b/policy/scope.conf
+@@ -1,2 +1,4 @@
+ fedora-dev
+ fedora-bootstrap
++knowledge-desktop
++wl-two
+DIFF_EOF
+printf 'arthur\tCONFIRMED knowledge-desktop\n' > "$CASE/comments.tsv"
+printf 'admin\n' > "$CASE/roles/arthur"
+fitness_env COMMENTS_TSV="$CASE/comments.tsv" -- bash "$FITNESS" fedora-dev 1
+ck "$(grep -qx "Fitness review: VERDICT RETURN — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "a partially covered expansion did not RETURN"
+ck "$([ ! -f "$RAN" ] && echo 1 || echo 0)" "the reviewer ran on a partially covered expansion"
+ck "$(grep -q 'NAMING them (wl-two)' "$CASE/err.log" && echo 1 || echo 0)" "the RETURN does not name exactly the uncovered repo"
+done_case
+
+DESC="maintainer confirmations UNION: two comments together cover two adds → the model reviews"; OK=1
+setup_case; printf 'fedora-dev\n' > "$SCOPE_FIX"
+cat > "$DIFF" <<'DIFF_EOF'
+diff --git a/policy/scope.conf b/policy/scope.conf
+--- a/policy/scope.conf
++++ b/policy/scope.conf
+@@ -1,2 +1,4 @@
+ fedora-dev
+ fedora-bootstrap
++knowledge-desktop
++wl-two
+DIFF_EOF
+printf 'arthur\tCONFIRMED knowledge-desktop\narthur\tCONFIRMED wl-two\n' > "$CASE/comments.tsv"
+printf 'admin\n' > "$CASE/roles/arthur"
+fitness_env COMMENTS_TSV="$CASE/comments.tsv" -- bash "$FITNESS" fedora-dev 1
+ck "$([ -f "$RAN" ] && echo 1 || echo 0)" "two maintainer confirmations did not union to cover both adds"
+ck "$(grep -qx "Fitness review: VERDICT PASS — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "the fully covered path did not reach a model verdict"
+done_case
+
+echo "== FITNESS: the crafted-hunk ESCAPE is dead (98e1194 finding 1 — driven through the REAL gate) =="
+DESC="an added '++ b/…' line inside the scope hunk cannot hide the add behind it → RETURN"; OK=1
+setup_case; printf 'fedora-dev\n' > "$SCOPE_FIX"
+cat > "$DIFF" <<'DIFF_EOF'
+diff --git a/policy/scope.conf b/policy/scope.conf
+--- a/policy/scope.conf
++++ b/policy/scope.conf
+@@ -1,2 +1,4 @@
+ fedora-dev
+ fedora-bootstrap
++++ b/README.md
++evil-repo
+DIFF_EOF
+fitness_env -- bash "$FITNESS" fedora-dev 1
+ck "$(grep -qx "Fitness review: VERDICT RETURN — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "the crafted escape hid the add from the deterministic gate"
+ck "$([ ! -f "$RAN" ] && echo 1 || echo 0)" "the reviewer model ran — the escape reached past the harness"
+out_has 'evil-repo'
 done_case
 
 DESC="an UNREADABLE comment stream reads as unconfirmed (fail-closed) → RETURN"; OK=1
@@ -308,6 +413,28 @@ ck "$(cmp -s "$FITNESS" "$MUTF" && echo 0 || echo 1)" "the sed changed nothing �
 fitness_env -- bash "$MUTF" fedora-dev 1
 ck "$([ -f "$RAN" ] && echo 1 || echo 0)" "the neutralized detector still blocked the model — the real row would pass vacuously"
 ck "$(grep -qx "Fitness review: VERDICT PASS — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "the mutant did not PASS the unconfirmed expansion"
+done_case
+
+echo "== MUTATION: de-STATE the diff parser → the crafted escape hides the add (finding 1 restored) =="
+DESC="the escape rows discriminate: a stateless header rule loses evil-repo"; OK=1
+setup_case
+MUTS="$ROOT/scope-mut.sh"
+sed 's@inhunk == 0 && @@' "$SCOPE" > "$MUTS"
+ck "$(cmp -s "$SCOPE" "$MUTS" && echo 0 || echo 1)" "the sed changed nothing — this mutation row is vacuous"
+cat > "$CASE/craft.diff" <<'DIFF_EOF'
+diff --git a/policy/scope.conf b/policy/scope.conf
+--- a/policy/scope.conf
++++ b/policy/scope.conf
+@@ -1,2 +1,4 @@
+ fedora-dev
+ fedora-bootstrap
++++ b/README.md
++evil-repo
+DIFF_EOF
+got_real="$(bash "$SCOPE" diff-adds policy/scope.conf < "$CASE/craft.diff")"
+got_mut="$(bash "$MUTS" diff-adds policy/scope.conf < "$CASE/craft.diff")"
+ck "$([ "$got_real" = "evil-repo" ] && echo 1 || echo 0)" "the REAL parser missed the escaped add (got: $got_real)"
+ck "$([ -z "$got_mut" ] && echo 1 || echo 0)" "the mutant still saw the add (got: $got_mut) — the escape rows would pass vacuously"
 done_case
 
 # ===================================================================================================

@@ -130,9 +130,12 @@ to other people and other workstreams; a repo off-limits today may be in scope t
 - **Expanding the scope is maintainer-gated, structurally** (the R1 spec-confirmation discipline):
   the fitness gate treats a PR that NET-ADDS a repo to `policy/scope.conf` without a maintainer's
   recorded confirmation on that PR as (b) UNSAFE — a deterministic RETURN, never a NOTE (the hole
-  #165 sailed through). Confirmation = a PR comment whose FIRST line starts with `CONFIRMED`, its
-  author role-checked admin|maintain via the permission API — App identities and label presence
-  authorize NOTHING. Removing a repo needs no ceremony: narrowing is always safe.
+  #165 sailed through). Confirmation is NAME-BOUND: a PR comment whose FIRST line is exactly
+  `CONFIRMED <repo> [<repo>…]` and nothing else, its author role-checked admin|maintain via the
+  permission API — it covers exactly the repos it names, so a post-confirmation head that swaps or
+  extends the adds re-gates unconfirmed; a bare or prose `CONFIRMED` confirms nothing, and App
+  identities and label presence authorize NOTHING. Removing a repo needs no ceremony: narrowing is
+  always safe.
 - **SESSION DISCIPLINE (law, not code):** an agent session MUST NOT act on a repo outside its
   granted scope even via shared machinery — no enrolling it, no provisioning the clone, credential
   or config that lets an actuator reach it, no "fixing" a blocked actuator to get there. A blocked

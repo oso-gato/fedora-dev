@@ -194,47 +194,69 @@ diff_note=""; trunc_note=""
 # through (nothing in Q1/Q2/Q3 encoded WHICH repos the apparatus may act on, so a one-line PR
 # re-targeted the whole apparatus and every gate passed it). The AUTHORITY is the versioned config
 # (policy/scope.conf); a PR that NET-ADDS a repo to it (repo-scope.sh diff-adds: added minus removed,
-# so a moved/reordered line or a pure removal never trips — narrowing needs no ceremony) merges ONLY
-# with a maintainer's recorded confirmation ON THIS PR — the dev-plan R1 discipline: a comment whose
-# FIRST line starts with CONFIRMED, its author role-checked admin|maintain via the permission API
-# (App identities hold write and can confirm NOTHING; label presence proves nothing). Unconfirmed ⇒
-# the HARNESS composes the RETURN itself and the model is NOT consulted: a structural blocker needs
-# no judgment, and no judgment could unblock it (a model cannot be talked into waiving R16 because
-# it never gets to speak). Detection runs BEFORE the diff cap — a truncated diff must never hide a
-# scope hunk. Fail direction: an unreadable comment stream or role reads as UNCONFIRMED ⇒ RETURN.
-# Cost: zero extra API calls unless an expansion is actually detected. (The reader's presence was
-# already proven by the scope check above, so an empty diff-adds here means "no expansion", never
-# "no reader".)
+# so a moved/reordered line or a pure removal never trips — narrowing needs no ceremony; the parser
+# is HUNK-STATEFUL, so a crafted added line that mimics a `+++ b/…` header can neither hide the adds
+# behind it nor forge an entry — see scope_diff_adds) merges ONLY with a maintainer's recorded,
+# NAME-BOUND confirmation ON THIS PR — the dev-plan R1 discipline plus the G2 binding lesson: a
+# comment whose FIRST line is exactly `CONFIRMED <repo> [<repo>…]` (repo-scope.sh confirm-names:
+# strict, all-or-nothing — a bare CONFIRMED or any prose on line 1 confirms NOTHING), its author
+# role-checked admin|maintain via the permission API (App identities hold write and can confirm
+# NOTHING; label presence proves nothing). The confirmation covers exactly the NAMES it lists —
+# maintainer confirmations UNION, and EVERY net-added name must be covered — so the empty-commit
+# remediation flow survives (new heads keep passing while their net-adds stay within the confirmed
+# names) but a post-confirmation head that SWAPS or EXTENDS the adds re-gates UNCONFIRMED on the
+# uncovered names ("a fresh, ungated head never inherits a prior verdict"). Uncovered ⇒ the HARNESS
+# composes the RETURN itself and the model is NOT consulted: a structural blocker needs no judgment,
+# and no judgment could unblock it (a model cannot be talked into waiving R16 because it never gets
+# to speak). Detection runs BEFORE the diff cap — a truncated diff must never hide a scope hunk.
+# Fail direction: an unreadable comment stream or role reads as UNCONFIRMED ⇒ RETURN.
+# Cost: zero extra API calls unless an expansion is actually detected (names are parsed locally
+# BEFORE the per-author role call, so only a comment that actually names repos costs a role read).
 verdict=""; rationale=""
 scope_added="$(printf '%s' "$diff" | "$REPO_SCOPE" diff-adds 2>/dev/null)" || scope_added=""
 if [ -n "$scope_added" ]; then
-  scope_conf_by=""
+  scope_confirmed=""; scope_conf_by=""
   scope_bus="$(gh api "repos/$SLUG/issues/$PR/comments" --paginate \
       -q '.[] | [((.user.login // "") | rtrimstr("[bot]")), ((.body // "") | split("\n")[0])] | @tsv' 2>/dev/null)" \
     || scope_bus=""
   while IFS=$'\t' read -r sc_who sc_line1; do
     [ -n "$sc_who" ] || continue
     printf '%s' "$sc_line1" | grep -qE '^CONFIRMED\b' || continue
+    sc_names="$("$REPO_SCOPE" confirm-names "$sc_line1" 2>/dev/null)" || sc_names=""
+    if [ -z "$sc_names" ]; then
+      log "R16: line-1 CONFIRMED from @$sc_who names NO repos (strict grammar: line 1 is 'CONFIRMED <repo> [<repo>…]' and nothing else) — it confirms nothing"
+      continue
+    fi
     sc_role="$(gh api "repos/$SLUG/collaborators/$sc_who/permission" -q .role_name 2>/dev/null)"
     case "$sc_role" in
-      admin|maintain) scope_conf_by="$sc_who"; break;;
+      admin|maintain)
+        scope_confirmed="${scope_confirmed}${sc_names}"$'\n'; scope_conf_by="$sc_who"
+        log "R16: @$sc_who (maintainer) confirmed by name: $(printf '%s' "$sc_names" | tr '\n' ' ')";;
       *) log "R16: ignoring line-1 CONFIRMED from @$sc_who (role: ${sc_role:-unfetchable} — not a maintainer)";;
     esac
   done <<<"$scope_bus"
-  if [ -n "$scope_conf_by" ]; then
-    log "R16: scope expansion (+ $(printf '%s' "$scope_added" | tr '\n' ' ')) is maintainer-confirmed by @$scope_conf_by — proceeding to the model review"
+  scope_missing="$(printf '%s\n' "$scope_added" | while IFS= read -r _a; do
+    [ -n "$_a" ] || continue
+    printf '%s\n' "$scope_confirmed" | grep -qxF -- "$_a" || printf '%s\n' "$_a"
+  done)"
+  if [ -z "$scope_missing" ]; then
+    log "R16: scope expansion (+ $(printf '%s' "$scope_added" | tr '\n' ' ')) is maintainer-confirmed by @$scope_conf_by — every added name covered; proceeding to the model review"
   else
-    log "R16: this PR NET-ADDS repo(s) to the operating scope ($(printf '%s' "$scope_added" | tr '\n' ' ')) with NO maintainer-recorded confirmation — deterministic RETURN (UNSAFE (b)); the reviewer model is not consulted"
+    log "R16: this PR NET-ADDS repo(s) to the operating scope with NO maintainer confirmation NAMING them ($(printf '%s' "$scope_missing" | tr '\n' ' ')) — deterministic RETURN (UNSAFE (b)); the reviewer model is not consulted"
     verdict="RETURN"
+    scope_paste="CONFIRMED $(printf '%s' "$scope_added" | tr '\n' ' ' | sed 's/ $//')"
     rationale="**R16 OPERATING SCOPE (#167) — BLOCKER, category (b) UNSAFE — determined by the fitness HARNESS (deterministic; no model judgment involved, and none could unblock it).**
 
 This PR NET-ADDS the following repo(s) to the apparatus's operating scope (\`policy/scope.conf\`):
 $(printf '%s\n' "$scope_added" | sed 's/^/- `/;s/$/`/')
 
-Scope EXPANSION takes effect only with a MAINTAINER's recorded confirmation on THIS PR (R16 rule 2 — the dev-plan R1 discipline): a PR comment whose FIRST line starts with \`CONFIRMED\`, authored by an identity holding admin|maintain on this repo (role-checked via the permission API; fleet App identities hold write and can confirm nothing, and label presence proves nothing). None was found — an unreadable comment stream or role also reads as unconfirmed (fail-closed).
+Not covered by any maintainer confirmation on this PR:
+$(printf '%s\n' "$scope_missing" | sed 's/^/- `/;s/$/`/')
+
+Scope EXPANSION takes effect only with a MAINTAINER's recorded, NAME-BOUND confirmation on THIS PR (R16 rule 2 — the dev-plan R1 discipline): a PR comment whose FIRST line is exactly \`CONFIRMED <repo> [<repo>…]\` — nothing else on line 1 (prose goes on later lines; a bare \`CONFIRMED\` confirms nothing) — authored by an identity holding admin|maintain on this repo (role-checked via the permission API; fleet App identities hold write and can confirm nothing, and label presence proves nothing). The confirmation covers EXACTLY the repos it names: a later head re-gates under it only while its net-adds stay within the confirmed names, so a post-confirmation push can never swap in a different repo. An unreadable comment stream or role also reads as unconfirmed (fail-closed).
 
 Remediation — exactly one of:
-- a repo MAINTAINER comments \`CONFIRMED\` (as the comment's first line) on this PR, then a NEW head is pushed (e.g. an empty commit), so the new head re-gates and re-reviews under that confirmation; or
+- a repo MAINTAINER comments on this PR with first line exactly: \`$scope_paste\` — then a NEW head is pushed (e.g. an empty commit), so the new head re-gates and re-reviews under that confirmation; or
 - drop the scope addition (narrowing or leaving the scope unchanged needs no ceremony).
 
 This closes the hole #165 sailed through: a one-line PR must never re-target the apparatus autonomously."
@@ -283,10 +305,12 @@ A finding BLOCKS only if it makes the change INCORRECT, UNSAFE, or UNTRUE:
                   removes recoverability/rollback, or EXPANDS THE APPARATUS'S OPERATING SCOPE without a
                   maintainer's recorded confirmation (R16/#167): adding a repo to ANY repo-set the
                   apparatus acts on — a sweep list, an enrolment default, a workload list, a hardcoded
-                  fallback in a script — is UNSAFE unless maintainer-confirmed on the PR. (The
-                  authoritative config, policy/scope.conf, is enforced by this harness deterministically
-                  before you run; an expansion smuggled ANYWHERE ELSE — a script default, an env
-                  fallback — is YOURS to catch. Removing/narrowing scope is always fine.)
+                  fallback in a script — is UNSAFE unless maintainer-confirmed on the PR. (A
+                  deterministic harness gate screens the authoritative config, policy/scope.conf,
+                  before you run — treat it as a FIRST layer, never a reason to stand down: judge any
+                  change touching policy/scope.conf, the scope reader, or the machinery around them
+                  YOURSELF as well, and an expansion smuggled ANYWHERE ELSE — a script default, an env
+                  fallback — has no other gate at all. Removing/narrowing scope is always fine.)
   (c) UNTRUE    — it ships a claim that is false: a doc row, code comment, log line or test that asserts
                   behaviour the code does not have. (This fleet's dominant defect. A test that passes
                   against the pre-fix code is untrue. Hold this line hard.)
