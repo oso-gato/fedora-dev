@@ -302,7 +302,7 @@ SLUG="oso-gato/$POLLER_REPO"
 # port (managed-settings.json must stay byte-identical across all three — fleet-guard-parity CHECK 1 —
 # so its port PR needs the same zero-click path). Space-separated; sweep() re-sets POLLER_REPO/SLUG
 # per repo each tick.
-POLLER_REPOS="${POLLER_REPOS:-fedora-dev fedora-bootstrap fedora-desktop e2e-alpha}"
+POLLER_REPOS="${POLLER_REPOS:-fedora-dev fedora-bootstrap fedora-desktop e2e-alpha knowledge-desktop}"
 # login MUST be the GraphQL form (no `[bot]` suffix) — that is what `gh pr view --json comments`
 # returns and what auto-merge.sh matches against. REST's `.user.login` adds `[bot]`; do NOT use it.
 LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
