@@ -57,6 +57,7 @@
 #       5 no features · 6 create failed (total or partial → deferred) · 7 no PLAN_DONE sentinel
 #       8 plan exceeded MAX_FEATURES (the surplus is deferred, reported on the bus, spec left unplanned)
 #       9 filed, but the `planned:` summary could not be posted → deferred (the bus is the only record).
+#       12 repo outside the R16 operating scope (#167) — refused before anything was read or filed.
 set -uo pipefail
 
 ORG="${ORG:-oso-gato}"
@@ -206,6 +207,13 @@ fi
 REPO="${1:?usage: dev-plan.sh <repo> <spec-issue#> | --selftest}"
 SPEC="${2:?usage: dev-plan.sh <repo> <spec-issue#>}"
 SLUG="$ORG/$REPO"
+
+# R16 OPERATING SCOPE (#167): planning files issues AGAINST a repo — an out-of-scope repo gets NO
+# action of any kind (nothing read, nothing filed, no comment on the foreign repo) and one loud log
+# line. Any non-zero rc from the reader (127 included) refuses (fail-closed).
+REPO_SCOPE="${REPO_SCOPE:-$(dirname "$(readlink -f "$0")")/repo-scope.sh}"
+"$REPO_SCOPE" check "$REPO" 2>/dev/null \
+  || { log "R16 SCOPE: repo '$REPO' is outside the maintainer-confirmed operating scope — refusing to plan (nothing read, nothing filed)"; exit 12; }
 
 # bus_comments → the spec issue's COMPLETE comment stream, one "<login>\t<line-1>" per line, oldest→newest.
 # The REST endpoint with `--paginate`, NOT `gh issue view --json comments`, whose GraphQL page carries only

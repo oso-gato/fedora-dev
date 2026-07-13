@@ -63,6 +63,16 @@ verb="${1:-}"; [ -n "$verb" ] || die "usage: host-ticket.sh [--wait] <verb> [arg
 args="$*"
 opline="$(op_line "$verb${args:+ $args}")"
 
+# R16 OPERATING SCOPE (#167): filing a ticket is an action against the target control repo — refuse
+# an out-of-scope one before the label/issue writes. (The verb's WORKLOAD argument is gated by its
+# producers — bin/host-refresh.sh scope-checks each workload it scans — and by the host agent's own
+# KNOWN_WORKLOADS allowlist on the consuming side; verb args are opaque here by design.) Any
+# non-zero reader rc (127 included) refuses (fail-closed).
+HERE="$(dirname "$(readlink -f "$0")")"
+REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
+"$REPO_SCOPE" check "$REPO" 2>/dev/null \
+  || die "R16 SCOPE: control repo '$SLUG' is outside the maintainer-confirmed operating scope — no ticket filed"
+
 # ensure the ticket label exists — creating an issue with an unknown label fails (create-on-use).
 gh label create "$LABEL" --repo "$SLUG" --color 5319e7 \
    --description "dev→host op ticket — host-agent-watch consumes line 1 (host-op:)" --force >/dev/null 2>&1 || true

@@ -117,6 +117,17 @@ fi
 REPO="${1:?usage: dev-author.sh <repo> <issue#>   |   dev-author.sh --selftest}"
 ISSUE="${2:?usage: dev-author.sh <repo> <issue#>}"
 SLUG="$ORG/$REPO"
+
+# R16 OPERATING SCOPE (#167): authoring cuts a worktree, spawns a model and pushes a branch AGAINST
+# a repo — an out-of-scope repo gets NONE of that: nothing read, nothing posted (not even the
+# BLOCKED question — that too is an action on the foreign repo), one loud log line. rc 2, the same
+# posts-nothing class as an unreadable issue (dev-loop's run_class treats it as RETRY, but its own
+# scope gate refuses the whole pass first — this is the belt for a direct invocation). Any non-zero
+# reader rc (127 included) refuses (fail-closed).
+REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
+"$REPO_SCOPE" check "$REPO" 2>/dev/null \
+  || { log "R16 SCOPE: repo '$REPO' is outside the maintainer-confirmed operating scope — refusing to author (nothing read, nothing posted)"; exit 2; }
+
 mkdir -p "$STATE"
 marker="$STATE/${REPO}-${ISSUE}.done"
 

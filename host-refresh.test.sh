@@ -92,7 +92,10 @@ setup_case(){
 }
 run_scan(){ # extra env…
   OUT="$CASE/scan.out"
-  env HOME="$HOMEDIR" CASE="$CASE" PATH="$BIN:$PATH" \
+  # REPO_SCOPE pinned to the real reader: the mutation rows run sed-COPIES from $ROOT, where the
+  # default $HERE/repo-scope.sh does not exist — a missing reader is a fail-closed R16 refusal
+  # (#167) that would starve those rows of the very ticket they must prove the mutant files.
+  env HOME="$HOMEDIR" CASE="$CASE" PATH="$BIN:$PATH" REPO_SCOPE="$HERE/bin/repo-scope.sh" \
       HOST_REFRESH_WORKLOADS="fedora-dev" HOST_TICKET="$HTICKET" "$@" \
       bash "$TARGET" --once >"$OUT" 2>&1
   RC=$?

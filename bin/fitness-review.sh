@@ -135,6 +135,14 @@ FITNESS_DIFF_CAP="${FITNESS_DIFF_CAP:-200000}"
 log(){ echo "[fitness] $*" >&2; }
 die(){ log "$*"; exit 1; }
 
+# R16 OPERATING SCOPE (#167): reviewing is itself an action on a repo — refuse an out-of-scope one
+# before anything is read. rc 1 (a retryable precondition, per the exit-code contract): the scope
+# can change through a confirmed merge, and the poller's own sweep gate keeps this normally
+# unreachable. Any non-zero rc from the reader (127 included) refuses (fail-closed).
+REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
+"$REPO_SCOPE" check "$REPO" \
+  || die "repo '$REPO' is outside the maintainer-confirmed operating scope (R16) — refusing to review"
+
 pr_author="$(gh pr view "$PR" --repo "$SLUG" --json author -q .author.login 2>/dev/null)"
 [ -n "$pr_author" ] || die "cannot read PR author for $SLUG#$PR (fail-closed)"
 # NORMALIZE: `--json author` prefixes an App-authored PR's login with `app/` (e.g.
@@ -179,12 +187,92 @@ title="$(gh pr view "$PR" --repo "$SLUG" --json title -q .title 2>/dev/null)"
 body="$(gh pr view "$PR" --repo "$SLUG" --json body -q .body 2>/dev/null)"
 diff="$(gh pr diff "$PR" --repo "$SLUG" 2>/dev/null)"
 [ -n "$diff" ] || die "empty/unreadable diff for $SLUG#$PR (fail-closed)"
+diff_note=""; trunc_note=""
+
+# ---- R16 OPERATING-SCOPE GATE (#167) — deterministic, harness-owned, runs on the FULL diff ---------
+# Unauthorized scope EXPANSION is (b) UNSAFE — a BLOCKER, never a NOTE: the exact hole #165 sailed
+# through (nothing in Q1/Q2/Q3 encoded WHICH repos the apparatus may act on, so a one-line PR
+# re-targeted the whole apparatus and every gate passed it). The AUTHORITY is the versioned config
+# (policy/scope.conf); a PR that NET-ADDS a repo to it (repo-scope.sh diff-adds: added minus removed,
+# so a moved/reordered line or a pure removal never trips — narrowing needs no ceremony; the parser
+# is HUNK-STATEFUL, so a crafted added line that mimics a `+++ b/…` header can neither hide the adds
+# behind it nor forge an entry — see scope_diff_adds) merges ONLY with a maintainer's recorded,
+# NAME-BOUND confirmation ON THIS PR — the dev-plan R1 discipline plus the G2 binding lesson: a
+# comment whose FIRST line is exactly `CONFIRMED <repo> [<repo>…]` (repo-scope.sh confirm-names:
+# strict, all-or-nothing — a bare CONFIRMED or any prose on line 1 confirms NOTHING), its author
+# role-checked admin|maintain via the permission API (App identities hold write and can confirm
+# NOTHING; label presence proves nothing). The confirmation covers exactly the NAMES it lists —
+# maintainer confirmations UNION, and EVERY net-added name must be covered — so the empty-commit
+# remediation flow survives (new heads keep passing while their net-adds stay within the confirmed
+# names) but a post-confirmation head that SWAPS or EXTENDS the adds re-gates UNCONFIRMED on the
+# uncovered names ("a fresh, ungated head never inherits a prior verdict"). Uncovered ⇒ the HARNESS
+# composes the RETURN itself and the model is NOT consulted: a structural blocker needs no judgment,
+# and no judgment could unblock it (a model cannot be talked into waiving R16 because it never gets
+# to speak). Detection runs BEFORE the diff cap — a truncated diff must never hide a scope hunk.
+# Fail direction: an unreadable comment stream or role reads as UNCONFIRMED ⇒ RETURN.
+# Cost: zero extra API calls unless an expansion is actually detected (names are parsed locally
+# BEFORE the per-author role call, so only a comment that actually names repos costs a role read).
+verdict=""; rationale=""
+scope_added="$(printf '%s' "$diff" | "$REPO_SCOPE" diff-adds 2>/dev/null)" || scope_added=""
+if [ -n "$scope_added" ]; then
+  scope_confirmed=""; scope_conf_by=""
+  scope_bus="$(gh api "repos/$SLUG/issues/$PR/comments" --paginate \
+      -q '.[] | [((.user.login // "") | rtrimstr("[bot]")), ((.body // "") | split("\n")[0])] | @tsv' 2>/dev/null)" \
+    || scope_bus=""
+  while IFS=$'\t' read -r sc_who sc_line1; do
+    [ -n "$sc_who" ] || continue
+    printf '%s' "$sc_line1" | grep -qE '^CONFIRMED\b' || continue
+    sc_names="$("$REPO_SCOPE" confirm-names "$sc_line1" 2>/dev/null)" || sc_names=""
+    if [ -z "$sc_names" ]; then
+      log "R16: line-1 CONFIRMED from @$sc_who names NO repos (strict grammar: line 1 is 'CONFIRMED <repo> [<repo>…]' and nothing else) — it confirms nothing"
+      continue
+    fi
+    sc_role="$(gh api "repos/$SLUG/collaborators/$sc_who/permission" -q .role_name 2>/dev/null)"
+    case "$sc_role" in
+      admin|maintain)
+        scope_confirmed="${scope_confirmed}${sc_names}"$'\n'; scope_conf_by="$sc_who"
+        log "R16: @$sc_who (maintainer) confirmed by name: $(printf '%s' "$sc_names" | tr '\n' ' ')";;
+      *) log "R16: ignoring line-1 CONFIRMED from @$sc_who (role: ${sc_role:-unfetchable} — not a maintainer)";;
+    esac
+  done <<<"$scope_bus"
+  scope_missing="$(printf '%s\n' "$scope_added" | while IFS= read -r _a; do
+    [ -n "$_a" ] || continue
+    printf '%s\n' "$scope_confirmed" | grep -qxF -- "$_a" || printf '%s\n' "$_a"
+  done)"
+  if [ -z "$scope_missing" ]; then
+    log "R16: scope expansion (+ $(printf '%s' "$scope_added" | tr '\n' ' ')) is maintainer-confirmed by @$scope_conf_by — every added name covered; proceeding to the model review"
+  else
+    log "R16: this PR NET-ADDS repo(s) to the operating scope with NO maintainer confirmation NAMING them ($(printf '%s' "$scope_missing" | tr '\n' ' ')) — deterministic RETURN (UNSAFE (b)); the reviewer model is not consulted"
+    verdict="RETURN"
+    scope_paste="CONFIRMED $(printf '%s' "$scope_added" | tr '\n' ' ' | sed 's/ $//')"
+    rationale="**R16 OPERATING SCOPE (#167) — BLOCKER, category (b) UNSAFE — determined by the fitness HARNESS (deterministic; no model judgment involved, and none could unblock it).**
+
+This PR NET-ADDS the following repo(s) to the apparatus's operating scope (\`policy/scope.conf\`):
+$(printf '%s\n' "$scope_added" | sed 's/^/- `/;s/$/`/')
+
+Not covered by any maintainer confirmation on this PR:
+$(printf '%s\n' "$scope_missing" | sed 's/^/- `/;s/$/`/')
+
+Scope EXPANSION takes effect only with a MAINTAINER's recorded, NAME-BOUND confirmation on THIS PR (R16 rule 2 — the dev-plan R1 discipline): a PR comment whose FIRST line is exactly \`CONFIRMED <repo> [<repo>…]\` — nothing else on line 1 (prose goes on later lines; a bare \`CONFIRMED\` confirms nothing) — authored by an identity holding admin|maintain on this repo (role-checked via the permission API; fleet App identities hold write and can confirm nothing, and label presence proves nothing). The confirmation covers EXACTLY the repos it names: a later head re-gates under it only while its net-adds stay within the confirmed names, so a post-confirmation push can never swap in a different repo. An unreadable comment stream or role also reads as unconfirmed (fail-closed).
+
+Remediation — exactly one of:
+- a repo MAINTAINER comments on this PR with first line exactly: \`$scope_paste\` — then a NEW head is pushed (e.g. an empty commit), so the new head re-gates and re-reviews under that confirmation; or
+- drop the scope addition (narrowing or leaving the scope unchanged needs no ceremony).
+
+This closes the hole #165 sailed through: a one-line PR must never re-target the apparatus autonomously."
+  fi
+fi
+
+# The model review runs ONLY when the R16 gate above has not already decided (verdict still empty).
+# NB: the guard body below deliberately stays at column 0 — it carries the PROMPT heredoc, whose
+# terminator must sit at line start; the guard closes just after the rationale is extracted.
+if [ -z "$verdict" ]; then
+
 # TRUNCATION IS EXPLICIT, LOUD, AND CARRIED INTO THE VERDICT (#155 R3). A reviewer handed a silently
 # truncated diff can PASS on the strength of code it never saw — a CORRECTNESS risk, not an ergonomic
 # one. So when the cap bites we (a) say so in the log, (b) tell the REVIEWER it is judging a partial
 # diff and to ESCALATE if the hidden part matters, and (c) stamp it on the posted verdict comment so the
 # human reading a PASS knows what it was based on.
-diff_note=""; trunc_note=""
 if [ "${#diff}" -gt "$FITNESS_DIFF_CAP" ]; then
   log "diff is ${#diff} bytes > FITNESS_DIFF_CAP=$FITNESS_DIFF_CAP — TRUNCATING: the reviewer judges a PARTIAL diff (it is told so, and told to ESCALATE if the hidden part decides it)"
   trunc_note=" Judged a **TRUNCATED** diff — first $FITNESS_DIFF_CAP of ${#diff} bytes (\`FITNESS_DIFF_CAP\`)."
@@ -214,7 +302,15 @@ A finding BLOCKS only if it makes the change INCORRECT, UNSAFE, or UNTRUE:
   (a) INCORRECT — it does not actually do what it claims; the stated feature is broken or does not work.
   (b) UNSAFE    — it weakens or deletes a guard, exposes a credential, enables an unsafe or unreviewed
                   merge, breaks the fail-closed posture or the merge-trust boundary (G1/G2, author≠judge),
-                  or removes recoverability/rollback.
+                  removes recoverability/rollback, or EXPANDS THE APPARATUS'S OPERATING SCOPE without a
+                  maintainer's recorded confirmation (R16/#167): adding a repo to ANY repo-set the
+                  apparatus acts on — a sweep list, an enrolment default, a workload list, a hardcoded
+                  fallback in a script — is UNSAFE unless maintainer-confirmed on the PR. (A
+                  deterministic harness gate screens the authoritative config, policy/scope.conf,
+                  before you run — treat it as a FIRST layer, never a reason to stand down: judge any
+                  change touching policy/scope.conf, the scope reader, or the machinery around them
+                  YOURSELF as well, and an expansion smuggled ANYWHERE ELSE — a script default, an env
+                  fallback — has no other gate at all. Removing/narrowing scope is always fine.)
   (c) UNTRUE    — it ships a claim that is false: a doc row, code comment, log line or test that asserts
                   behaviour the code does not have. (This fleet's dominant defect. A test that passes
                   against the pre-fix code is untrue. Hold this line hard.)
@@ -293,8 +389,11 @@ if [ -z "$verdict" ]; then
   exit 3
 fi
 
-# ---- compose the CANONICAL verdict comment (shell-owned) + the model's rationale -------------------
 rationale="$(printf '%s' "$review" | grep -vE '^[[:space:]]*FITNESS_VERDICT:' | sed -e 's/[[:space:]]*$//')"
+
+fi # ---- end of the model-review guard (the R16 gate above may have decided instead) ----------------
+
+# ---- compose the CANONICAL verdict comment (shell-owned) + the rationale ---------------------------
 comment="Fitness review: VERDICT $verdict — head $head_sha
 
 <sub>Independent fitness review (Step 4b) — reviewer \`$FITNESS_LOGIN\`, head \`${head_sha:0:7}\`.$trunc_note Machine-read by \`bin/auto-merge.sh\` from LINE 1 ONLY (verdict + FULL head sha — prose/rationale below this line is never machine-trusted); the verdict token above is authoritative.</sub>

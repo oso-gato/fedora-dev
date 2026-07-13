@@ -59,6 +59,16 @@ COMMIT=0; [ "${1:-}" = "--commit" ] && { COMMIT=1; shift; }
 REPO="${1:?usage: auto-merge.sh [--commit] <repo> <pr>}"; PR="${2:?pr required}"
 SLUG="oso-gato/$REPO"
 
+# R16 OPERATING SCOPE (#167): the merge boundary's executor acts ONLY on the maintainer-confirmed
+# repo set (bin/repo-scope.sh → policy/scope.conf). Out of scope ⇒ REFUSE before any gate is even
+# read — a merge is the apparatus's most consequential action, and the incident PR (#165) reached
+# exactly this executor. Any non-zero rc from the reader (127 included) is a REFUSE (fail-closed).
+REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
+if ! "$REPO_SCOPE" check "$REPO"; then
+  echo "[auto-merge] R16 REFUSE: repo '$REPO' is outside the maintainer-confirmed operating scope (policy/scope.conf) — no merge (fail-closed)"
+  exit 1
+fi
+
 # UNFORGEABILITY (the gates are only as good as WHO posted them — the #92 review found both were
 # forgeable). The verdicts are COMMENTS, and a PR author can post ANY comment / a collaborator can
 # apply ANY label — so we IGNORE anyone but the trusted GitHub-App identities and REFUSE if those are

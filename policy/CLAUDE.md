@@ -116,6 +116,34 @@ Task mentions any of:
 
 → STOP. Wrong agent. The host claudebox (in `fedora-bootstrap`) owns operate/deploy work. Surface what you would do; the human routes the task.
 
+## OPERATING SCOPE — R16 (BINDING; #167)
+
+The apparatus acts ONLY on the maintainer-confirmed repo set in `policy/scope.conf`, read via
+`bin/repo-scope.sh` (today: fedora-dev, fedora-bootstrap, fedora-desktop, e2e-alpha). Scope is
+**per-objective, not permanent** (maintainer's ruling, 2026-07-13): the org holds repos that belong
+to other people and other workstreams; a repo off-limits today may be in scope tomorrow.
+
+- **Every actuator checks scope before acting** — poller sweep, fixer, fitness review, auto-merge,
+  dev-plan/dev-loop/dev-author, host tickets/refresh. Out of scope ⇒ NO action, one loud log line.
+  Fail-closed: an unreadable scope config freezes everything but the apparatus's own two repos
+  (fedora-dev + fedora-bootstrap); a missing reader freezes all scoped action (rc≠0 is never a go).
+- **Expanding the scope is maintainer-gated, structurally** (the R1 spec-confirmation discipline):
+  the fitness gate treats a PR that NET-ADDS a repo to `policy/scope.conf` without a maintainer's
+  recorded confirmation on that PR as (b) UNSAFE — a deterministic RETURN, never a NOTE (the hole
+  #165 sailed through). Confirmation is NAME-BOUND: a PR comment whose FIRST line is exactly
+  `CONFIRMED <repo> [<repo>…]` and nothing else, its author role-checked admin|maintain via the
+  permission API — it covers exactly the repos it names, so a post-confirmation head that swaps or
+  extends the adds re-gates unconfirmed; a bare or prose `CONFIRMED` confirms nothing, and App
+  identities and label presence authorize NOTHING. Removing a repo needs no ceremony: narrowing is
+  always safe.
+- **SESSION DISCIPLINE (law, not code):** an agent session MUST NOT act on a repo outside its
+  granted scope even via shared machinery — no enrolling it, no provisioning the clone, credential
+  or config that lets an actuator reach it, no "fixing" a blocked actuator to get there. A blocked
+  actuator or a foreign-repo request is a QUESTION to SURFACE to the maintainer, never a gap to
+  self-provision around. (Incident 2026-07-13: #165 enrolled an out-of-scope repo, every gate
+  passed it, the poller pushed a bot commit onto a foreign branch — and the session then
+  provisioned the missing clone instead of surfacing the scope question.)
+
 ## OPERATING FACTS
 
 - `$HOME` = fedora-dev home volume. Persists across box rebuilds AND fedora-dev container recreations.
