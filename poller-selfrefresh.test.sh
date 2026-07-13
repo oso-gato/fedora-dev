@@ -18,6 +18,12 @@
 #     "never mid-fixer").
 #   * DROP THE DIRTY/DIVERGED GUARD or the fail-safe: the dirty and fetch-fail rows (loop keeps running,
 #     clone untouched) FAIL.
+#   * RESTORE THE CLONE-HEAD PROXY (#170: `running=$(git rev-parse HEAD)` inside the check — the defect
+#     the FIRST live exercise found, 2026-07-13: a third party pulling the clone makes clone==origin
+#     read UPTODATE forever while the process runs the launch-time build, so the reload silently
+#     self-disables): the external-pull rows then read UPTODATE and FAIL. This one is not left to a
+#     hand-run mutation — the proxy is RESTORED MECHANICALLY and RUN IN-SUITE below, and the sed must
+#     genuinely change the copy or that row fails as vacuous.
 #
 # Run:  bash poller-selfrefresh.test.sh   → exit 0 = all rows pass
 set -uo pipefail
@@ -99,6 +105,24 @@ run_watch(){ # <secs> extra env…
       timeout "$secs" bash "$POLLER" --watch >"$OUT" 2>&1
   RC=$?
 }
+# background the REAL --watch loop so the test can act on the clone MID-RUN (#170: the external actor).
+# POLL_INTERVAL=2 gives the actor the whole first sleep (≥2 s for a local-disk git op) between the sweep
+# line appearing and the first self-refresh check firing.
+watch_bg(){ # <secs> extra env…
+  local secs="$1"; shift
+  OUT="$CASE/watch.out"; : > "$OUT"
+  # shellcheck disable=SC2086
+  env HOME="$HOMEDIR" SELF_REFRESH_CLONE="$CLONE" PATH="$BIN:$PATH" \
+      POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FLEET_HALT=true \
+      POLL_INTERVAL=2 SELF_REFRESH_EVERY=2 "$@" \
+      timeout "$secs" bash "$POLLER" --watch >"$OUT" 2>&1 &
+  WATCH_PID=$!
+}
+wait_log(){ # <fixed-string> <secs> — poll OUT until the line appears; non-zero on timeout
+  local i=0 max=$(( ${2:-10} * 10 ))
+  until grep -qF "$1" "$OUT"; do i=$((i+1)); [ "$i" -gt "$max" ] && return 1; sleep 0.1; done
+}
+wait_watch(){ wait "$WATCH_PID"; RC=$?; }
 # sweeps that COMPLETED before the first self-refresh line (proves the rate-limit + boundary placement).
 sweeps_before_refresh(){ awk '/self-refresh:/{exit} /sweep: .* open PRs/{c++} END{print c+0}' "$OUT"; }
 # a self-refresh line inside a sweep block (between `sweep:` and its ` NOOP`) ⇒ mid-sweep ⇒ mid-fixer.
@@ -161,6 +185,30 @@ ck "$([ "$RC" = 0 ] && echo 1 || echo 0)" "disabled did not return continue (rc=
 ck "$(haslog 'self-refresh:' && echo 0 || echo 1)" "disabled still ran the refresh"
 done_case
 
+echo "== DECISION (#170): an EXTERNAL pull of the clone between launch and the check → still RELOAD =="
+DESC="a third party pulled the clone to origin → the LAUNCH head decides: reload"; OK=1
+setup_clone; advance_origin
+git -C "$CLONE" pull -q                                # the external actor (operator / orchestrator)
+run_check POLLER_LAUNCH_HEAD="$BASE_SHA"               # …but THIS process was launched on BASE
+ck "$([ "$RC" = "$RELOAD_RC" ] && echo 1 || echo 0)" "a pulled clone masked the stale process (rc=$RC want $RELOAD_RC — the clone-HEAD proxy reads clone==origin as UPTODATE and never reloads again)"
+ck "$(haslog 'stepping aside' && echo 1 || echo 0)" "no 'stepping aside' log"
+ck "$([ "$(clone_head)" = "$NEW_SHA" ] && echo 1 || echo 0)" "the check moved the externally-pulled clone (detection only — req 4)"
+done_case
+
+echo "== MUTATION (#170): the clone-HEAD proxy RESTORED MECHANICALLY → the external-pull row must FAIL =="
+DESC="running=\$(git rev-parse HEAD) restored in a copy → same fixture reads UPTODATE (the row bites)"; OK=1
+MUT="$ROOT/pr-poller.proxy-mutant.sh"; cp "$POLLER" "$MUT"
+sed -i 's|^  running="\$LAUNCH_HEAD".*|  running="$(git -C "$clone" rev-parse HEAD 2>/dev/null)"|' "$MUT"
+ck "$(cmp -s "$POLLER" "$MUT" && echo 0 || echo 1)" "the mutation sed changed NOTHING — this row is vacuous"
+setup_clone; advance_origin
+git -C "$CLONE" pull -q
+OUT="$CASE/mutant.out"
+env HOME="$HOMEDIR" SELF_REFRESH_CLONE="$CLONE" POLLER_LAUNCH_HEAD="$BASE_SHA" bash "$MUT" --self-refresh-check >"$OUT" 2>&1
+RC=$?
+ck "$([ "$RC" = 0 ] && echo 1 || echo 0)" "the proxy mutant did not read UPTODATE (rc=$RC want 0) — the external-pull row would not discriminate"
+ck "$(haslog 'stepping aside' && echo 0 || echo 1)" "the proxy mutant still reloaded — the external-pull row would not discriminate"
+done_case
+
 echo "== SUPERVISOR: ff-pull advances a clean clone to origin/main =="
 DESC="clean + ff → the supervisor advances the clone to the new head"; OK=1
 setup_clone; advance_origin
@@ -217,6 +265,29 @@ run_watch 5
 ck "$([ "$RC" != "$RELOAD_RC" ] && echo 1 || echo 0)" "a failed fetch triggered a reload (rc=$RC)"
 ck "$(haslog FAILED && echo 1 || echo 0)" "the fetch failure was not logged under --watch"
 ck "$([ "$(grep -cF 'open PRs' "$OUT")" -ge 2 ] && echo 1 || echo 0)" "the loop stopped after a failed fetch — it must carry on"
+done_case
+
+echo "== LOOP (#170): a third-party pull MID-RUN cannot mask the reload — the launch head is captured at startup =="
+DESC="--watch launched on BASE, clone pulled to origin while it runs → still reloads"; OK=1
+setup_clone; advance_origin                            # origin ahead; the clone (and the launch) on BASE
+watch_bg 30
+wait_log 'open PRs' 15 || ck 0 "the first sweep never appeared — cannot order the external pull"
+git -C "$CLONE" pull -q                                # the external actor pulls AFTER launch, BEFORE the first check
+wait_watch
+ck "$([ "$RC" = "$RELOAD_RC" ] && echo 1 || echo 0)" "the loop did not reload after an external pull (rc=$RC want $RELOAD_RC — the clone-HEAD proxy reads UPTODATE forever and the reload self-disables)"
+ck "$(haslog "advanced ${BASE_SHA:0:7} (launched)" && echo 1 || echo 0)" "the reload did not name the LAUNCH head as what origin advanced past"
+ck "$([ "$(clone_head)" = "$NEW_SHA" ] && echo 1 || echo 0)" "the poller moved the clone off the external pull (detection only — req 4)"
+done_case
+
+echo "== LOOP (#170): a DIRTY clone LATER CLEANED resumes reloading — no sticky state =="
+DESC="dirty blocks the reload only while dirty; cleaning lets the SAME running loop reload"; OK=1
+setup_clone; advance_origin; echo dirty >> "$CLONE/f"
+watch_bg 40
+wait_log 'DIRTY' 20 || ck 0 "the dirty condition was never logged — cannot order the clean"
+git -C "$CLONE" checkout -q -- f                       # the human cleans the clone; the loop keeps running
+wait_watch
+ck "$([ "$RC" = "$RELOAD_RC" ] && echo 1 || echo 0)" "the cleaned clone did not resume reloading (rc=$RC want $RELOAD_RC — sticky dirty state)"
+ck "$(haslog 'stepping aside' && echo 1 || echo 0)" "no 'stepping aside' after the clean"
 done_case
 
 echo
