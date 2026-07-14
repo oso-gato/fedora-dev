@@ -52,6 +52,20 @@
 #                                head that swaps the adds re-gates unconfirmed.
 #   repo-scope.sh --selftest     exercise the pure helpers (no gh / network / clone).
 #
+# PER-SESSION LAYER (R27/R28) — an OPTIONAL narrowing layer bolted ON TOP of the ceiling, gated ENTIRELY
+# by the env var SCOPE_SESSION (the caller's SID):
+#   * SCOPE_SESSION UNSET → this reader behaves BYTE-IDENTICALLY to the ceiling-only version above (the
+#     session registry is not even consulted or sourced). This is the load-bearing inertness: the running
+#     poller sets nothing, so enabling this file changes NOTHING until a caller opts in per-session.
+#   * SCOPE_SESSION SET → the session's DECLARED scope (bin/session-registry.sh resolve <sid>) NARROWS
+#     the ceiling: effective set = declared ∩ ceiling. `check` ALLOWs iff the repo is in that effective
+#     set AND not held by another LIVE session (disjointness, R28); an UNDECLARED session (SCOPE_SESSION
+#     set but unregistered / empty scope) acts on NOTHING (fail-closed, F6). A session can only ever
+#     NARROW the ceiling, never exceed it. `list` mirrors: the effective set, or empty when undeclared.
+#     The ceiling's fail direction is untouched and layered under: an unreadable config still falls back
+#     to SCOPE_OWN, and the session then narrows WITHIN that own-only fallback (a declared own repo →
+#     rc 0 with the WARN; anything else → deny).
+#
 # CALLERS (R16 rule 4 — every actuator): bin/pr-poller.sh (sweep list + the fixer belt),
 # bin/fitness-review.sh (before reviewing + the diff-adds gate), bin/auto-merge.sh (before merging),
 # bin/dev-plan.sh / dev-loop.sh / dev-author.sh (before planning/authoring), bin/host-ticket.sh
@@ -66,7 +80,10 @@
 # ENV: SCOPE_FILE (default <this repo>/policy/scope.conf); SCOPE_OWN (default
 #      "fedora-dev fedora-bootstrap" — the apparatus's own two repos, the unreadable-config
 #      fallback); SCOPE_CONF_REL (default policy/scope.conf — the repo-relative path diff-adds
-#      watches).
+#      watches); SCOPE_SESSION (OPTIONAL — the caller's SID; unset ⇒ the session layer is inert and
+#      the reader is byte-identical to the ceiling-only version); SCOPE_REGISTRY_DIR (the
+#      session-registry store, honoured via the sourced bin/session-registry.sh — only read when
+#      SCOPE_SESSION is set).
 set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 
@@ -172,6 +189,50 @@ scope_confirm_names(){
   printf '%s' "$out"
 }
 
+# ---- PER-SESSION LAYER — pure helpers (R27/R28; --selftest covers exactly these) -------------------
+# A per-session NARROWING layer bolted ON TOP of the ceiling (scope_decide). It NEVER widens: a session
+# can only ever narrow the maintainer-confirmed ceiling to the subset it declared, and it acts on
+# NOTHING until it registers. The whole layer is INERT unless the caller sets $SCOPE_SESSION — with it
+# unset the ceiling verdict IS the answer, byte-for-byte as before (the running poller sets nothing).
+
+# scope_session_decide <ceiling-verdict> <declared:0|1> <smember:0|1> <held:0|1>
+#   → the FINAL verdict once the session layer is applied over the ceiling. <ceiling-verdict> is exactly
+#   what scope_decide returned (ALLOW|DENY|FALLBACK_ALLOW|FALLBACK_DENY); <declared> = the session has a
+#   non-empty registered scope; <smember> = the repo is in that declared scope; <held> = the repo is
+#   currently held by ANOTHER live session (registry cross-check). The fold, in order:
+#     * ceiling DENY / FALLBACK_DENY → returned UNCHANGED. The repo is OUTSIDE the ceiling; a session can
+#       only narrow, never widen it back in — and the ceiling's own rc/log (incl. the unreadable-config
+#       FALLBACK_DENY, rc 4) is preserved intact.
+#     * ceiling ALLOW / FALLBACK_ALLOW → the repo is WITHIN the ceiling, so the session decides:
+#         undeclared               → SESSION_UNDECLARED (fail-closed to nothing — it must register first;
+#                                     this OUTRANKS held, so an unregistered SCOPE_SESSION acts on nothing
+#                                     even when the repo is one of the apparatus's own fallback repos).
+#         declared, NOT a member   → SESSION_DENY (the session narrows the ceiling out).
+#         declared, member, HELD   → SESSION_HELD (disjointness — another live session owns it, R28).
+#         declared, member, free   → the ceiling verdict UNCHANGED (ALLOW, or FALLBACK_ALLOW so the
+#                                     unreadable-config own-only fallback + its WARN survive under a session).
+scope_session_decide(){
+  local ceiling="$1" declared="$2" smember="$3" held="$4"
+  case "$ceiling" in
+    DENY|FALLBACK_DENY) printf '%s' "$ceiling"; return 0;;   # outside the ceiling — a session can't widen
+  esac
+  [ "$declared" = 1 ] || { printf 'SESSION_UNDECLARED'; return 0; }
+  [ "$smember" = 1 ] || { printf 'SESSION_DENY'; return 0; }   # narrows: declared but not this repo
+  [ "$held" != 1 ]   || { printf 'SESSION_HELD'; return 0; }   # disjointness cross-check (R28)
+  printf '%s' "$ceiling"                                        # ALLOW / FALLBACK_ALLOW stands
+}
+
+# scope_effective <session-list> <ceiling-list> → the effective set = the names in BOTH, one per line,
+# in CEILING order (mirrors what `list` prints today). Newline-separated inputs; a session name absent
+# from the ceiling is DROPPED (a session can never exceed the ceiling); either side empty → empty.
+scope_effective(){
+  local r
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    printf '%s\n' "$1" | grep -qxF -- "$r" && printf '%s\n' "$r"
+  done <<< "$2"
+}
+
 # ---- SELFTEST --------------------------------------------------------------------------------------
 if [ "${1:-}" = "--selftest" ]; then
   p=0 f=0
@@ -236,6 +297,23 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "one non-name token voids valid names beside it" "$(scope_confirm_names 'CONFIRMED a-repo (for now)')" ""
   ck "CONFIRMED must OPEN the line" "$(scope_confirm_names 'Sounds good — CONFIRMED a-repo')" ""
   ck "CRLF tolerated"              "$(scope_confirm_names $'CONFIRMED wl-two\r')" "wl-two"
+  echo "== scope_session_decide (the per-session LAYER — narrows the ceiling, NEVER widens it) =="
+  ck "ceiling DENY stands (a session can never widen a repo back into the ceiling)" "$(scope_session_decide DENY 1 1 0)" "DENY"
+  ck "ceiling FALLBACK_DENY stands (unreadable-config rc-4 freeze preserved)"       "$(scope_session_decide FALLBACK_DENY 1 1 0)" "FALLBACK_DENY"
+  ck "in-ceiling + declared member + free → ALLOW"                                  "$(scope_session_decide ALLOW 1 1 0)" "ALLOW"
+  ck "in-ceiling + declared NON-member → SESSION_DENY (narrows the ceiling)"        "$(scope_session_decide ALLOW 1 0 0)" "SESSION_DENY"
+  ck "in-ceiling + UNDECLARED → SESSION_UNDECLARED (fail-closed to nothing)"        "$(scope_session_decide ALLOW 0 0 0)" "SESSION_UNDECLARED"
+  ck "in-ceiling + declared member but HELD by another live session → SESSION_HELD" "$(scope_session_decide ALLOW 1 1 1)" "SESSION_HELD"
+  ck "FALLBACK_ALLOW + declared member + free → FALLBACK_ALLOW (own-only fallback survives the session)" "$(scope_session_decide FALLBACK_ALLOW 1 1 0)" "FALLBACK_ALLOW"
+  ck "FALLBACK_ALLOW + declared NON-member → SESSION_DENY (session narrows even the own-only fallback)"   "$(scope_session_decide FALLBACK_ALLOW 1 0 0)" "SESSION_DENY"
+  ck "FALLBACK_ALLOW + UNDECLARED → SESSION_UNDECLARED (undeclared acts on nothing, own repos included)"  "$(scope_session_decide FALLBACK_ALLOW 0 0 0)" "SESSION_UNDECLARED"
+  ck "UNDECLARED outranks HELD (never even reaches the cross-check)"                "$(scope_session_decide ALLOW 0 0 1)" "SESSION_UNDECLARED"
+  echo "== scope_effective (the effective set = session ∩ ceiling, in ceiling order) =="
+  ck "intersection keeps only shared names"                     "$(scope_effective "$(printf 'a\nb')" "$(printf 'a\nc')")" "a"
+  ck "a session name NOT in the ceiling is DROPPED (cannot exceed the ceiling)" "$(scope_effective "$(printf 'a\nz')" "$(printf 'a\nb')")" "a"
+  ck "empty session → empty effective set"                      "$(scope_effective "" "$(printf 'a\nb')")" ""
+  ck "empty ceiling → empty effective set"                      "$(scope_effective "$(printf 'a\nb')" "")" ""
+  ck "ceiling ORDER is preserved (not session order)"           "$(scope_effective "$(printf 'a\nb')" "$(printf 'b\na\nc')" | tr '\n' ' ')" "b a "
   echo; echo "repo-scope selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
 fi
@@ -253,14 +331,62 @@ is_own(){ # <repo> → rc 0 iff one of the apparatus's own repos
   return 1
 }
 
+# ---- PER-SESSION LAYER — the registry reads (only reached when $SCOPE_SESSION is set) ---------------
+# Lazily source the session registry ONCE. Deliberately NOT sourced at file top: with $SCOPE_SESSION
+# unset (the running poller) this file must not even depend on the registry — the layer is inert. The
+# sourced libs guard their own `set`/CLI on direct-execution only, so sourcing just defines functions.
+session_layer_init(){
+  [ -n "${_SESSION_LAYER_LOADED:-}" ] && return 0
+  # shellcheck source=session-registry.sh
+  . "$HERE/session-registry.sh"    # → _run_locked / _resolve_impl / _list_impl (+ session-id + lock-lib)
+  _SESSION_LAYER_LOADED=1
+}
+
+# session_declared_scope <sid> → the session's declared repos, one per line (empty ⇒ UNDECLARED: either
+# not registered, or registered with no repos — which register forbids, so empty ⟺ not registered).
+session_declared_scope(){
+  local raw; raw="$(_run_locked _resolve_impl "$1" 2>/dev/null)" || raw=""
+  printf '%s' "$raw" | tr ' ' '\n' | grep . || true
+}
+
+# repo_held_by_other <repo> <my-sid> → the sid of a LIVE session other than <my-sid> that holds <repo>
+# (registry `list` is liveness-filtered), or empty. The disjointness cross-check behind SESSION_HELD.
+repo_held_by_other(){
+  local repo="$1" mysid="$2" sid repos
+  while IFS=$'\t' read -r sid repos; do
+    [ -n "$sid" ] || continue
+    [ "$sid" = "$mysid" ] && continue
+    printf '%s\n' $repos | grep -qxF -- "$repo" && { printf '%s' "$sid"; return 0; }
+  done < <(_run_locked _list_impl 2>/dev/null)
+  return 0
+}
+
 case "${1:-}" in
   list)
+    if [ -z "${SCOPE_SESSION:-}" ]; then
+      # ── SCOPE_SESSION UNSET → byte-identical to the pre-session reader (the ceiling IS the answer) ──
+      if scope="$(read_scope)"; then
+        printf '%s\n' "$scope" | grep . || true
+      else
+        log "SCOPE CONFIG UNREADABLE ($SCOPE_FILE) — falling back to the apparatus's OWN repos ONLY: $SCOPE_OWN (R16 fail-closed; everything else is frozen until the config is readable)"
+        printf '%s\n' $SCOPE_OWN
+      fi
+      exit 0
+    fi
+    # ── SCOPE_SESSION SET → the effective set = session declared scope ∩ ceiling ──
     if scope="$(read_scope)"; then
-      printf '%s\n' "$scope" | grep . || true
+      ceiling_list="$(printf '%s\n' "$scope" | grep . || true)"
     else
       log "SCOPE CONFIG UNREADABLE ($SCOPE_FILE) — falling back to the apparatus's OWN repos ONLY: $SCOPE_OWN (R16 fail-closed; everything else is frozen until the config is readable)"
-      printf '%s\n' $SCOPE_OWN
+      ceiling_list="$(printf '%s\n' $SCOPE_OWN)"
     fi
+    session_layer_init
+    sscope="$(session_declared_scope "$SCOPE_SESSION")"
+    if [ -z "$sscope" ]; then
+      log "session '$SCOPE_SESSION' has declared NO operating scope — empty effective set; register it first (bin/session-registry.sh register <sid> <repo…>)"
+      exit 0
+    fi
+    scope_effective "$sscope" "$ceiling_list"
     exit 0;;
   check)
     repo="$(scope_norm "${2:-}")"
@@ -268,7 +394,21 @@ case "${1:-}" in
     if scope="$(read_scope)"; then readable=1; else readable=0; scope=""; fi
     own=0; is_own "$repo" && own=1
     member="$(scope_member "$repo" "$scope")"
-    case "$(scope_decide "$member" "$readable" "$own")" in
+    ceiling="$(scope_decide "$member" "$readable" "$own")"
+    if [ -z "${SCOPE_SESSION:-}" ]; then
+      # ── SCOPE_SESSION UNSET → the ceiling verdict IS the answer, byte-identical to the pre-session reader ──
+      verdict="$ceiling"
+    else
+      # ── SCOPE_SESSION SET → apply the per-session narrowing LAYER on top of the ceiling ──
+      session_layer_init
+      sscope="$(session_declared_scope "$SCOPE_SESSION")"
+      declared=0; [ -n "$sscope" ] && declared=1
+      smember=0; [ "$declared" = 1 ] && smember="$(scope_member "$repo" "$sscope")"
+      held_sid="$(repo_held_by_other "$repo" "$SCOPE_SESSION")"
+      held=0; [ -n "$held_sid" ] && held=1
+      verdict="$(scope_session_decide "$ceiling" "$declared" "$smember" "$held")"
+    fi
+    case "$verdict" in
       ALLOW) exit 0;;
       DENY)
         log "DENY: repo '$repo' is NOT in the maintainer-confirmed operating scope ($SCOPE_FILE) — R16: no action (add it via the confirmed-PR path, never a script default)"
@@ -279,6 +419,15 @@ case "${1:-}" in
       FALLBACK_DENY)
         log "DENY: scope config UNREADABLE ($SCOPE_FILE) and '$repo' is not one of the apparatus's own repos ($SCOPE_OWN) — R16 fail-closed: no action"
         exit 4;;
+      SESSION_UNDECLARED)
+        log "DENY: session '$SCOPE_SESSION' has declared NO operating scope — register it first (bin/session-registry.sh register <sid> <repo…>); fail-closed to nothing (R16/F6)"
+        exit 3;;
+      SESSION_DENY)
+        log "DENY: repo '$repo' is within the ceiling but OUTSIDE session '$SCOPE_SESSION' declared scope [$sscope] — a session only NARROWS the ceiling (R28)"
+        exit 3;;
+      SESSION_HELD)
+        log "DENY: repo '$repo' is held by another LIVE session '$held_sid' — R28 disjoint-scope: no action while another session holds it"
+        exit 3;;
     esac;;
   diff-adds)
     scope_diff_adds "${2:-$SCOPE_CONF_REL}"
