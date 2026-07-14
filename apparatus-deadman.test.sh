@@ -216,8 +216,10 @@ fi
 
 # ── MUTATION-CHECK 2 — neutralize the self-match exclusion ⇒ the decoy trips it ─────────────────────
 CP2="$ROOT/mut-self.sh"
-sed 's#\*/\$DEADMAN_POLLER_NAME\*--watch\*) return 0#*$DEADMAN_POLLER_NAME*--watch*) return 0#' "$SCRIPT" > "$CP2"; chmod +x "$CP2"
-if grep -qF '*$DEADMAN_POLLER_NAME*--watch*) return 0' "$CP2" && ! grep -qF '*$DEADMAN_POLLER_NAME*--watch*) return 0' "$SCRIPT"; then
+# the self-match guard now lives in poller_pids (the ONE detector poller_alive + the responder share);
+# neutralize its slash-anchor exactly as before, just on the printf-emitting line.
+sed 's#\*/\$DEADMAN_POLLER_NAME\*--watch\*) printf#*$DEADMAN_POLLER_NAME*--watch*) printf#' "$SCRIPT" > "$CP2"; chmod +x "$CP2"
+if grep -qF '*$DEADMAN_POLLER_NAME*--watch*) printf' "$CP2" && ! grep -qF '*$DEADMAN_POLLER_NAME*--watch*) printf' "$SCRIPT"; then
   S="$ROOT/mut2"; new_origin_and_clone "$S"; freshlog "$ROOT/mut2.log"; : > "$GH_CALLS"
   start_decoy   # decoy running, NO genuine poller
   OUT_o="$(env DEADMAN_CLONE="$S" DEADMAN_STATE="$(freshstate)" DEADMAN_EXPECT_POLLER=1 \
