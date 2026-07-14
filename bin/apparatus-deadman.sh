@@ -9,12 +9,35 @@
 # (entrypoint.sh launches it beside — never inside — the poller), reads LIVE FACTS every check (never
 # memory), and SURFACES anomalies on its own so no human and no agent has to remember to look.
 #
-# READ-ONLY, ALWAYS. The deadman WATCHES; it never fixes. It NEVER pulls / merges / checks-out / resets
-# the clone — the ONLY writer of the clone is poller-service.sh. Its only "write" is an issue on the
-# control repo. It gets the true origin tip from `git ls-remote` (authoritative, writes NOTHING) and
-# uses a bounded `git fetch` ONLY to bring objects local for the behind-COUNT — fetch touches remote-
-# tracking refs, never HEAD / index / the working tree. Every git/gh call is `timeout`-bounded so the
-# watcher itself can never hang. Tooling: coreutils + git + gh only (no diff/cmp/awk/sed).
+# THE CLONE IS NEVER PULLED / MERGED / CHECKED-OUT / RESET by this watcher — the ONLY writer of the
+# clone is poller-service.sh. It gets the true origin tip from `git ls-remote` (authoritative, writes
+# NOTHING) and uses a bounded `git fetch` ONLY to bring objects local for the behind-COUNT — fetch
+# touches remote-tracking refs, never HEAD / index / the working tree. Every git/gh call is
+# `timeout`-bounded so the watcher itself can never hang. Tooling: coreutils + git + gh only (no
+# diff/cmp/awk/sed).
+#
+# THE AUTONOMOUS RESPONDER (R18 recovery arm). `--check` is READ-ONLY, ALWAYS — a pure diagnostic that
+# mutates nothing (set DEADMAN_RESPOND=1 to opt a --check into responding, for tests). Only the active
+# `--watch` loop RESPONDS: on each anomaly it detects, BEFORE surfacing, it attempts a DETERMINISTIC,
+# IDEMPOTENT, NEVER-DESTRUCTIVE recovery within a tight envelope, and refuses-and-surfaces anything it
+# is not certain is safe. The pure decision core is respond_plan(); the I/O layer performs the action:
+#   * SELF_REFRESH_BLOCKED (dirty+behind) — if EVERY dirty entry is UNTRACKED (`??`), QUARANTINE the
+#     strays (mv into $DEADMAN_STATE/deadman-quarantine/<ts>/, path preserved — NEVER rm, NEVER
+#     git clean) so the clone goes clean and self-refresh can ff. If ANY entry is a TRACKED change
+#     (a real edit may be intentional) — or the paths are not cleanly nameable — it TOUCHES NOTHING
+#     and SURFACES. The clone's HEAD, index and tracked files are never written; no pull/merge/reset.
+#   * POLLER_FROZEN — send ONE SIGTERM to the wedged poller (identified via the SAME self-match-safe
+#     poller_pids detection, never a loose string; never our own pid, never a stranger). It traps TERM,
+#     exits cleanly, its supervisor relaunches it, work resumes from GitHub (idempotent).
+#   * POLLER_DOWN — hold ONE grace window for the supervisor to relaunch (the responder never launches
+#     supervision itself); still down next check ⇒ SURFACE.
+#   * MERGED_NOT_LIVE (clean clone) — self-refresh (the single writer) owns the pull; the responder must
+#     NOT pull ⇒ SURFACE as unexplained.
+# IDEMPOTENT + ESCALATING: the responder acts AT MOST ONCE per distinct anomaly occurrence (a $STATE
+# marker keyed to the anomaly token, cleared when that anomaly is no longer present / the loop is
+# healthy). Finding the SAME anomaly STILL present after it already acted is NOT a re-act — it ESCALATES
+# (surfaces loudly that auto-recovery was attempted and did not clear it). Never loop-acts. Every
+# recovery action is logged AND noted on the surfaced/updated alarm issue (audit).
 #
 # THE FOUR ANOMALIES (the DECISION is the pure, --selftest-covered deadman_verdict; the facts are
 # gathered separately by the I/O layer):
@@ -45,16 +68,21 @@
 # writes and logs minimally. Dedup state is a single idempotent marker ($DEADMAN_STATE/anomaly.open) plus
 # the by-title discovery, so a wiped box never double-files.
 #
-#   apparatus-deadman.sh --check     one-shot: print verdict + reasons; rc 0 = healthy, non-zero = anomaly
-#   apparatus-deadman.sh --watch     loop every DEADMAN_INTERVAL, surfacing/clearing as it goes
-#   apparatus-deadman.sh --selftest  exercise the pure core (streak_next, deadman_verdict); no git/gh/net
+#   apparatus-deadman.sh --check     one-shot READ-ONLY diagnostic: print verdict + reasons; rc 0 =
+#                                    healthy, non-zero = anomaly. Does NOT respond (mutates nothing)
+#                                    unless DEADMAN_RESPOND=1 is set (the test seam).
+#   apparatus-deadman.sh --watch     loop every DEADMAN_INTERVAL, RESPONDING to + surfacing/clearing
+#                                    anomalies as it goes (the autonomous responder is active here).
+#   apparatus-deadman.sh --selftest  exercise the pure core (streak_next, deadman_verdict, dirty_class,
+#                                    respond_plan); no git/gh/net.
 #
 # ENV (all defaulted): DEADMAN_REPO (oso-gato/fedora-bootstrap) · DEADMAN_TITLE ("APPARATUS LIVENESS
 # DEADMAN" — the discovery prefix) · DEADMAN_INTERVAL (120s) · DEADMAN_LAG_MAX (3 checks) ·
 # DEADMAN_SWEEP_MAX (300s) · DEADMAN_UNREADABLE_MAX (3) · DEADMAN_EXPECT_POLLER (1) · DEADMAN_CLONE (the
 # live clone, one level up from bin/) · DEADMAN_REMOTE/BRANCH (origin/main) · DEADMAN_POLLER_LOG
 # (~/.local/state/pr-poller/poller.log) · DEADMAN_POLLER_NAME (pr-poller.sh — the script basename to
-# match) · DEADMAN_STATE (~/.local/state/apparatus-deadman) · DEADMAN_GIT_TIMEOUT / DEADMAN_GH_TIMEOUT (30s).
+# match) · DEADMAN_STATE (~/.local/state/apparatus-deadman) · DEADMAN_GIT_TIMEOUT / DEADMAN_GH_TIMEOUT (30s)
+# · DEADMAN_RESPOND (0 — set 1 to make --check respond; --watch always responds).
 set -uo pipefail
 
 HERE="$(dirname "$(readlink -f "$0")")"
@@ -129,6 +157,62 @@ deadman_verdict(){
   fi
 }
 
+# dirty_class <git-status-porcelain> -> EMPTY | UNTRACKED_ONLY | HAS_TRACKED | UNPARSEABLE
+#   THE LOAD-BEARING UNTRACKED-ONLY GUARD (pure, --selftest-covered). It decides — all-or-nothing —
+#   whether a dirty clone is SAFE to quarantine: only when EVERY entry is an UNTRACKED stray (`??`) that
+#   is cleanly nameable. A single TRACKED change (M/A/D/R/C/space-M …) makes the WHOLE set HAS_TRACKED
+#   (a real edit may be intentional; the responder must never touch it). A path git had to C-quote (a
+#   name with a quote/newline/tab) is UNPARSEABLE ⇒ fail-closed to "do not act". EMPTY = clean.
+#   Porcelain v1: each line is `XY PATH`; XY at columns 1-2, PATH from column 4. `??`=untracked.
+dirty_class(){
+  local raw="$1" line saw=0 tracked path
+  [ -n "$raw" ] || { printf EMPTY; return; }
+  # PASS 1 — ANY tracked change dominates (safety wins over everything: HAS_TRACKED ⇒ never act).
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    saw=1
+    tracked=0; case "${line:0:2}" in '??') ;; *) tracked=1;; esac
+    [ "$tracked" = 1 ] && { printf HAS_TRACKED; return; }   # MUTATION-SEAM(untracked-only): the guard
+  done <<<"$raw"
+  [ "$saw" = 1 ] || { printf EMPTY; return; }
+  # PASS 2 — all untracked: every stray must be cleanly nameable to be quarantined; else fail closed.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    path="${line:3}"
+    case "$path" in ''|'"'*) printf UNPARSEABLE; return;; esac   # git C-quoted the name ⇒ don't touch it
+  done <<<"$raw"
+  printf UNTRACKED_ONLY
+}
+
+# respond_plan <token> <acted:0|1> <dirty_class> <have_target:0|1>
+#   -> QUARANTINE | SIGTERM | WAIT | SURFACE | ESCALATE   (the PURE recovery decision; --selftest-covered)
+# Facts in, ACTION out — the I/O layer performs the action. IDEMPOTENT: <acted>=1 means the responder
+# ALREADY acted on this ongoing occurrence (its per-token marker is present); finding the same anomaly
+# still present after acting ESCALATES, it never re-acts (no loop-acting). SURFACE = the responder takes
+# NO recovery action; the anomaly rides the normal surfacing path.
+respond_plan(){
+  local token="$1" acted="$2" dclass="$3" have_target="$4"
+  case "$token" in
+    SELF_REFRESH_BLOCKED)
+      # ONLY an all-untracked, cleanly-nameable dirty set is quarantined; anything else is surfaced,
+      # untouched (tracked edits may be intentional — the load-bearing safety of the whole responder).
+      case "$dclass" in
+        UNTRACKED_ONLY) [ "$acted" = 1 ] && printf ESCALATE || printf QUARANTINE ;;
+        *)              printf SURFACE ;;
+      esac ;;
+    POLLER_FROZEN)
+      # signal ONLY a self-match-confirmed poller pid; none found ⇒ surface rather than signal a stranger.
+      if   [ "$have_target" != 1 ]; then printf SURFACE
+      elif [ "$acted" = 1 ];        then printf ESCALATE
+      else                               printf SIGTERM; fi ;;
+    POLLER_DOWN)
+      # never launch supervision here: hold ONE grace window, then surface if still down.
+      [ "$acted" = 1 ] && printf SURFACE || printf WAIT ;;
+    *)  # MERGED_NOT_LIVE (self-refresh owns the pull — the responder must NOT pull), CANNOT_VERIFY, etc.
+      printf SURFACE ;;
+  esac
+}
+
 # ── SELFTEST — the pure core only, so it can run anywhere (CI, a bare shell) with no side effects ──────
 if [ "${1:-}" = "--selftest" ]; then
   p=0 f=0
@@ -174,6 +258,35 @@ if [ "${1:-}" = "--selftest" ]; then
                              "$(tok 2  3 6  ''      1 400  0 0  1 3 300 3)" "MERGED_NOT_LIVE,POLLER_FROZEN,"
   ck "combined: cannot-verify + poller-down" \
                              "$(tok -1 0 0  ''      0 10   1 3  1 3 300 3)" "CANNOT_VERIFY,POLLER_DOWN,"
+
+  echo "== dirty_class (porcelain → classification; the load-bearing untracked-only guard) =="
+  ck "clean → EMPTY"                    "$(dirty_class "")" EMPTY
+  ck "only ?? → UNTRACKED_ONLY"         "$(dirty_class '?? a.txt
+?? bin/b.sh')" UNTRACKED_ONLY
+  ck "a modified (space-M) → HAS_TRACKED"  "$(dirty_class ' M tracked.txt')" HAS_TRACKED
+  ck "staged add (A ) → HAS_TRACKED"       "$(dirty_class 'A  added.txt')" HAS_TRACKED
+  ck "deleted ( D) → HAS_TRACKED"          "$(dirty_class ' D gone.txt')" HAS_TRACKED
+  ck "rename (R ) → HAS_TRACKED"           "$(dirty_class 'R  old.txt -> new.txt')" HAS_TRACKED
+  ck "MIX ?? + tracked → HAS_TRACKED (safety wins)" \
+                                       "$(dirty_class '?? stray.txt
+ M tracked.txt')" HAS_TRACKED
+  ck "quoted untracked → UNPARSEABLE"   "$(dirty_class '?? "weird name".txt')" UNPARSEABLE
+
+  echo "== respond_plan (facts → recovery ACTION; the pure decision core) =="
+  #                                                      token                acted dclass         target
+  ck "SRB untracked, not acted → QUARANTINE" "$(respond_plan SELF_REFRESH_BLOCKED 0 UNTRACKED_ONLY 0)" QUARANTINE
+  ck "SRB untracked, ALREADY acted → ESCALATE" "$(respond_plan SELF_REFRESH_BLOCKED 1 UNTRACKED_ONLY 0)" ESCALATE
+  ck "SRB tracked → SURFACE (never touch)"   "$(respond_plan SELF_REFRESH_BLOCKED 0 HAS_TRACKED 0)" SURFACE
+  ck "SRB tracked stays SURFACE even if acted" "$(respond_plan SELF_REFRESH_BLOCKED 1 HAS_TRACKED 0)" SURFACE
+  ck "SRB unparseable → SURFACE"             "$(respond_plan SELF_REFRESH_BLOCKED 0 UNPARSEABLE 0)" SURFACE
+  ck "FROZEN + target, not acted → SIGTERM"  "$(respond_plan POLLER_FROZEN 0 - 1)" SIGTERM
+  ck "FROZEN + target, ALREADY acted → ESCALATE" "$(respond_plan POLLER_FROZEN 1 - 1)" ESCALATE
+  ck "FROZEN + NO target → SURFACE (never signal a stranger)" "$(respond_plan POLLER_FROZEN 0 - 0)" SURFACE
+  ck "DOWN first sighting → WAIT (grace)"    "$(respond_plan POLLER_DOWN 0 - 0)" WAIT
+  ck "DOWN still down → SURFACE"             "$(respond_plan POLLER_DOWN 1 - 0)" SURFACE
+  ck "MERGED_NOT_LIVE → SURFACE (never pull)" "$(respond_plan MERGED_NOT_LIVE 0 - 1)" SURFACE
+  ck "CANNOT_VERIFY → SURFACE"               "$(respond_plan CANNOT_VERIFY 0 - 1)" SURFACE
+
   echo; echo "apparatus-deadman selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
 fi
@@ -189,7 +302,7 @@ read_int(){ local v; v="$(cat "$1" 2>/dev/null)"; case "$v" in ''|*[!0-9]*) prin
 # and it sidesteps the stale remote-tracking-ref trap a narrow fetch refspec can cause); `git fetch`
 # runs ONLY to bring objects local for the exact behind-COUNT and never touches HEAD/index/worktree.
 git_facts(){
-  G_UNREAD=0; G_BEHIND=0; G_DIRTY=""; G_WHY=""
+  G_UNREAD=0; G_BEHIND=0; G_DIRTY=""; G_DIRTY_RAW=""; G_WHY=""
   local clone="$DEADMAN_CLONE" head remote cnt
   # accept a normal clone OR a git worktree (fresh-tree.sh worktrees carry a .git FILE, not a dir).
   if ! timeout "$DEADMAN_GIT_TIMEOUT" git -C "$clone" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -199,8 +312,13 @@ git_facts(){
   if [ -z "$head" ]; then G_UNREAD=1; G_WHY="cannot read HEAD of $clone"; return; fi
   remote="$(timeout "$DEADMAN_GIT_TIMEOUT" git -C "$clone" ls-remote "$DEADMAN_REMOTE" "refs/heads/$DEADMAN_BRANCH" 2>/dev/null | head -n1 | cut -f1)" || remote=""
   if [ -z "$remote" ]; then G_UNREAD=1; G_WHY="cannot reach $DEADMAN_REMOTE/$DEADMAN_BRANCH (ls-remote failed)"; return; fi
-  # dirty state — READ ONLY (status never mutates). Paths start at column 4 of --porcelain.
-  G_DIRTY="$(timeout "$DEADMAN_GIT_TIMEOUT" git -C "$clone" status --porcelain 2>/dev/null | cut -c4- | tr '\n' ' ')"
+  # dirty state — READ ONLY (status never mutates). G_DIRTY_RAW keeps the FULL porcelain (XY code +
+  # path) for the responder's untracked-only classification; quotepath=false keeps non-ASCII paths
+  # literal (a name git must C-quote still gets a leading `"`, which dirty_class treats as UNPARSEABLE).
+  # G_DIRTY is the space-joined PATHS (column 4+) for the verdict's human reason — derived from the
+  # same single read so the two can never disagree.
+  G_DIRTY_RAW="$(timeout "$DEADMAN_GIT_TIMEOUT" git -C "$clone" -c core.quotepath=false status --porcelain 2>/dev/null)"
+  G_DIRTY="$(printf '%s' "$G_DIRTY_RAW" | cut -c4- | tr '\n' ' ')"
   while [ "${G_DIRTY% }" != "$G_DIRTY" ]; do G_DIRTY="${G_DIRTY% }"; done   # trim trailing space, pure bash
   if [ "$head" = "$remote" ]; then G_BEHIND=0; return; fi
   # HEAD differs from the tip → bring objects local to COUNT (fetch is read-only to HEAD/index/worktree).
@@ -212,9 +330,12 @@ git_facts(){
   esac
 }
 
-# poller_alive — is a genuine `pr-poller.sh --watch` process running? SELF-MATCH-SAFE, pgrep-free: scan
-# /proc directly and CONFIRM each candidate by its real script PATH, never a loose string match.
-poller_alive(){
+# poller_pids — echo the PID of every genuine `<name> --watch` process (newline-separated; empty = none).
+# SELF-MATCH-SAFE, pgrep-free: scan /proc directly and CONFIRM each candidate by its real script PATH,
+# never a loose string match. This is the ONE detector — poller_alive AND the responder's SIGTERM target
+# both derive from it, so the self-match safety (5 prior self-match incidents) lives in exactly one place
+# and the responder can never signal our own pid, a matcher, or a bare-string decoy.
+poller_pids(){
   local d pid cmd comm
   for d in /proc/[0-9]*; do
     pid="${d#/proc/}"
@@ -228,10 +349,11 @@ poller_alive(){
     # SELF-MATCH GUARD (mutation seam): a GENUINE poller runs the real SCRIPT PATH ".../pr-poller.sh …
     # --watch"; a shell / decoy / self carrying only the bare string has no slash-anchored path. Neutralize
     # the "/" and a decoy trips this (the test's non-vacuity check).
-    case "$cmd" in */$DEADMAN_POLLER_NAME*--watch*) return 0;; esac
+    case "$cmd" in */$DEADMAN_POLLER_NAME*--watch*) printf '%s\n' "$pid";; esac
   done
-  return 1
 }
+# poller_alive — rc 0 iff at least one genuine poller is running (the boolean over poller_pids).
+poller_alive(){ [ -n "$(poller_pids)" ]; }
 
 # poller_log_age — seconds since the poller log mtime last advanced, or -1 if the log is missing/unreadable.
 poller_log_age(){
@@ -241,6 +363,118 @@ poller_log_age(){
   now="$(date +%s)"
   printf '%s' "$(( now - m ))"
 }
+
+# ── AUTONOMOUS RESPONDER (the recovery arm; only reached under --watch or DEADMAN_RESPOND=1) ───────────
+# Design law: respond_plan() (pure, above) DECIDES; these functions PERFORM. Every action is deterministic,
+# idempotent, and never destructive — quarantining an untracked stray touches neither HEAD, the index, nor
+# any tracked file, and a SIGTERM goes only to a self-match-confirmed poller pid. Anything not provably
+# safe SURFACEs instead of acting.
+
+# marker_path <token> — the per-anomaly idempotency marker ("this occurrence was already acted on").
+marker_path(){ printf '%s/responder/%s.acted' "$DEADMAN_STATE" "$1"; }
+
+# quarantine_strays <clone> <raw-porcelain> <quarantine-dir> — MOVE each untracked stray into the
+# quarantine dir, PATH PRESERVED. NEVER rm, NEVER git clean, NEVER touches a tracked path. Echoes the
+# moved paths (space-joined). PRECONDITION: only ever called when dirty_class(raw)==UNTRACKED_ONLY — the
+# single load-bearing guard is dirty_class; this mover trusts it (a mixed/tracked set never reaches here).
+quarantine_strays(){
+  local clone="$1" raw="$2" qdir="$3" line path src dst moved=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    path="${line:3}"
+    case "$path" in ''|'"'*) continue;; esac         # belt: an unnameable path is never moved
+    src="$clone/$path"; dst="$qdir/$path"
+    [ -e "$src" ] || continue
+    mkdir -p "$qdir/$(dirname "$path")" 2>/dev/null || continue
+    mv "$src" "$dst" 2>/dev/null && moved="$moved $path"
+  done <<<"$raw"
+  printf '%s' "${moved# }"
+}
+
+# respond_act <token> <plan> <poller-pids> — perform the plan's side effect, manage the idempotency
+# marker, and echo ONE audit line `TOKEN|human note` (or nothing). Markers are written for the "first
+# response" actions (QUARANTINE / SIGTERM / WAIT); ESCALATE/SURFACE leave any existing marker as-is.
+respond_act(){
+  local token="$1" plan="$2" pids="$3" mk qdir ts moved p killed
+  mk="$(marker_path "$token")"
+  case "$plan" in
+    QUARANTINE)
+      ts="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)"
+      qdir="$DEADMAN_STATE/deadman-quarantine/$ts"
+      mkdir -p "$qdir" 2>/dev/null || true
+      moved="$(quarantine_strays "$DEADMAN_CLONE" "$G_DIRTY_RAW" "$qdir")"
+      printf 'quarantined [%s] -> %s\n' "$moved" "$qdir" > "$mk"
+      log "RESPOND $token: QUARANTINED untracked stray(s) [$moved] -> $qdir (clone goes clean; self-refresh can ff)"
+      printf '%s|auto-recovery QUARANTINED untracked stray(s) [%s] into %s so the clone goes clean and self-refresh can fast-forward. Nothing tracked was touched (HEAD, index and every tracked file are unchanged); no pull/merge/reset/checkout/clean was run.' "$token" "$moved" "$qdir"
+      ;;
+    SIGTERM)
+      killed=""
+      for p in $pids; do
+        [ -n "$p" ] || continue
+        [ "$p" = "$$" ] && continue                    # belt: never ourselves (poller_pids already excludes)
+        kill -TERM "$p" 2>/dev/null && killed="$killed $p"
+      done
+      printf 'sigterm ->%s\n' "$killed" > "$mk"
+      log "RESPOND $token: sent ONE SIGTERM ->${killed:- (no pid)}"
+      printf '%s|auto-recovery sent ONE SIGTERM to the wedged poller (pid(s):%s) — it traps TERM, exits cleanly, its supervisor relaunches it and work resumes from GitHub (idempotent). Kicked at most once for this anomaly window.' "$token" "$killed"
+      ;;
+    WAIT)
+      printf 'grace\n' > "$mk"
+      log "RESPOND $token: WAIT — holding one grace window for the supervisor to relaunch the poller"
+      printf '%s|auto-recovery is holding ONE grace window for the supervisor to relaunch the poller; the responder does NOT launch supervision itself. If it is still down next check this SURFACES for a human.' "$token"
+      ;;
+    ESCALATE)
+      log "RESPOND $token: ESCALATE — auto-recovery already attempted, anomaly persists; NOT acting again"
+      printf '%s|ESCALATION — auto-recovery was ALREADY attempted for this anomaly and it is STILL present. The responder will NOT act again (no loop-acting); a human must intervene.' "$token"
+      ;;
+    SURFACE|*)
+      case "$token" in
+        SELF_REFRESH_BLOCKED) printf '%s|auto-recovery DECLINED — the dirty clone carries a TRACKED or unparseable change; a real edit may be intentional, so NOTHING was moved, cleaned or reset. Surfacing for a human.' "$token" ;;
+        MERGED_NOT_LIVE)      printf '%s|auto-recovery not applicable — the clone is clean; only the poller self-refresh (the single writer) may pull it, and the responder must not. Surfacing as unexplained.' "$token" ;;
+        POLLER_FROZEN)        printf '%s|auto-recovery could NOT identify a safe poller pid (self-match-safe detection found none) — surfacing rather than signalling a stranger.' "$token" ;;
+        POLLER_DOWN)          printf '%s|auto-recovery DECLINED — the responder does not launch supervision and the grace window has elapsed with the poller still down. Surfacing for a human.' "$token" ;;
+        *)                    printf '%s|auto-recovery not applicable; surfacing for a human.' "$token" ;;
+      esac
+      ;;
+  esac
+}
+
+# deadman_respond <reasons> <poller-pids> — run respond_plan/respond_act for EACH detected anomaly,
+# gather the audit notes into RESP_NOTES (read by the caller's dynamic scope). Facts computed ONCE.
+deadman_respond(){
+  local reasons="$1" pids="$2" line token acted plan note dclass have_target
+  mkdir -p "$DEADMAN_STATE/responder" 2>/dev/null || true
+  dclass="$(dirty_class "$G_DIRTY_RAW")"
+  have_target=0; [ -n "$pids" ] && have_target=1
+  RESP_NOTES=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    token="${line%%|*}"
+    acted=0; [ -f "$(marker_path "$token")" ] && acted=1
+    plan="$(respond_plan "$token" "$acted" "$dclass" "$have_target")"
+    note="$(respond_act "$token" "$plan" "$pids")"
+    [ -n "$note" ] && RESP_NOTES="$RESP_NOTES$note"$'\n'
+  done <<<"$reasons"
+}
+
+# responder_prune <reasons> — an occurrence ends when its anomaly is no longer present: drop the acted
+# marker for any token NOT in the current reasons, so a later RE-occurrence gets a fresh action (not a
+# stale ESCALATE). Keeps per-token idempotency independent of which OTHER anomalies stand.
+responder_prune(){
+  local reasons="$1" dir="$DEADMAN_STATE/responder" f base token
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*.acted; do
+    [ -e "$f" ] || continue
+    base="${f##*/}"; token="${base%.acted}"
+    case "$reasons" in
+      *"$token|"*) : ;;                                  # still present ⇒ keep the marker (would ESCALATE)
+      *) rm -f "$f"; log "RESPOND: cleared stale acted-marker for $token (occurrence ended)";;
+    esac
+  done
+}
+
+# responder_reset — a CONFIRMED-healthy check ends every occurrence: drop all acted markers.
+responder_reset(){ rm -f "$DEADMAN_STATE/responder"/*.acted 2>/dev/null || true; }
 
 # find_open_issue — discover the ONE anomaly issue BY TITLE prefix (fleet-halt's discipline: no hardcoded
 # number; the search matches words, the strict local prefix is the contract). Echoes a number or nothing.
@@ -255,23 +489,32 @@ find_open_issue(){
   done <<<"$rows"
 }
 
-# fmt_body <reasons> — the issue body: the current anomalies + a timestamp.
+# fmt_body <reasons> [resp-notes] — the issue body: the current anomalies + the auto-recovery actions
+# taken (audit) + a timestamp.
 fmt_body(){
-  local reasons="$1" line
+  local reasons="$1" resp="${2:-}" line
   printf '**Apparatus deadman → operator [liveness anomaly]:** the running loop failed a liveness check at %s. Current anomalies:\n\n' "$(now_iso)"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     printf -- '- **%s** — %s\n' "${line%%|*}" "${line#*|}"
   done <<<"$reasons"
-  printf '\n<sub>apparatus liveness deadman (R18); an INDEPENDENT read-only watcher — it never merges and never writes the clone. This issue is updated in place while any anomaly stands and closed automatically when the loop is healthy again.</sub>\n'
+  if [ -n "$resp" ]; then
+    printf '\n**Auto-recovery (responder) — actions taken this check:**\n\n'
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf -- '- **%s** — %s\n' "${line%%|*}" "${line#*|}"
+    done <<<"$resp"
+  fi
+  printf '\n<sub>apparatus liveness deadman (R18); an INDEPENDENT watcher that never merges and never pulls/merges/resets the clone. Under --watch it also RESPONDS within a safe envelope (quarantine untracked strays; SIGTERM a wedged poller) and records what it did here. This issue is updated in place while any anomaly stands and closed automatically when the loop is healthy again.</sub>\n'
 }
 
-# surface_anomaly <reasons> — create-or-UPDATE the ONE issue, dedup via the marker + by-title discovery.
+# surface_anomaly <reasons> [resp-notes] — create-or-UPDATE the ONE issue, dedup via the marker + by-title
+# discovery. The responder's audit notes ride the body so the record shows what auto-recovery did.
 surface_anomaly(){
-  local reasons="$1" mk="$DEADMAN_STATE/anomaly.open" num body tmp url
+  local reasons="$1" resp="${2:-}" mk="$DEADMAN_STATE/anomaly.open" num body tmp url
   num="$(cat "$mk" 2>/dev/null)"; case "$num" in ''|*[!0-9]*) num="";; esac
   [ -n "$num" ] || num="$(find_open_issue)"     # marker lost? discover by title so we never double-file
-  body="$(fmt_body "$reasons")"
+  body="$(fmt_body "$reasons" "$resp")"
   tmp="$(mktemp)"; printf '%s\n' "$body" > "$tmp"
   if [ -n "$num" ]; then
     if timeout "$DEADMAN_GH_TIMEOUT" gh issue edit "$num" --repo "$DEADMAN_REPO" --body-file "$tmp" >/dev/null 2>&1; then
@@ -305,14 +548,16 @@ clear_anomaly(){
   rm -f "$mk"
 }
 
-# run_check — ONE check: gather live facts, update the streaks, compute the verdict, act (surface/clear),
-# print the verdict to stdout. rc 0 = healthy, non-zero = anomaly.
+# run_check [respond:0|1] — ONE check: gather live facts, update the streaks, compute the verdict, act
+# (respond/surface/clear), print the verdict to stdout. rc 0 = healthy, non-zero = anomaly. respond=1
+# (the --watch default) activates the autonomous responder; respond=0 (the --check default) is READ-ONLY.
 run_check(){
+  local respond="${1:-0}"
   mkdir -p "$DEADMAN_STATE" 2>/dev/null || true
   git_facts
   local unreadable_now="$G_UNREAD" behind="$G_BEHIND" dirty="$G_DIRTY" why="$G_WHY"
-  local alive lage
-  poller_alive && alive=1 || alive=0
+  local pids alive lage
+  pids="$(poller_pids)"; [ -n "$pids" ] && alive=1 || alive=0   # ONE self-match-safe scan: alive + target
   lage="$(poller_log_age)"
   # streaks — persisted so the "for M min / N checks" thresholds survive across one-shot --check runs too.
   local lag_cond=0
@@ -338,6 +583,7 @@ run_check(){
     fi
     log "healthy (behind=$behind poller_alive=$alive log_age=${lage}s)"
     echo "HEALTHY"
+    [ "$respond" = 1 ] && responder_reset   # a CONFIRMED-healthy check ends every occurrence (fresh next time)
     clear_anomaly
     return 0
   fi
@@ -349,17 +595,26 @@ run_check(){
     echo "$line"
     log "ANOMALY ${line%%|*}: ${line#*|}"
   done <<<"$reasons"
-  surface_anomaly "$reasons"
+
+  # RESPOND — BEFORE surfacing, so the audit notes ride the issue body. Read-only under respond=0.
+  local RESP_NOTES="" rl
+  if [ "$respond" = 1 ]; then
+    deadman_respond "$reasons" "$pids"   # sets RESP_NOTES (dynamic scope); performs actions + markers
+    responder_prune "$reasons"           # drop markers for anomalies no longer present
+    while IFS= read -r rl; do [ -n "$rl" ] && echo "RESPOND ${rl%%|*}: ${rl#*|}"; done <<<"$RESP_NOTES"
+  fi
+
+  surface_anomaly "$reasons" "$RESP_NOTES"
   return 1
 }
 
 case "${1:-}" in
-  --check) run_check; exit $?;;
+  --check) run_check "${DEADMAN_RESPOND:-0}"; exit $?;;   # READ-ONLY by default; DEADMAN_RESPOND=1 opts in
   --watch)
     trap 'log "deadman stopping (signal)"; exit 0' TERM INT HUP
-    log "apparatus-deadman --watch up (interval=${DEADMAN_INTERVAL}s clone=$DEADMAN_CLONE repo=$DEADMAN_REPO expect_poller=$DEADMAN_EXPECT_POLLER)"
+    log "apparatus-deadman --watch up (interval=${DEADMAN_INTERVAL}s clone=$DEADMAN_CLONE repo=$DEADMAN_REPO expect_poller=$DEADMAN_EXPECT_POLLER responder=on)"
     while :; do
-      run_check >/dev/null || true    # the verdict rides the log in --watch; stdout is for --check
+      run_check 1 >/dev/null || true    # --watch RESPONDS; the verdict + actions ride the log
       sleep "$DEADMAN_INTERVAL"
     done
     ;;
