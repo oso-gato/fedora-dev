@@ -28,6 +28,16 @@ SLUG="$ORG/$REPO"
 WAIT_TIMEOUT="${HOST_TICKET_TIMEOUT:-600}"   # seconds to wait for a host-agent response (--wait)
 POLL_INTERVAL="${HOST_TICKET_POLL:-10}"      # matches the host agent's 10s cadence
 
+# MULTI-SESSION TICKET ISOLATION (R3): every ticket is STAMPED with the filing session's name, and a
+# session can read back ONLY its own tickets' results. The name comes from bin/session-id.sh's
+# session_id() — the SAME minter every actuator in the session shares — so all of one session's
+# host-ticket.sh calls stamp identically. SESSION_ID_LIB is a test seam (default the sibling) so a
+# neutralized copy of this file can still source the real minter.
+HT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SESSION_ID_LIB="${SESSION_ID_LIB:-$HT_DIR/session-id.sh}"
+# shellcheck source=session-id.sh
+. "$SESSION_ID_LIB"
+
 die(){ echo "host-ticket: $*" >&2; exit 1; }
 log(){ echo "host-ticket: $*" >&2; }
 
@@ -44,6 +54,14 @@ outcome_of(){
   printf '%s\n' "$b" | grep -qiE 'host-agent:[*[:space:]]*failed' && { echo failed; return 0; }
   echo ""; return 0
 }
+# session_of: given an issue body on stdin, echo the SID on its FIRST `host-session: <SID>` line, or ""
+# if none. Anchored to the WHOLE line at column 0 (the stamp's byte position) so the same string quoted
+# in prose can never be read as the stamp — the ownership fact the isolation enforcement rests on.
+session_of(){
+  local s; s="$(grep -m1 '^host-session: ' 2>/dev/null || true)"
+  s="${s#host-session: }"; s="${s%$'\r'}"
+  printf '%s' "$s"
+}
 
 if [ "${1:-}" = "--selftest" ]; then
   f=0
@@ -56,6 +74,53 @@ if [ "${1:-}" = "--selftest" ]; then
   # a DEFERRED redeploy is reported by the consumer as DONE → producer reads done:
   [ "$(printf '%s' "**host-agent: DONE** — redeploy 'x' DEFERRED — workload busy" | outcome_of)" = done ] && echo "ok: deferred=done" || { echo "FAIL deferred"; f=1; }
   [ "$f" = 0 ] && echo "ALL HOST-TICKET SELFTESTS PASS" || echo "HOST-TICKET SELFTESTS FAILED"; exit "$f"
+fi
+
+# The filing session's STABLE name — the same for every host-ticket.sh call this session makes (that is
+# the whole property isolation rests on: see bin/session-id.sh). HOST_SESSION_ID is a direct test
+# override; production leaves it unset and drives the SID through CLAUDE_CODE_SESSION_ID → session_id().
+SID="${HOST_SESSION_ID:-$(session_id)}"
+[ -n "$SID" ] || die "session_id() yielded an EMPTY SID — refusing to file or read an unstamped ticket"
+
+# ---- --mine: list only THIS session's OPEN host-task tickets (<number>\t<title>) -------------------
+if [ "${1:-}" = "--mine" ]; then
+  # gh returns EVERY open host-task issue as `<number>\t<title>\t<its host-session stamp>`: jq splits each
+  # body on newlines and lifts the FIRST `host-session: ` line's value (a single token — no tabs, no
+  # newlines — so one issue = exactly one @tsv line). The SID FILTER lives HERE in shell, never in gh: a
+  # ticket is mine iff its lifted stamp EQUALS my SID. That this equality — not gh — is what selects is
+  # exactly what the isolation proof mutation-checks (neutralize the compare and another session leaks in).
+  gh issue list --repo "$SLUG" --label "$LABEL" --state open --json number,title,body \
+       --jq '.[] | [.number, .title, (.body / "\n" | map(select(startswith("host-session: "))) | (.[0] // "") | ltrimstr("host-session: ") | rtrimstr("\r"))] | @tsv' 2>/dev/null \
+    | while IFS=$'\t' read -r num title stamp; do
+        [ -n "$num" ] || continue
+        [ "$stamp" = "$SID" ] && printf '%s\t%s\n' "$num" "$title"
+      done
+  exit 0
+fi
+
+# ---- --outcome <num>: read a ticket's outcome, but ONLY if THIS session filed it (the ENFORCEMENT) --
+if [ "${1:-}" = "--outcome" ]; then
+  num="${2:-}"
+  case "$num" in ''|*[!0-9]*) die "usage: host-ticket.sh --outcome <issue-number>";; esac
+  body="$(gh issue view "$num" --repo "$SLUG" --json body -q .body 2>/dev/null)" \
+    || die "could not read $SLUG#$num (does it exist? does the App have Issues:read on $SLUG?)"
+  owner="$(printf '%s' "$body" | session_of)"
+  if [ -z "$owner" ]; then
+    echo "host-ticket: issue #$num carries NO host-session stamp — refusing to read a ticket whose owning session is unknown (mine is $SID)" >&2
+    exit 3
+  fi
+  if [ "$owner" != "$SID" ]; then
+    echo "host-ticket: issue #$num belongs to session $owner, not $SID — refusing to read another session's ticket" >&2
+    exit 3
+  fi
+  # mine → report the host agent's verdict, matching --wait's exit contract (0 done / 1 failed / 2 none).
+  oc="$(gh issue view "$num" --repo "$SLUG" --json comments -q '.comments[].body | split("\n")[0]' 2>/dev/null | outcome_of)"
+  [ -n "$oc" ] && echo "$oc"
+  case "$oc" in
+    done)   exit 0;;
+    failed) exit 1;;
+    *)      exit 2;;
+  esac
 fi
 
 WAIT=0; [ "${1:-}" = "--wait" ] && { WAIT=1; shift; }
@@ -79,7 +144,11 @@ gh label create "$LABEL" --repo "$SLUG" --color 5319e7 \
 
 tmp="$(mktemp)" || die "mktemp failed"
 trap 'rm -f "$tmp"' EXIT   # Principle-10 teardown: no temp leak on any exit path (incl. SIGINT mid-create)
-{ printf '%s\n\n' "$opline"
+# LINE 1 stays byte-identical to the consumer's grammar (`host-op: <verb> [args]`); LINE 2 is the
+# multi-session STAMP (`host-session: <SID>`) that --mine/--outcome key on. The host consumer parses
+# only line 1, so the stamp is invisible to it — the isolation is entirely dev-side (R3).
+{ printf '%s\n' "$opline"
+  printf 'host-session: %s\n\n' "$SID"
   printf '%s\n' "_Filed by host-ticket.sh — the dev→host ticket bus (apparatus R5). The host agent reads line 1 (\`host-op:\`), performs the allowlisted op, and posts the outcome below + closes this issue._"
 } > "$tmp"
 
@@ -90,6 +159,12 @@ num="${url##*/}"
 case "$num" in ''|*[!0-9]*) [ "$WAIT" = 1 ] && die "created, but could not parse an issue number from '$url' to --wait"; exit 0;; esac
 
 [ "$WAIT" = 1 ] || exit 0
+
+# ROBUSTNESS (isolation): --wait blocks on the issue we JUST created — verify it actually carries OUR
+# stamp before trusting it. A mismatch means we parsed the wrong number or another actor raced the
+# create; either way waiting on a ticket that is not provably ours is exactly what isolation forbids.
+created_sid="$(gh issue view "$num" --repo "$SLUG" --json body -q .body 2>/dev/null | session_of)"
+[ "$created_sid" = "$SID" ] || die "created $SLUG#$num but its host-session stamp '${created_sid:-<none>}' != mine '$SID' — refusing to --wait on a ticket that is not provably ours"
 
 log "waiting up to ${WAIT_TIMEOUT}s for the host agent to respond to $SLUG#$num (poll ${POLL_INTERVAL}s)…"
 waited=0
