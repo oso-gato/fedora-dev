@@ -408,6 +408,26 @@ if [ "${POLLER_ENABLED:-0}" = 1 ]; then
             sleep 30
         done
     ' _ "$poller_env" &
+
+    # ---- apparatus liveness DEADMAN (R18) — an INDEPENDENT watcher, beside the poller, never inside it -
+    # It must be able to detect a DEAD poller, so it CANNOT share the poller's supervision: a separate
+    # runuser loop that survives a poller death. Runs IN-BOX (it uses `gh` + a richer `git`, present only
+    # post-assemble), plain shell (no Claude Code → no gate/classifier). Reads LIVE facts every ~120s
+    # (clone vs origin/main, clone dirtiness, the poller process + its log mtime) and SURFACES anomalies
+    # as ONE deduped issue on the control repo — so a stall (a dirty-clone self-refresh wedge; a merge
+    # that never went live; a frozen/dead poller) is caught WITHOUT a human remembering to look. READ-ONLY:
+    # it never merges and never writes the clone. Gated on POLLER_ENABLED (no poller running ⇒ nothing to
+    # watch); best-effort + self-restarting, and OUTSIDE the hard watchdog below (its death must never take
+    # the container down — same discipline as the poller).
+    runuser -u core -- bash -c '
+        st=/home/core/.local/state/claudebox
+        until [ -e "$st/.assembled" ]; do sleep 15; done   # box must exist before `distrobox enter`
+        while :; do
+            distrobox enter claudebox -- bash -lc \
+                "exec /home/core/.local/share/fedora-dev/bin/apparatus-deadman.sh --watch" || true
+            sleep 30
+        done
+    ' &
 fi
 
 echo "fedora-dev up: ssh :22 (tailnet) + ssh :4444 (public, key-only) + mosh UDP 61001-62000, $(podman --version)"
