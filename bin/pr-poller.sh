@@ -333,6 +333,18 @@ lock_verdict(){
   printf 'DEFER'
 }
 
+# fitness_login_default — the reviewer login the identity MODE requires (PURE; --selftest covers it).
+# An explicit non-empty FITNESS_LOGIN (env) ALWAYS wins; otherwise the default MUST match the mode, or a
+# half-configured strict-SoD arm SELF-REVIEWS: SAME_IDENTITY=0 (strict) → the DISTINCT fitness App;
+# SAME_IDENTITY=1 (make-it-work / dry-run) → the dev identity. (The prior unconditional `:-nox` default
+# filled the dev login even under SAME_IDENTITY=0, shadowing the ferried fitness App inside
+# fitness-review.sh, so the author≠judge guard refused EVERY review and NO PR could auto-merge.)
+fitness_login_default(){ # <same_identity> <current_login>
+  if [ -n "${2:-}" ]; then printf '%s' "$2"
+  elif [ "${1:-}" = 1 ]; then printf 'oso-gato-nox-claudebox'
+  else printf 'oso-gato-fitness-claudebox'; fi
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -368,6 +380,14 @@ if [ "${1:-}" = "--selftest" ]; then
     fi
   done; done
   echo "ok: every FIX route has a known cause"
+  # FITNESS_LOGIN default must MATCH the identity mode (this fix): an explicit login wins; else strict
+  # SoD (0) → the fitness App, make-it-work (1) → the dev identity. The pre-fix bug was an unconditional
+  # nox default that shadowed the fitness App under SAME_IDENTITY=0 and blocked ALL auto-merges.
+  fld(){ local got; got="$(fitness_login_default "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — fitness_login_default($2,$3)=$got want $4"; fail=1; }; }
+  fld "strict SoD → fitness App"     0 ""                         oso-gato-fitness-claudebox
+  fld "make-it-work → dev identity"  1 ""                         oso-gato-nox-claudebox
+  fld "explicit login wins (SoD)"    0 oso-gato-fitness-claudebox oso-gato-fitness-claudebox
+  fld "explicit login wins (miw)"    1 someone-else               someone-else
   # #152 — the fixer's outcome is DETERMINED, never assumed. The landing is verified against ORIGIN, so
   # rc-0-but-nothing-landed ("push lied") and origin-unreadable are FAILURES, not silent successes.
   fo(){ local got; got="$(fix_outcome "$2" "$3" "$4" "$5" "$6")"; [ "$got" = "$7" ] && echo "ok: $1" || { echo "FAIL: $1 — fix_outcome($2,$3,$4,$5,$6)=$got want $7"; fail=1; }; }
@@ -475,13 +495,18 @@ fi
 # login MUST be the GraphQL form (no `[bot]` suffix) — that is what `gh pr view --json comments`
 # returns and what auto-merge.sh matches against. REST's `.user.login` adds `[bot]`; do NOT use it.
 LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
-# MAKE-IT-WORK DEFAULT: same-identity fitness (no separate App / ferry). FITNESS_SAME_IDENTITY=1 makes
-# fitness-review.sh post the verdict — and auto-merge.sh accept it — under the DEV identity (the PR
-# author, oso-gato-nox-claudebox); the review is still an independent agent-context (fresh `claude -p`).
-# Cross-identity independence stays with the host live-gate (erebus). EXPORTED so both sub-scripts see it.
-# To restore strict separation-of-duties later: FITNESS_SAME_IDENTITY=0 + FITNESS_LOGIN=<real fitness App>.
+# IDENTITY MODE: FITNESS_SAME_IDENTITY=1 (make-it-work / DRY-RUN) posts the verdict — and auto-merge.sh
+# accepts it — under the DEV identity (oso-gato-nox-claudebox); the review is still an independent
+# agent-context (fresh `claude -p`), cross-identity independence resting on the host live-gate (erebus).
+# FITNESS_SAME_IDENTITY=0 is STRICT separation-of-duties (the arm that actually auto-merges): the verdict
+# is posted by, and verified against, the DISTINCT fitness App (oso-gato-fitness-claudebox). The reviewer
+# login default MUST match that mode (fitness_login_default, above): an unconditional `:-nox` default
+# would fill the DEV login even under SAME_IDENTITY=0, shadowing the ferried fitness App inside
+# fitness-review.sh, so the author≠judge guard refuses EVERY review — blocking all auto-merges (observed
+# live 2026-07-14: a strict arm with FITNESS_LOGIN unset self-reviewed forever). An explicit FITNESS_LOGIN
+# still wins. EXPORTED so fitness-review.sh + auto-merge.sh (which BOTH need the non-empty login) see it.
 export FITNESS_SAME_IDENTITY="${FITNESS_SAME_IDENTITY:-1}"
-FITNESS_LOGIN="${FITNESS_LOGIN:-oso-gato-nox-claudebox}"
+FITNESS_LOGIN="$(fitness_login_default "$FITNESS_SAME_IDENTITY" "${FITNESS_LOGIN:-}")"; export FITNESS_LOGIN
 POLLER_ARMED="${POLLER_ARMED:-0}"
 POLL_INTERVAL="${POLL_INTERVAL:-10}"
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
