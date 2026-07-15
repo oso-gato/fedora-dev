@@ -3,9 +3,10 @@
 # fedora-dev#174 + the D4/#191 multi-tenant session-id). Drives the REAL script against a STUB session
 # source (SESSION_SOURCE seam, emitting `name<TAB>cwd<TAB>sid` fixtures the way enumerate_claude_procs
 # does), and validates every emitted manifest through the EXECUTOR'S OWN parse_manifest awk — copied
-# VERBATIM from fedora-bootstrap host-agent-watch.sh (post-#143, the 4-field grammar) — so
-# byte-compatibility with the consumer is PROVEN, not asserted. If the executor ever changes that
-# grammar, this embedded copy is the cross-repo parity anchor that must change in lockstep.
+# VERBATIM from fedora-bootstrap host-agent-watch.sh (post-#143, the 4-field grammar with the
+# fixed-width 8-4-4-4-12 UUID 4th field) — so byte-compatibility with the consumer is PROVEN, not
+# asserted. If the executor ever changes that grammar, this embedded copy is the cross-repo parity
+# anchor that must change in lockstep.
 #   bash rebuild-request.test.sh  → exit 0 = all rows pass. No GitHub / network / real processes.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -30,7 +31,7 @@ exec_parse_manifest(){
       if ($1 != "session" || (NF != 3 && NF != 4))           { rc=2; exit }
       if ($2 !~ /^[A-Za-z0-9._-]+$/ || length($2) > 64)      { rc=2; exit }
       if ($3 !~ /^\/[A-Za-z0-9._\/@%+-]*$/ || length($3) > 256) { rc=2; exit }
-      if (NF == 4 && !($4 ~ /^[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+$/ && length($4) == 36)) { rc=2; exit }
+      if (NF == 4 && $4 !~ /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/) { rc=2; exit }
       if (++n > MAX)                                         { rc=2; exit }
       if (NF == 4) printf "%s\t%s\t%s\n", $2, $3, $4
       else         printf "%s\t%s\n",     $2, $3
@@ -67,6 +68,12 @@ fixture 'main\t/home/core\tnot-a-uuid\n'
 out="$(run_manifest)"; parsed="$(printf '%s\n' "$out" | exec_parse_manifest)"; rc=$?
 check "bad-sid: executor still parses rc=0"     '[ "$rc" = 0 ]'
 check "bad-sid: degraded to a v1 line"          '[ "$parsed" = "$(printf "main\t/home/core")" ]'
+
+# ── Row 3b: a length-36-but-not-8-4-4-4-12 sid also DEGRADES (executor #143 tightened to fixed-width) ──
+fixture 'main\t/home/core\t123456789-abc-4444-5555-123456789012\n'
+out="$(run_manifest)"; parsed="$(printf '%s\n' "$out" | exec_parse_manifest)"; rc=$?
+check "loose-36 sid: executor rc=0"             '[ "$rc" = 0 ]'
+check "loose-36 sid: degraded to v1"            '[ "$parsed" = "$(printf "main\t/home/core")" ]'
 
 # ── Row 4: an unsafe cwd (space) is SKIPPED — the rest (incl. its sid) survive; ephemeral name skipped ─
 fixture "main\t/home/core\t$UUID\nwork\t/bad path\t$UUID\nbad name\t/home/x\t$UUID\n"

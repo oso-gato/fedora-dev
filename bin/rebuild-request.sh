@@ -57,10 +57,11 @@ die(){ log "$*"; exit 1; }
 valid_session_name(){ [ -n "${1:-}" ] && [ "${#1}" -le 64 ] && [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
 valid_cwd(){ [ -n "${1:-}" ] && [ "${#1}" -le 256 ] && [[ "$1" =~ ^/[A-Za-z0-9._/@%+-]*$ ]]; }
 # valid_sid: the executor's optional 4th-field grammar, byte-for-byte (fedora-bootstrap#143) — a real
-# UUID (8-4-4-4-12 hex, length 36; what `claude --session-id` requires). A sid failing this is NOT
-# emitted; the session degrades to a v1 3-field line rather than poisoning the whole ticket (the
-# executor rejects a non-UUID 4th field, rc=2, which would strand EVERY session).
-valid_sid(){ [ -n "${1:-}" ] && [ "${#1}" = 36 ] && [[ "$1" =~ ^[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+$ ]]; }
+# fixed-width UUID (8-4-4-4-12 hex; exactly what `claude --session-id` requires). A sid failing this is
+# NOT emitted; the session degrades to a v1 3-field line rather than poisoning the whole ticket (the
+# executor rejects a non-UUID 4th field, rc=2, which would strand EVERY session). Fixed-width, in lockstep
+# with the executor's tightened regex — a length-36-but-not-8-4-4-4-12 sid rejects on both sides.
+valid_sid(){ [ -n "${1:-}" ] && [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; }
 # ephemeral_session: the per-connection tmux CLIENT session `c<pid>` (install.sh: `tmux new-session -s
 # c$$` joined into the `main` group, `destroy-unattached on`). It is a transient VIEW of `main` that
 # self-destroys on disconnect — restoring it would resurrect a dead client, so it is excluded.
@@ -210,6 +211,7 @@ run_selftest(){
   ok "sid short rejected"      '! valid_sid aaaa-bbbb'
   ok "sid nonhex rejected"     '! valid_sid 0deceee8-34ab-4e41-be19-zzzzzzzzzzzz'
   ok "sid empty rejected"      '! valid_sid ""'
+  ok "sid loose-36 rejected"   '! valid_sid 123456789-abc-4444-5555-123456789012'   # len-36 but not 8-4-4-4-12 (executor #143 parity)
   out="$(printf 'main\t/home/core\t0deceee8-34ab-4e41-be19-ba4210469eb6\n' | emit_manifest_lines 2>/dev/null)"
   ok "emit 4-field on valid sid" '[ "$out" = "session main /home/core 0deceee8-34ab-4e41-be19-ba4210469eb6" ]'
   out="$(printf 'main\t/home/core\tnot-a-uuid\n' | emit_manifest_lines 2>/dev/null)"
