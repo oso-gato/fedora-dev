@@ -24,13 +24,15 @@
 > itself: every Part 1 claim is held to the confirmed spec, and spec-vs-built conflations are defects
 > (the first adversarial fact-check of this very document found ten — see Part 3).
 >
-> **Three parts.**
+> **Three parts — each opens with its forest.** Part 1 and Part 2 each begin with a short OVERVIEW
+> (A0 / D0 — the bird's-eye "system context") that introduces and anchors every section before any
+> detail: read the overview to navigate; read the sections to build.
 > - **PART 1 — THE ARCHITECTURE.** The whole system, upfront, as the confirmed objective +
 >   requirements define it: the actors, the bus, the loop, the trust boundaries. The roadmap every
->   portion is built within and measured against.
+>   portion is built within and measured against. A0 overview → A1–A7.
 > - **PART 2 — THE DESIGN AS IT STANDS.** The current, correct design of each portion. Tagged
 >   `[BUILT]`, `[BUILT — transitional]` (works, but deviates from the confirmed architecture; target
->   named), `[BUILDING]`, or `[DESIGNED]`.
+>   named), `[BUILDING]`, or `[DESIGNED]`. D0 overview → D1–D5.
 > - **PART 3 — THE JOURNEY.** The road travelled, the roads avoided, and the roads that **failed** —
 >   design-level and architecture-level findings alike, with their evidence — so a future reader (or a
 >   wiped box) does not re-walk a proven dead-end. This is what used to live murkily in agent memory.
@@ -46,6 +48,33 @@
 The intended structure of the whole apparatus, derived upfront from the confirmed objective +
 requirements (2026-07-14 set). Portions are designed and built **within** this frame; deviations are
 findings to record in Part 3, never silent edits.
+
+## A0. System overview — the forest
+
+The apparatus is a **self-sustaining autonomous development loop** run by a **pair** of actors — an
+immutable HOST and a multi-tenant DEV CONTAINER, each the other's lever (**A1**) — coordinating
+exclusively over **GitHub**, which is at once the message bus, the audit log, and the canonical
+durable state (**A2**). On that bus runs **the loop**: one human-confirmed spec is planned, authored,
+validated, independently judged across trust domains, merged server-side with no human click,
+deployed, and read back live (**A3**). All validation happens at two tiers on **disposable
+throwaways** — nothing ever mutates a live system or a working tree (**A4**). Inside the dev
+container, **N tenant sessions** run concurrent autonomous loops, isolated by declared scope, tracked
+in a session registry (**A5**). The whole stack rides **three decoupled rebuild clocks** on an
+immutable substrate, with lifecycle continuity across rebuilds guaranteed, not lucky (**A6**). Around
+everything stands a **fail-closed control plane** — scope, halt, liveness, merge trust,
+recoverability — with only a handful of human anchors (**A7**).
+
+The anchors, one line each:
+
+| § | Anchor | One line |
+|---|---|---|
+| **A1** | The pair | two actors, symmetric actuation; a bootstrap paradox means MOVE THE ACTOR |
+| **A2** | The bus | GitHub = IPC + WAL + audit; canonical durable state; signals identity/sha/scope-bound; parse, never execute |
+| **A3** | The loop | confirm once → plan → author → validate → judge → server-merge → deploy → verify-live → self-refresh |
+| **A4** | Validation | two tiers, disposable throwaways, one durable input (the package cache) |
+| **A5** | Multi-tenancy | N sessions, disjoint declared scopes, the R27 registry as source of truth |
+| **A6** | The clocks | host image · dev image · claudebox — decoupled; rebuild continuity (R17) |
+| **A7** | Control plane | fail-closed gates; scans layered, never the sole guard; three human anchors |
 
 ## A1. The pair — two actors, symmetric actuation
 
@@ -157,7 +186,25 @@ at trust boundaries, fail-toward-stop only for HALT.
 
 # PART 2 — THE DESIGN AS IT STANDS
 
-## 1. The pair + the ticket bus  `[BUILT]`
+## D0. Design overview — the portions at a glance
+
+The portions transcribed so far, in dependency order. The **ticket bus (D1)** is the pair's actuation
+channel — everything below rides it. The **merge pipeline (D2)** ships every change; it works today
+via the poller but deviates from the confirmed R7 architecture, and the deviation is named, not
+hidden. **R17 rebuild continuity (D3)** — the active workstream — is the host-orchestrated
+KILL→REBUILD→RESTORE→RESUME→VERIFY lifecycle, live-proven single-tenant; its multi-tenant completion
+is the **session registry + resume-by-id (D4)**, and its last resume gap is the **folder-trust
+pre-seed (D5)**.
+
+| § | Portion | Status |
+|---|---|---|
+| **D1** | The pair + the ticket bus | `[BUILT]` |
+| **D2** | The merge pipeline | `[BUILT — transitional toward R7]` |
+| **D3** | R17 — rebuild continuity | `[BUILT single-tenant · BUILDING multi-tenant]` |
+| **D4** | Multi-tenant session registry + restore (R20/R27) | `[DESIGNED — building]` |
+| **D5** | Folder-trust pre-seed | `[DESIGNED]` |
+
+## D1. The pair + the ticket bus  `[BUILT]`
 
 The ticket bus (A2) as built: a `host-task`-labelled GitHub issue in the control repo whose
 **line 1** is `host-op: <verb> [args]`; the host's `host-agent-watch.sh` consumes it, performs the
@@ -166,7 +213,7 @@ The ticket bus (A2) as built: a `host-task`-labelled GitHub issue in the control
 session's id for per-session routing). Verbs are a fixed allowlist (`redeploy <workload>`,
 `rebuild-devbox <devbox>`) — never free-form host operations.
 
-## 2. The merge pipeline  `[BUILT — transitional toward R7]`
+## D2. The merge pipeline  `[BUILT — transitional toward R7]`
 
 As built, merges are executed by the **dev-side poller** (`bin/pr-poller.sh` → `bin/auto-merge.sh`,
 plain shell): it routes each open PR by (host live-gate verdict, fitness verdict), runs a bounded
@@ -183,7 +230,7 @@ is the open #150 class); R5's per-session routing token is not yet on every verd
 the working transitional mechanism that shipped the loop; converging it to R7/R6/R25 is architecture
 work ahead, not a silent status quo.
 
-## 3. R17 — Rebuild continuity  `[BUILT single-tenant · BUILDING multi-tenant]`
+## D3. R17 — Rebuild continuity  `[BUILT single-tenant · BUILDING multi-tenant]`
 
 **Requirement (R17 + R20 + R27):** a purposeful rebuild is a complete lifecycle — KILL → REBUILD →
 RESTORE **every** session → RESUME (actively working, not merely present) → VERIFIED (live
@@ -211,13 +258,13 @@ avoid. The dev box's only job is to declare **what was running**.
   name/cwd allowlists (one bad line rejects the whole ticket).
   - **v1 `[BUILT]`:** `session <name> <cwd>` → resumed with `claude --continue` (cwd-scoped).
   - **v2 `[BUILDING]`:** `session <name> <cwd> <sid>` → resumed with `claude --resume <sid>`
-    (see §4).
+    (see D4).
 
 **Live-proven 2026-07-14:** a real `rebuild-devbox` killed the box, rebuilt it, recreated the `main`
 session, and resumed `claude --continue` all the way back to the live conversation. The one gap
-surfaced: Claude's first-run folder-trust prompt (see §5).
+surfaced: Claude's first-run folder-trust prompt (see D5).
 
-## 4. R20 / R27 — Multi-tenant session registry + restore  `[DESIGNED — building]`
+## D4. R20 / R27 — Multi-tenant session registry + restore  `[DESIGNED — building]`
 
 **The reality.** The dev container is multi-tenant (A5). An operator SSH/moshes in and runs **N tmux
 WINDOWS** in the shared `main` session; each window is a bash shell **or** an interactive claude
@@ -250,7 +297,7 @@ restore, A5) already called for identity; v1 shipped without it as the single-te
 **Caveat.** `bin/claude` is baked into the image (`/usr/local/bin`), so the foundation takes effect
 only after a fedora-dev **image rebuild + redeploy**, not instantly like a live-clone change.
 
-## 5. Folder-trust pre-seed  `[DESIGNED]`
+## D5. Folder-trust pre-seed  `[DESIGNED]`
 
 A restored (or fresh) interactive claude stalls on the first-run *"Is this a project you trust?"*
 prompt — "restored but idle," which R17 RESUME forbids. **Fix:** pre-seed `~/.claude.json`
