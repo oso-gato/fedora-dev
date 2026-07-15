@@ -84,7 +84,7 @@ out="$(run_manifest)"; parsed="$(printf '%s\n' "$out" | exec_parse_manifest)"; r
 check "loose-36 sid: executor rc=0"             '[ "$rc" = 0 ]'
 check "loose-36 sid: degraded to v1"            '[ "$parsed" = "$(printf "main\t/home/core")" ]'
 
-# ── Row 4: an unsafe cwd (space) is SKIPPED — the rest (incl. its sid) survive; ephemeral name skipped ─
+# ── Row 4: an unsafe cwd (space) AND a non-allowlisted name are each SKIPPED; the safe tenant survives ─
 fixture "main\t/home/core\t$UUID\nwork\t/bad path\t$UUID\nbad name\t/home/x\t$UUID\n"
 out="$(run_manifest)"; parsed="$(printf '%s\n' "$out" | exec_parse_manifest)"; rc=$?
 check "skip: executor parses rc=0"              '[ "$rc" = 0 ]'
@@ -112,6 +112,15 @@ check "mutation genuinely changed the copy"     '! cmp -s "$SUT" "$TMPD/mut.sh"'
 fixture 'main\t/home/core\tnot-a-uuid\n'
 out="$(SESSION_SOURCE="$STUB" DEVBOX_MANIFEST_V2=1 bash "$TMPD/mut.sh" manifest)"; printf '%s\n' "$out" | exec_parse_manifest >/dev/null; rc=$?
 check "mutation: executor now REJECTS (rc=2)"   '[ "$rc" = 2 ]'
+
+# ── Row 7b: MUTATION — neutralize the CWD guard; an unsafe cwd (space) now LEAKS and the executor ─────
+#    REJECTS the whole ticket (rc=2). Proves valid_cwd bites (independent of the sid guard; no v2 needed).
+cp "$SUT" "$TMPD/mutcwd.sh"
+sed -i 's/if ! valid_cwd "$cwd"/if ! true/' "$TMPD/mutcwd.sh"
+check "cwd-mutation genuinely changed the copy"  '! cmp -s "$SUT" "$TMPD/mutcwd.sh"'
+fixture 'main\t/bad path\t\n'
+out="$(SESSION_SOURCE="$STUB" bash "$TMPD/mutcwd.sh" manifest)"; printf '%s\n' "$out" | exec_parse_manifest >/dev/null; rc=$?
+check "cwd-mutation: executor now REJECTS (rc=2)" '[ "$rc" = 2 ]'
 
 # ── Row 8: default (request) mode composes a body whose line 1 is the op + a 4-field manifest parses ──
 fixture "main\t/home/core\t$UUID\n"
