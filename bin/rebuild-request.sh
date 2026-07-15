@@ -9,10 +9,13 @@
 # ghost, which an in-container `distrobox rm -f` cannot avoid.
 #
 # The host executor owns KILL → REBUILD → RESTORE → RESUME → VERIFY. The ONLY thing it cannot know is
-# what was running on the dev box. THIS producer supplies exactly that: it enumerates the live tmux
-# sessions into the executor's `session <name> <cwd>` MANIFEST grammar and composes the `rebuild-devbox`
-# ticket. The executor recreates each session (`tmux new-session -d -s <name> -c <cwd>`) and resumes it
-# (`claude --continue` typed in that cwd), then verifies alive-AND-active + the poller sweeping.
+# what was running on the dev box. THIS producer supplies exactly that: it enumerates the live claude
+# tenant PROCESSES — each carries its ASSIGNED --session-id in its cmdline (bin/claude, D4) and its cwd
+# in /proc — into the executor's `session <name> <cwd> [<sid>]` MANIFEST grammar and composes the
+# `rebuild-devbox` ticket. The executor recreates each session (`tmux new-session -d -s <name> -c <cwd>`)
+# and resumes it BY ID (`claude --resume <sid>`), so N tenants sharing one cwd all come back (the
+# multi-tenant fix, 00-DESIGN D4/#191) — a tenant with no assigned id degrades to the v1 `claude
+# --continue`. Then the executor verifies alive-AND-active + the poller sweeping.
 #
 # WHY BASE-LEVEL: `tmux` lives in the fedora-dev BASE image, NOT the claudebox (it is not in
 # distrobox.ini additional_packages). The tmux server runs at the fedora-dev container level. So this
@@ -53,23 +56,36 @@ die(){ log "$*"; exit 1; }
 # single un-restorable session would strand every other one. Non-conforming sessions are SKIPPED loudly.
 valid_session_name(){ [ -n "${1:-}" ] && [ "${#1}" -le 64 ] && [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
 valid_cwd(){ [ -n "${1:-}" ] && [ "${#1}" -le 256 ] && [[ "$1" =~ ^/[A-Za-z0-9._/@%+-]*$ ]]; }
+# valid_sid: the executor's optional 4th-field grammar, byte-for-byte (fedora-bootstrap#143) — a real
+# UUID (8-4-4-4-12 hex, length 36; what `claude --session-id` requires). A sid failing this is NOT
+# emitted; the session degrades to a v1 3-field line rather than poisoning the whole ticket (the
+# executor rejects a non-UUID 4th field, rc=2, which would strand EVERY session).
+valid_sid(){ [ -n "${1:-}" ] && [ "${#1}" = 36 ] && [[ "$1" =~ ^[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+$ ]]; }
 # ephemeral_session: the per-connection tmux CLIENT session `c<pid>` (install.sh: `tmux new-session -s
 # c$$` joined into the `main` group, `destroy-unattached on`). It is a transient VIEW of `main` that
 # self-destroys on disconnect — restoring it would resurrect a dead client, so it is excluded.
 ephemeral_session(){ [[ "${1:-}" =~ ^c[0-9]+$ ]]; }
 
-# emit_manifest_lines: read raw "name<TAB>cwd" candidates on stdin → emit validated `session <name>
-# <cwd>` lines for the survivors. Skips (loudly) ephemeral sessions and any name/cwd the executor would
-# reject; caps at DEVBOX_MAX_SESSIONS, logging the drop (never a silent cap).
+# emit_manifest_lines: read raw "name<TAB>cwd[<TAB>sid]" candidates on stdin → emit validated
+# `session <name> <cwd> [<sid>]` lines. A valid UUID sid ⇒ a v2 4-field line (the executor resumes THAT
+# session by id — multi-tenant); an EMPTY sid ⇒ a v1 3-field line (cwd-scoped `--continue`); an
+# INVALID sid ⇒ degrade to a v1 line + log (never emit a bad 4th field — the executor rejects it and
+# strands every session). Skips (loudly) ephemeral sessions and any name/cwd the executor would reject;
+# caps at DEVBOX_MAX_SESSIONS, logging the drop (never a silent cap).
 emit_manifest_lines(){
-  local n=0 name cwd
-  while IFS=$'\t' read -r name cwd; do
+  local n=0 name cwd sid
+  while IFS=$'\t' read -r name cwd sid; do
     [ -n "$name" ] || continue
     if ephemeral_session "$name"; then log "skip ephemeral client session '$name'"; continue; fi
     if ! valid_session_name "$name"; then log "skip session '$name' — name outside the executor allowlist"; continue; fi
     if ! valid_cwd "$cwd"; then log "skip session '$name' — cwd '$cwd' is not a safe absolute path"; continue; fi
     if [ "$n" -ge "$DEVBOX_MAX_SESSIONS" ]; then log "cap $DEVBOX_MAX_SESSIONS reached — dropping '$name' and any further sessions"; break; fi
-    printf 'session %s %s\n' "$name" "$cwd"
+    if [ -n "$sid" ] && valid_sid "$sid"; then
+      printf 'session %s %s %s\n' "$name" "$cwd" "$sid"                     # v2: resume THIS session by id
+    else
+      [ -n "$sid" ] && log "session '$name' — sid '$sid' not a valid UUID; emitting cwd-scoped v1 line"
+      printf 'session %s %s\n' "$name" "$cwd"                               # v1: cwd-scoped --continue
+    fi
     n=$((n + 1))
   done
 }
@@ -98,8 +114,37 @@ enumerate_tmux(){
   done
 }
 
-# manifest_block: the whole enumerate→validate→wrap pipeline (the testable core).
-manifest_block(){ enumerate_tmux | emit_manifest_lines | compose_manifest_block; }
+# enumerate_claude_procs: the LIVE session source (D4/#191). Each interactive claude tenant is a live
+# `claude` process whose ASSIGNED --session-id (bin/claude, D4) sits in its cmdline and whose cwd is in
+# /proc — both readable at the base level (the box shares fedora-dev's PID namespace). Emits
+# name<TAB>cwd<TAB>sid per tenant. Reads the live process table directly because a running process IS
+# ground truth for "what is running" — and, decisively, the sid is ONLY knowable this way: it is NOT in
+# /proc/<pid>/environ (claude sets it after launch) and the process holds no open <sid>.jsonl fd, so
+# ASSIGNING it via --session-id and reading it back from the cmdline is the mechanism (00-DESIGN D4).
+# EXCLUDES headless `claude -p` runs and subagents (CLAUDE_CODE_CHILD_SESSION=1) — neither is a
+# restorable interactive tmux tenant. A tenant from an OLD bin/claude (no --session-id) yields an empty
+# sid ⇒ emit_manifest_lines degrades it to a v1 cwd-scoped line. Fail-soft throughout.
+enumerate_claude_procs(){
+  local pid cmd cwd sid child name
+  for pid in $("${PGREP_BIN:-pgrep}" -x claude 2>/dev/null); do
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+    [ -n "$cmd" ] || continue
+    case " $cmd " in *' -p '*|*' --print '*) continue ;; esac                       # headless, not a tenant
+    child="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^CLAUDE_CODE_CHILD_SESSION=//p' | head -1)"
+    [ "$child" = 1 ] && continue                                                     # subagent, not a tenant
+    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)" || continue
+    sid="$(printf '%s ' "$cmd" | grep -oE -- '--session-id [0-9a-fA-F-]{36}' | head -1 | cut -d' ' -f2)"
+    if [ -n "$sid" ]; then name="s-${sid%%-*}"; else name="s-p$pid"; fi             # unique, allowlist-safe
+    printf '%s\t%s\t%s\n' "$name" "$cwd" "$sid"
+  done
+}
+
+# manifest_block: the whole enumerate→validate→wrap pipeline (the testable core). SESSION_SOURCE is the
+# seam (default: the live-process scan; the test injects a fixture emitter). enumerate_tmux is kept as
+# an alternative source but is no longer the default — it cannot carry a sid (tmux knows the pane, not
+# the claude session-id), so it can only ever produce v1 lines.
+SESSION_SOURCE="${SESSION_SOURCE:-enumerate_claude_procs}"
+manifest_block(){ "$SESSION_SOURCE" | emit_manifest_lines | compose_manifest_block; }
 
 # compose_body: the full ticket body. LINE 1 is the machine op (exactly `host-op: rebuild-devbox
 # <workload>`); the manifest block rides below, prose between is ignored by both parsers.
@@ -160,6 +205,17 @@ run_selftest(){
   local out
   out="$(printf 'main\t/home/core\nc999\t/home/core\nbad name\t/x\ngood\t/bad path\n' | emit_manifest_lines 2>/dev/null)"
   ok "emit keeps only valid"   '[ "$out" = "session main /home/core" ]'
+  # valid_sid + the sid path (D4/#191): a real UUID → v2 4-field line; a bad/empty sid degrades to v1
+  ok "sid valid uuid"          'valid_sid 0deceee8-34ab-4e41-be19-ba4210469eb6'
+  ok "sid short rejected"      '! valid_sid aaaa-bbbb'
+  ok "sid nonhex rejected"     '! valid_sid 0deceee8-34ab-4e41-be19-zzzzzzzzzzzz'
+  ok "sid empty rejected"      '! valid_sid ""'
+  out="$(printf 'main\t/home/core\t0deceee8-34ab-4e41-be19-ba4210469eb6\n' | emit_manifest_lines 2>/dev/null)"
+  ok "emit 4-field on valid sid" '[ "$out" = "session main /home/core 0deceee8-34ab-4e41-be19-ba4210469eb6" ]'
+  out="$(printf 'main\t/home/core\tnot-a-uuid\n' | emit_manifest_lines 2>/dev/null)"
+  ok "emit degrades bad sid"   '[ "$out" = "session main /home/core" ]'
+  out="$(printf 'main\t/home/core\t\n' | emit_manifest_lines 2>/dev/null)"
+  ok "emit v1 when no sid"      '[ "$out" = "session main /home/core" ]'
   # compose_manifest_block wraps
   out="$(printf 'session main /home/core\n' | compose_manifest_block)"
   ok "block has begin"         "printf '%s' \"\$out\" | grep -qF '$MANIFEST_BEGIN'"
