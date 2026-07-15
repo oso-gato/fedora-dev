@@ -48,7 +48,10 @@ cat "${SESSION_FIXTURE:?}"
 STUBEOF
 chmod +x "$STUB"
 fixture(){ printf '%b' "$1" > "$TMPD/fix"; export SESSION_FIXTURE="$TMPD/fix"; }
-run_manifest(){ SESSION_SOURCE="$STUB" bash "$SUT" manifest; }
+# run_manifest drives the producer with the v2 rollout gate ENABLED (the feature under test). A separate
+# runner leaves it at its safe default (OFF) to prove a valid sid still degrades to v1 then.
+run_manifest(){ SESSION_SOURCE="$STUB" DEVBOX_MANIFEST_V2=1 bash "$SUT" manifest; }
+run_manifest_v2off(){ SESSION_SOURCE="$STUB" bash "$SUT" manifest; }
 
 # ── Row 1: happy path — a tenant WITH a session-id + an ephemeral; 4-field parses, ephemeral dropped ──
 fixture "main\t/home/core\t$UUID\nc999\t/home/core\t\n"
@@ -56,6 +59,12 @@ out="$(run_manifest)"; parsed="$(printf '%s\n' "$out" | exec_parse_manifest)"; r
 check "with-sid: executor parses rc=0"          '[ "$rc" = 0 ]'
 check "with-sid: 4-field line (name cwd sid)"   '[ "$parsed" = "$(printf "main\t/home/core\t%s" "$UUID")" ]'
 check "with-sid: ephemeral c999 excluded"       '! printf "%s" "$out" | grep -q c999'
+
+# ── Row 1b: v2 rollout gate DEFAULT OFF — a valid sid still emits v1 (safe against a pre-#143 executor) ─
+fixture "main\t/home/core\t$UUID\n"
+out="$(run_manifest_v2off)"; parsed="$(printf '%s\n' "$out" | exec_parse_manifest)"; rc=$?
+check "v2-off: executor parses rc=0"            '[ "$rc" = 0 ]'
+check "v2-off: valid sid degraded to v1"        '[ "$parsed" = "$(printf "main\t/home/core")" ]'
 
 # ── Row 2: a tenant with NO session-id (old bin/claude) → v1 3-field line (cwd-scoped --continue) ─────
 fixture 'main\t/home/core\t\n'
@@ -101,12 +110,12 @@ cp "$SUT" "$TMPD/mut.sh"
 sed -i 's/\[ -n "$sid" \] && valid_sid "$sid"/[ -n "$sid" ]/' "$TMPD/mut.sh"
 check "mutation genuinely changed the copy"     '! cmp -s "$SUT" "$TMPD/mut.sh"'
 fixture 'main\t/home/core\tnot-a-uuid\n'
-out="$(SESSION_SOURCE="$STUB" bash "$TMPD/mut.sh" manifest)"; printf '%s\n' "$out" | exec_parse_manifest >/dev/null; rc=$?
+out="$(SESSION_SOURCE="$STUB" DEVBOX_MANIFEST_V2=1 bash "$TMPD/mut.sh" manifest)"; printf '%s\n' "$out" | exec_parse_manifest >/dev/null; rc=$?
 check "mutation: executor now REJECTS (rc=2)"   '[ "$rc" = 2 ]'
 
 # ── Row 8: default (request) mode composes a body whose line 1 is the op + a 4-field manifest parses ──
 fixture "main\t/home/core\t$UUID\n"
-REBUILD_REQUEST_OUT="$TMPD/body.md" SESSION_SOURCE="$STUB" bash "$SUT" >/dev/null 2>&1
+REBUILD_REQUEST_OUT="$TMPD/body.md" SESSION_SOURCE="$STUB" DEVBOX_MANIFEST_V2=1 bash "$SUT" >/dev/null 2>&1
 check "request: body written"                   '[ -s "$TMPD/body.md" ]'
 check "request: line 1 is the exact op"         '[ "$(head -1 "$TMPD/body.md")" = "host-op: rebuild-devbox fedora-dev" ]'
 exec_parse_manifest < "$TMPD/body.md" >/dev/null; rc=$?

@@ -17,6 +17,12 @@
 # multi-tenant fix, 00-DESIGN D4/#191) — a tenant with no assigned id degrades to the v1 `claude
 # --continue`. Then the executor verifies alive-AND-active + the poller sweeping.
 #
+# V2 ROLLOUT GATE (see manifest_v2_enabled): the 4-field by-id grammar is understood only by the
+# fedora-bootstrap#143 executor (merged 2026-07-15). Because the RUNNING host executor's deploy LAGS
+# that merge (a host-apply), v2 4-field emission is OPT-IN via DEVBOX_MANIFEST_V2 and DEFAULTS OFF —
+# by default this producer emits v1 3-field lines, safe against ANY deployed executor. Flip it on in
+# the fedora-dev deploy env once the host executor is confirmed to carry #143.
+#
 # WHY BASE-LEVEL: `tmux` lives in the fedora-dev BASE image, NOT the claudebox (it is not in
 # distrobox.ini additional_packages). The tmux server runs at the fedora-dev container level. So this
 # producer MUST run there (where `box-rebuild.sh` already runs), not inside the box.
@@ -67,11 +73,23 @@ valid_sid(){ [ -n "${1:-}" ] && [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-
 # self-destroys on disconnect — restoring it would resurrect a dead client, so it is excluded.
 ephemeral_session(){ [[ "${1:-}" =~ ^c[0-9]+$ ]]; }
 
+# manifest_v2_enabled: emit v2 (4-field, resume-BY-ID) lines ONLY when explicitly enabled — DEFAULTS
+# OFF (v1 3-field). This is the cross-repo grammar ROLLOUT GATE. The consumer is fedora-bootstrap#143
+# (merged 2026-07-15); until the RUNNING host executor is confirmed to carry that 4-field parser (a
+# host-apply that lags the merge), a 4-field line reaching a pre-#143 3-field executor is REFUSED —
+# whole-ticket rc=2, but `parse_manifest` is validated BEFORE the kill (host-agent-watch.sh:400-408),
+# so NO session is stranded, the rebuild simply does not fire. Default-off makes the producer safe
+# against ANY deployed executor: every tenant restores by cwd (v1) exactly as before this change —
+# multi-tenant collapse in a shared cwd is the pre-existing v1 behavior, NOT a regression this
+# introduces. Flip DEVBOX_MANIFEST_V2=1 in the fedora-dev deploy env (run.sh / Quadlet) ONCE the host
+# executor is confirmed deployed on #143 — then N tenants sharing a cwd all restore by id.
+manifest_v2_enabled(){ case "${DEVBOX_MANIFEST_V2:-}" in 1|true|yes|on) return 0;; *) return 1;; esac; }
+
 # emit_manifest_lines: read raw "name<TAB>cwd[<TAB>sid]" candidates on stdin → emit validated
-# `session <name> <cwd> [<sid>]` lines. A valid UUID sid ⇒ a v2 4-field line (the executor resumes THAT
-# session by id — multi-tenant); an EMPTY sid ⇒ a v1 3-field line (cwd-scoped `--continue`); an
-# INVALID sid ⇒ degrade to a v1 line + log (never emit a bad 4th field — the executor rejects it and
-# strands every session). Skips (loudly) ephemeral sessions and any name/cwd the executor would reject;
+# `session <name> <cwd> [<sid>]` lines. With v2 ENABLED, a valid UUID sid ⇒ a v2 4-field line (resume
+# THAT session by id — multi-tenant). Otherwise (v2 disabled, OR an empty/invalid sid) ⇒ a v1 3-field
+# line (cwd-scoped `--continue`) — never emit a 4th field a pre-#143 executor would reject and thereby
+# refuse the whole ticket. Skips (loudly) ephemeral sessions and any name/cwd the executor would reject;
 # caps at DEVBOX_MAX_SESSIONS, logging the drop (never a silent cap).
 emit_manifest_lines(){
   local n=0 name cwd sid
@@ -81,10 +99,16 @@ emit_manifest_lines(){
     if ! valid_session_name "$name"; then log "skip session '$name' — name outside the executor allowlist"; continue; fi
     if ! valid_cwd "$cwd"; then log "skip session '$name' — cwd '$cwd' is not a safe absolute path"; continue; fi
     if [ "$n" -ge "$DEVBOX_MAX_SESSIONS" ]; then log "cap $DEVBOX_MAX_SESSIONS reached — dropping '$name' and any further sessions"; break; fi
-    if [ -n "$sid" ] && valid_sid "$sid"; then
+    if [ -n "$sid" ] && valid_sid "$sid" && manifest_v2_enabled; then
       printf 'session %s %s %s\n' "$name" "$cwd" "$sid"                     # v2: resume THIS session by id
     else
-      [ -n "$sid" ] && log "session '$name' — sid '$sid' not a valid UUID; emitting cwd-scoped v1 line"
+      if [ -n "$sid" ]; then
+        if ! manifest_v2_enabled; then
+          log "session '$name' — v2 emission disabled (DEVBOX_MANIFEST_V2 unset); emitting v1 cwd-scoped line"
+        elif ! valid_sid "$sid"; then
+          log "session '$name' — sid '$sid' not a valid UUID; emitting cwd-scoped v1 line"
+        fi
+      fi
       printf 'session %s %s\n' "$name" "$cwd"                               # v1: cwd-scoped --continue
     fi
     n=$((n + 1))
@@ -212,11 +236,16 @@ run_selftest(){
   ok "sid nonhex rejected"     '! valid_sid 0deceee8-34ab-4e41-be19-zzzzzzzzzzzz'
   ok "sid empty rejected"      '! valid_sid ""'
   ok "sid loose-36 rejected"   '! valid_sid 123456789-abc-4444-5555-123456789012'   # len-36 but not 8-4-4-4-12 (executor #143 parity)
+  # v2 rollout gate (default OFF): a valid sid emits v2 ONLY when DEVBOX_MANIFEST_V2 is enabled
+  ok "v2 gate default off"     '! manifest_v2_enabled'
+  ok "v2 gate on for =1"       'DEVBOX_MANIFEST_V2=1 manifest_v2_enabled'
+  out="$(printf 'main\t/home/core\t0deceee8-34ab-4e41-be19-ba4210469eb6\n' | DEVBOX_MANIFEST_V2=1 emit_manifest_lines 2>/dev/null)"
+  ok "emit 4-field on valid sid (v2 on)" '[ "$out" = "session main /home/core 0deceee8-34ab-4e41-be19-ba4210469eb6" ]'
   out="$(printf 'main\t/home/core\t0deceee8-34ab-4e41-be19-ba4210469eb6\n' | emit_manifest_lines 2>/dev/null)"
-  ok "emit 4-field on valid sid" '[ "$out" = "session main /home/core 0deceee8-34ab-4e41-be19-ba4210469eb6" ]'
-  out="$(printf 'main\t/home/core\tnot-a-uuid\n' | emit_manifest_lines 2>/dev/null)"
-  ok "emit degrades bad sid"   '[ "$out" = "session main /home/core" ]'
-  out="$(printf 'main\t/home/core\t\n' | emit_manifest_lines 2>/dev/null)"
+  ok "emit v1 on valid sid (v2 OFF — safe default)" '[ "$out" = "session main /home/core" ]'
+  out="$(printf 'main\t/home/core\tnot-a-uuid\n' | DEVBOX_MANIFEST_V2=1 emit_manifest_lines 2>/dev/null)"
+  ok "emit degrades bad sid (v2 on)" '[ "$out" = "session main /home/core" ]'
+  out="$(printf 'main\t/home/core\t\n' | DEVBOX_MANIFEST_V2=1 emit_manifest_lines 2>/dev/null)"
   ok "emit v1 when no sid"      '[ "$out" = "session main /home/core" ]'
   # compose_manifest_block wraps
   out="$(printf 'session main /home/core\n' | compose_manifest_block)"
