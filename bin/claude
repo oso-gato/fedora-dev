@@ -89,10 +89,34 @@ fi
 # the start-phase path (a box that is NOT already running enters via distrobox's start block, which
 # returns 1, not 125/126; that path boots PID 1 with no interactive pty, so /dev/pts has settled
 # before the exec and the ptsname race does not arise there — it is intentionally not retried).
+# SESSION IDENTITY (00-DESIGN.md D4, fedora-dev#191). Assign THIS session a stable, externally-known
+# UUID via `claude --session-id`, UNLESS the operator already named a session (--resume/--continue/
+# --session-id — including the R17 restore path, which runs `claude --resume <sid>`; assigning a second
+# id there would conflict). The assigned id is what lets a purposeful rebuild resume THIS session BY ID
+# (`claude --resume <sid>`) even when N tenants share one cwd — the multi-tenant restore fix — and it is
+# visible in the process cmdline for the rebuild-request producer to enumerate. A mint failure degrades
+# to no id (the v1 cwd-scoped `--continue`); it never blocks launch.
+sid=""
+case " $* " in
+  *' --resume '*|*' --resume='*|*' -r '*|*' --continue '*|*' -c '*|*' --session-id '*|*' --session-id='*) : ;;
+  *) sid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)" ;;
+esac
+
 attempt=0
 while :; do
+    # The inner login shell runs IN-BOX (python3 lives there, not at base), so as its FIRST step it
+    # pre-accepts the folder-trust dialog for the launch cwd (D5 — a restored/fresh session otherwise
+    # stalls on the "trust this project?" prompt, "restored but idle", which R17 RESUME forbids), then
+    # exec's claude with the assigned --session-id. The cwd + sid ride as POSITIONAL args ($1,$2) — never
+    # interpolated into the script text — and every added step is fail-safe (|| true / ${SID:+…}) so it
+    # can never wedge the launch.
     flock -s "$state/session.lock" \
-        distrobox enter claudebox -- bash -lc 'exec /usr/bin/claude --model default --permission-mode auto --effort ultracode "$@"' bash "$@"
+        distrobox enter claudebox -- bash -lc '
+            SEED_CWD="$1"; SID="$2"; shift 2
+            s="$HOME/.local/share/fedora-dev/bin/seed-claude-trust.py"
+            [ -f "$s" ] && command -v python3 >/dev/null 2>&1 && python3 "$s" "$SEED_CWD" 2>/dev/null || true
+            exec /usr/bin/claude ${SID:+--session-id "$SID"} --model default --permission-mode auto --effort ultracode "$@"
+        ' bash "$PWD" "$sid" "$@"
     rc=$?
     { [ "$rc" -eq 125 ] || [ "$rc" -eq 126 ]; } && [ "$attempt" -lt 6 ] || break
     attempt=$((attempt + 1))
