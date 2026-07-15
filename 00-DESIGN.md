@@ -191,18 +191,18 @@ at trust boundaries, fail-toward-stop only for HALT.
 The portions transcribed so far, in dependency order. The **ticket bus (D1)** is the pair's actuation
 channel — everything below rides it. The **merge pipeline (D2)** ships every change; it works today
 via the poller but deviates from the confirmed R7 architecture, and the deviation is named, not
-hidden. **R17 rebuild continuity (D3)** — the active workstream — is the host-orchestrated
-KILL→REBUILD→RESTORE→RESUME→VERIFY lifecycle, live-proven single-tenant; its multi-tenant completion
-is the **session registry + resume-by-id (D4)**, and its last resume gap is the **folder-trust
-pre-seed (D5)**.
+hidden. **R17 rebuild continuity (D3)** is the host-orchestrated KILL→REBUILD→RESTORE→RESUME→VERIFY
+lifecycle, live-proven single-tenant then completed multi-tenant by **assign-at-launch session
+identity + resume-by-id (D4)** — where the build found the live process table already IS the registry
+— with the **folder-trust pre-seed (D5)** closing the last resume gap.
 
 | § | Portion | Status |
 |---|---|---|
 | **D1** | The pair + the ticket bus | `[BUILT]` |
 | **D2** | The merge pipeline | `[BUILT — transitional toward R7]` |
-| **D3** | R17 — rebuild continuity | `[BUILT single-tenant · BUILDING multi-tenant]` |
-| **D4** | Multi-tenant session registry + restore (R20/R27) | `[DESIGNED — building]` |
-| **D5** | Folder-trust pre-seed | `[DESIGNED]` |
+| **D3** | R17 — rebuild continuity | `[BUILT]` |
+| **D4** | Multi-tenant session identity + restore (R20/R27) | `[BUILT]` |
+| **D5** | Folder-trust pre-seed | `[BUILT]` |
 
 ## D1. The pair + the ticket bus  `[BUILT]`
 
@@ -230,7 +230,7 @@ is the open #150 class); R5's per-session routing token is not yet on every verd
 the working transitional mechanism that shipped the loop; converging it to R7/R6/R25 is architecture
 work ahead, not a silent status quo.
 
-## D3. R17 — Rebuild continuity  `[BUILT single-tenant · BUILDING multi-tenant]`
+## D3. R17 — Rebuild continuity  `[BUILT]`
 
 **Requirement (R17 + R20 + R27):** a purposeful rebuild is a complete lifecycle — KILL → REBUILD →
 RESTORE **every** session → RESUME (actively working, not merely present) → VERIFIED (live
@@ -257,14 +257,16 @@ avoid. The dev box's only job is to declare **what was running**.
   `%%DEVBOX-MANIFEST-BEGIN%%` / `%%DEVBOX-MANIFEST-END%%` sentinels; one line per session; strict
   name/cwd allowlists (one bad line rejects the whole ticket).
   - **v1 `[BUILT]`:** `session <name> <cwd>` → resumed with `claude --continue` (cwd-scoped).
-  - **v2 `[BUILDING]`:** `session <name> <cwd> <sid>` → resumed with `claude --resume <sid>`
-    (see D4).
+  - **v2 `[BUILT]`:** `session <name> <cwd> <sid>` → resumed with `claude --resume <sid>` (see D4).
+    The `<sid>` is a strict fixed-width UUID (8-4-4-4-12 hex), validated byte-identically on both
+    sides (producer `valid_sid` ≡ executor `parse_manifest`). v2 emission is behind a rollout gate
+    (D4) so a 4-field line never reaches a not-yet-upgraded executor.
 
 **Live-proven 2026-07-14:** a real `rebuild-devbox` killed the box, rebuilt it, recreated the `main`
 session, and resumed `claude --continue` all the way back to the live conversation. The one gap
 surfaced: Claude's first-run folder-trust prompt (see D5).
 
-## D4. R20 / R27 — Multi-tenant session registry + restore  `[DESIGNED — building]`
+## D4. R20 / R27 — Multi-tenant session identity + restore  `[BUILT]`
 
 **The reality.** The dev container is multi-tenant (A5). An operator SSH/moshes in and runs **N tmux
 WINDOWS** in the shared `main` session; each window is a bash shell **or** an interactive claude
@@ -276,35 +278,58 @@ Confirmed live (2 live tenants, same cwd). A design-level finding — the archit
 restore, A5) already called for identity; v1 shipped without it as the single-tenant MVP.
 
 **The design — assign-at-launch.**
-- **Identity is ASSIGNED, not discovered.** A live session's id is **not** recoverable from outside
-  it — it is not in `/proc/<pid>/environ` (claude generates it *after* launch) and the process holds
-  no open `<sid>.jsonl` fd. So a scanner cannot learn it. Instead `bin/claude` (the launch wrapper)
-  **mints a UUID** and launches `claude --session-id <uuid>` — the id is known at the natural point.
-  *(Verified: `--session-id` assigns it; `--resume <uuid>` resumes it.)*
-- **The registry (R27) is the source of truth.** `bin/claude` registers `{uuid, cwd, tmux-window,
-  container-id, liveness}` on launch and releases on exit; a crashed session is reaped by the
-  lock-lib liveness adjudication. The record extends today's `{sid, coords, scope}`.
-- **Restore reads the registry.** The producer emits `session <name> <cwd> <uuid>` per **live
-  registry entry** (not tmux-session enumeration); the executor resumes each with
-  `claude --resume <uuid>` in a recreated window. Every tenant returns **by id**, even sharing a cwd.
+- **Identity is ASSIGNED, not discovered.** A live session's *self-generated* id is **not**
+  recoverable from outside it — it is not in `/proc/<pid>/environ` (claude generates it *after*
+  launch) and the process holds no open `<sid>.jsonl` fd. So a scanner cannot learn an
+  *unassigned* id. Instead `bin/claude` (the launch wrapper) **mints a UUID** and launches
+  `claude --session-id <uuid>`. *(Verified: `--session-id` assigns it; `--resume <uuid>` resumes it.)*
+- **The live process table IS the registry `[design-level finding — built]`.** The design first
+  reached for a separate registry *file* (`bin/claude` writes `{uuid, cwd, window, liveness}` on
+  launch, releases on exit, a crashed entry reaped by liveness adjudication). The build found that
+  unnecessary: because the uuid is *assigned on the argv*, it lands in the process's own
+  `/proc/<pid>/cmdline`, and the cwd in `/proc/<pid>/cwd` — so the **running `claude` processes
+  already ARE the registry**, with no file to write, no release-on-exit, and no liveness reaping (a
+  dead tenant is simply *absent* from `/proc` — crash-safe by construction). This is strictly simpler
+  and more robust than a file that can go stale; the assign-at-launch decision is what makes the
+  once-dead-end `/proc` scan viable (it reads the *assigned* id, not the unknowable self-generated one).
+  This scopes to what **restore** needs (identity + cwd + liveness); R27's fuller registry — the
+  per-session *scope* the R16/R28 scope/HALT actuators (A5) read — is not in the cmdline and remains a
+  separate concern for those portions, not retired by this finding.
+- **Restore reads the live process table.** The producer (`bin/rebuild-request.sh`,
+  `enumerate_claude_procs`) scans `/proc` for interactive `claude` tenants — reading the assigned
+  `<uuid>` from the cmdline and the cwd from `/proc` — and emits `session <name> <cwd> <uuid>` per
+  live tenant (excluding headless `claude -p` and subagents). The executor resumes each with
+  `claude --resume <uuid>` in a recreated tmux window. Every tenant returns **by id**, even sharing a cwd.
 
-**Staging — executor-first** (the A1 consumer-before-producer convention):
-1. registry schema + `bin/claude` registration `[fedora-dev]`;
-2. executor accepts the `<sid>` field + `--resume`, **backward-compatible** with v1's 3-field
-   grammar `[fedora-bootstrap]` — lands FIRST so a v2 manifest is never rejected;
-3. producer emits the `<sid>` manifest from the registry `[fedora-dev]`.
+**V2 rollout gate `[BUILT]`.** The 4-field by-id grammar is understood only by the upgraded executor
+(fedora-bootstrap#143). Because the *running* host executor's deploy LAGS the merge (a host-apply),
+v2 emission is behind `DEVBOX_MANIFEST_V2`, **default OFF**: by default the producer emits v1 3-field
+lines, safe against any deployed executor (and even ungated, a 4-field line to a 3-field executor is a
+*fail-safe REFUSE* — `parse_manifest` is validated before the kill, so no session is stranded, the
+rebuild just does not fire). Flipped on in the fedora-dev deploy env once the host executor carries #143.
+
+**Staging — executor-first** (the A1 consumer-before-producer convention), all landed:
+1. `bin/claude` assign-at-launch `[fedora-dev #196, merged]`;
+2. executor accepts the `<sid>` field + `--resume`, backward-compatible with v1's 3-field grammar
+   `[fedora-bootstrap #143, merged]` — landed FIRST so a v2 manifest is never rejected;
+3. producer emits the `<sid>` manifest from the `/proc` scan `[fedora-dev #197]`.
 
 **Caveat.** `bin/claude` is baked into the image (`/usr/local/bin`), so the foundation takes effect
-only after a fedora-dev **image rebuild + redeploy**, not instantly like a live-clone change.
+only after a fedora-dev **image rebuild + redeploy**, not instantly like a live-clone change — which
+is also why the v2 gate defaults off until both halves are deployed.
 
-## D5. Folder-trust pre-seed  `[DESIGNED]`
+## D5. Folder-trust pre-seed  `[BUILT]`
 
 A restored (or fresh) interactive claude stalls on the first-run *"Is this a project you trust?"*
-prompt — "restored but idle," which R17 RESUME forbids. **Fix:** pre-seed `~/.claude.json`
-`projects["<cwd>"].hasTrustDialogAccepted = true` (+ `hasCompletedProjectOnboarding`) for each tenant
-cwd, so claude starts active. (The `-p` non-interactive mode skips the prompt, but a restored session
-is a real TTY, so the config seed — not `-p` — is the path. There is no fleet-wide managed-settings
-key to disable the prompt; trust is per-path.)
+prompt — "restored but idle," which R17 RESUME forbids (surfaced live 2026-07-14, see D3). **Fix:**
+pre-seed `~/.claude.json` `projects["<cwd>"].hasTrustDialogAccepted = true`
+(+ `hasCompletedProjectOnboarding`) for each tenant cwd, so claude starts active. (The `-p`
+non-interactive mode skips the prompt, but a restored session is a real TTY, so the config seed — not
+`-p` — is the path. There is no fleet-wide managed-settings key to disable the prompt; trust is
+per-path.) **Built** as `bin/seed-claude-trust.py` (atomic, idempotent — writes only when a flag
+actually changes, so it never races claude's own `~/.claude.json` writes — and never raises), invoked
+by `bin/claude` inside the launch enter for the session's own cwd `[fedora-dev #196, merged]`. python3
+is present in-box (not at base), so the seed runs inside the box, not at the base wrapper level.
 
 ---
 
@@ -333,15 +358,22 @@ deviates. This is why the preamble's grounding rule applies to this document its
   `session <name> <cwd>` → `claude --continue`. Byte-compat-tested against the executor's *real*
   parser; **live-proven** (a real rebuild restored the session). Correct for one session, and the
   right MVP to prove the host executor end-to-end before adding identity.
+- **v2 multi-tenant** (all landed/landing): `bin/claude` assign-at-launch + folder-trust seed
+  (#196, merged); executor 4-field `--resume <sid>` grammar (fedora-bootstrap#143, merged); producer
+  `/proc` scan + `DEVBOX_MANIFEST_V2` gate (#197). The executor's *real* `parse_manifest` is embedded
+  verbatim in the producer's test as the cross-repo parity oracle; the sid grammar is strict
+  fixed-width UUID on both sides; both guards (sid + cwd) are in-suite mutation-proven.
 
 **Roads that FAILED — dead-ends, do not re-walk (all design-level).**
 - **`claude --continue` for multi-tenant.** It is cwd-scoped ("most recent conversation in this
   cwd"), so N tenants sharing `/home/core` collapse to 1. Fundamental, not a tuning issue → resume
   must be **by id**.
-- **A base-level `/proc` scanner to read live session-ids.** `CLAUDE_CODE_SESSION_ID` is **not** in
-  `/proc/<pid>/environ` (claude sets it *after* launch) and the process holds no open `<sid>.jsonl`
-  fd. A sibling process **cannot** learn a live session's id. Verified empirically (both live
-  tenants read `sid=none`).
+- **A `/proc` scanner to read an UNASSIGNED (self-generated) session-id.** `CLAUDE_CODE_SESSION_ID`
+  is **not** in `/proc/<pid>/environ` (claude sets it *after* launch) and the process holds no open
+  `<sid>.jsonl` fd. A sibling process **cannot** learn a self-generated id. Verified empirically (both
+  live tenants read `sid=none`). *(This dead-ended reading an id the process never advertised — NOT
+  the `/proc` scan itself, which is the chosen mechanism once the id is ASSIGNED on the argv; see
+  "The chosen road" below.)*
 - **Transcript-mtime mapping (pid → most-recent `.jsonl`).** Ambiguous when tenants share a cwd (all
   write to the same `~/.claude/projects/<slug>/`). Cannot reliably map pid → sid.
 
@@ -350,12 +382,27 @@ deviates. This is why the preamble's grounding rule applies to this document its
   inside), but adds a dependency on claude hook config/reliability under managed-settings, and needs
   a filter to exclude headless `claude -p` / subagent runs. Avoided in favour of assign-at-launch
   (no hook dependency, id deterministic).
-- **A separate supervised registrar service** scanning `/proc` (like the deadman). Blocked by the
-  same "cannot read the id" dead-end above.
+- **A separate registry FILE** (`bin/claude` writes `{uuid,cwd,window,liveness}` on launch, releases
+  on exit, crashed entries liveness-reaped). Designed, then found unnecessary — see the finding below.
 
-**The chosen road: assign-at-launch.** `bin/claude` mints the UUID and passes `--session-id`; as the
-launch wrapper it knows the cwd + tmux window, so it registers at the exact right point. Round-trip
-verified. The id becomes deterministic, external, and resumable.
+**The chosen road: assign-at-launch, and the process table IS the registry.** `bin/claude` mints the
+UUID and passes `--session-id`; round-trip verified (`--session-id` assigns, `--resume` resumes). The
+**design-level finding during the build:** once the id is assigned *on the argv*, it lives in
+`/proc/<pid>/cmdline` and the cwd in `/proc/<pid>/cwd` — so the running `claude` processes already ARE
+the registry. That **retired the planned registry file entirely**: no launch-write, no release-on-exit,
+no liveness reaping (a dead tenant is simply absent from `/proc` — crash-safe by construction). The
+same fact reopened the earlier "`/proc` scanner" dead-end as the *chosen* mechanism: the dead-end was
+reading the *self-generated* id (impossible); reading the *assigned* one from the cmdline is trivial.
+Simpler and more robust than the file it replaced. `enumerate_claude_procs` (#197) is that scan.
+
+**A deploy-ordering finding (design-level, from the fitness gate).** The producer and the executor
+ship in different repos on independent deploy clocks, and fedora-dev's `bin/claude` already assigns
+session-ids on `main` — so a 4-field manifest could reach a *running* host executor that has not yet
+deployed the 4-field grammar. Verified fail-safe (the executor validates the manifest BEFORE the kill,
+so a rejected 4-field line REFUSES the rebuild rather than stranding sessions), but made moot by design:
+v2 emission is gated behind `DEVBOX_MANIFEST_V2`, **default OFF** (D4), so the producer never hands a
+not-yet-upgraded executor a line it would reject. The gate is flipped once the host executor is
+confirmed on #143 — the consumer-before-producer (A1) convention, enforced in code rather than by hope.
 
 **An architecture-level precedent (2026-07-13, pre-dating this doc).** R17 was first declared
 "unbuildable as written" because code inside the claudebox dies at the KILL step — a conclusion
