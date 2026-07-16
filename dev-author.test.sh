@@ -9,6 +9,9 @@
 #
 # Run:  bash dev-author.test.sh   → exit 0 = all cases pass
 set -uo pipefail
+# Mock harness: neutralize the runner's ambient agent session so the actuator's R16 SCOPE_SESSION wiring
+# stays inert (ceiling path) here — the per-session narrowing layer has its OWN suite (repo-scope-session.test.sh).
+unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID SCOPE_SESSION 2>/dev/null || true
 HERE="$(cd "$(dirname "$0")" && pwd)"
 AUTHOR="$HERE/bin/dev-author.sh"
 [ -f "$AUTHOR" ] || { echo "FATAL: bin/dev-author.sh not found"; exit 2; }

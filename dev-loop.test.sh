@@ -21,6 +21,9 @@
 # like the real one, and every one of them FAILS against the pre-fix driver (authoring only issue 3).
 # A mock is only evidence where it is faithful on the axis under test.
 set -uo pipefail
+# Mock harness: neutralize the runner's ambient agent session so the actuator's R16 SCOPE_SESSION wiring
+# stays inert (ceiling path) here — the per-session narrowing layer has its OWN suite (repo-scope-session.test.sh).
+unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID SCOPE_SESSION 2>/dev/null || true
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOOP="$HERE/bin/dev-loop.sh"
 AUTHOR="$HERE/bin/dev-author.sh"

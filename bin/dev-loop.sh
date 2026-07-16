@@ -100,6 +100,13 @@ DEV_AUTHOR="${DEV_AUTHOR:-$HERE/dev-author.sh}"
 FLEET_HALT="${FLEET_HALT:-$HERE/fleet-halt.sh}"
 # the R16 operating-scope reader (#167) — rc 0 is the ONLY "in scope"; see bin/repo-scope.sh.
 REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
+# R16 per-session scope (2026-07-16): inside a REAL agent session narrow to THIS session's objective-BACKED
+# scope (inherited by the dev-author children it spawns); headless (no real session env) leaves
+# SCOPE_SESSION unset → ceiling only, byte-identical (never the pid-token session_id fallback, which would
+# fail-close every repo). Detached-timer SID binding is a deferred NOTE.
+if [ -z "${SCOPE_SESSION:-}" ] && [ -n "${CLAUDE_SESSION_ID:-}${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  export SCOPE_SESSION="$(. "$(dirname "$REPO_SCOPE")/session-id.sh" >/dev/null 2>&1; session_id 2>/dev/null || true)"
+fi
 LOOP_INTERVAL="${LOOP_INTERVAL:-300}"
 
 # The machine-owned line-1 anchor of dev-author's surface_blocked() comment — the ONLY record of "a

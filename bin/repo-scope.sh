@@ -10,12 +10,18 @@
 # swept the foreign repo, pushed a bot commit onto its feature branch and squash-merged its PR — all
 # out of scope, all "working as built".
 #
-# THE AUTHORITY is the versioned config `policy/scope.conf` (R15 config-as-code — never a hardcoded
-# default buried in a script): one bare repo name per line, comments/#/blank stripped, invalid lines
-# IGNORED (they can narrow the effective scope, never widen it). Scope is PER-OBJECTIVE, not
-# permanent; ADDING a repo is maintainer-gated structurally AND name-bound (bin/fitness-review.sh
-# RETURNs an addition no maintainer CONFIRMED **by name** — R16 rule 3), REMOVING one needs no
-# ceremony (narrowing is always safe).
+# THE AUTHORITY (R16, amended 2026-07-16) is the CONFIRMED-OBJECTIVE repo-list — the "Repositories this
+# objective operates on" table in 00-OBJECTIVES.md, maintainer-confirmed ONCE (R1). A per-session scope
+# is the session's TRANSCRIPTION of that list into the R27 registry, GIT-VERIFIED at read time against the
+# objective doc at the session's backing ref (session_scope_verified): the local .session file is only a
+# cache, so a hand-forged one can never widen scope past what the maintainer confirmed. `policy/scope.conf`
+# is RETIRED as the enrollment authority; it survives ONLY as the TRANSITIONAL CEILING the SCOPE_SESSION-
+# unset path (the poller) still reads until the cutover — one bare repo name per line, comments/blank
+# stripped, invalid lines IGNORED (narrow-only). ADDING a repo (to the objective repo-list OR the
+# transitional scope.conf) is maintainer-gated structurally AND name-bound: bin/fitness-review.sh RETURNs
+# an addition no maintainer CONFIRMED **by name** (R16 rule 3), via `objective-adds` (primary) + `diff-adds`
+# (transitional). Scope is PER-OBJECTIVE, not permanent; REMOVING a repo needs no ceremony (narrowing is
+# always safe).
 #
 # FAIL DIRECTION (R16 rule 4): an UNREADABLE config means NO action on anything but the apparatus's
 # OWN repos ($SCOPE_OWN — fedora-dev, the dev box's repo, + fedora-bootstrap, the control repo): the
@@ -57,14 +63,17 @@
 #   * SCOPE_SESSION UNSET → this reader behaves BYTE-IDENTICALLY to the ceiling-only version above (the
 #     session registry is not even consulted or sourced). This is the load-bearing inertness: the running
 #     poller sets nothing, so enabling this file changes NOTHING until a caller opts in per-session.
-#   * SCOPE_SESSION SET → the session's DECLARED scope (bin/session-registry.sh resolve <sid>) NARROWS
-#     the ceiling: effective set = declared ∩ ceiling. `check` ALLOWs iff the repo is in that effective
-#     set AND not held by another LIVE session (disjointness, R28); an UNDECLARED session (SCOPE_SESSION
-#     set but unregistered / empty scope) acts on NOTHING (fail-closed, F6). A session can only ever
-#     NARROW the ceiling, never exceed it. `list` mirrors: the effective set, or empty when undeclared.
-#     The ceiling's fail direction is untouched and layered under: an unreadable config still falls back
-#     to SCOPE_OWN, and the session then narrows WITHIN that own-only fallback (a declared own repo →
-#     rc 0 with the WARN; anything else → deny).
+#   * SCOPE_SESSION SET → the session's GIT-VERIFIED scope (session_scope_verified <sid>) NARROWS the
+#     ceiling: effective set = verified ∩ ceiling. The session's cached repos are TRUSTED only when they
+#     still SET-EQUAL the confirmed-objective repo-list at the session's backing ref — otherwise the
+#     session fails CLOSED with the cause named (SESSION_UNBACKED: no/old backing · bad ref · MISMATCH =
+#     a hand-edited cache tried to widen). On OK, `check` ALLOWs iff the repo is in the verified set AND
+#     not held by another LIVE session (disjointness, R28); an UNDECLARED session (SCOPE_SESSION set but
+#     unregistered) acts on NOTHING (fail-closed, F6). A session can only ever NARROW the ceiling, never
+#     exceed it. `list` mirrors: the verified effective set, or empty when unverified/undeclared. The
+#     ceiling's fail direction is untouched and layered under (an unreadable config still falls back to
+#     SCOPE_OWN, and the session narrows within it). `transcribe`/`union`/`owner` support the objective-
+#     backed model + the (deferred) poller cutover; see the CLI contract below.
 #
 # CALLERS (R16 rule 4 — every actuator): bin/pr-poller.sh (sweep list + the fixer belt),
 # bin/fitness-review.sh (before reviewing + the diff-adds gate), bin/auto-merge.sh (before merging),
@@ -189,6 +198,65 @@ scope_confirm_names(){
   printf '%s' "$out"
 }
 
+# ---- OBJECTIVE REPO-LIST — the git-anchored authority (R16, 2026-07-16) ----------------------------
+# The confirmed objective's "Repositories this objective operates on" markdown table REPLACES
+# policy/scope.conf as the maintainer-confirmed authority: scope.conf was a standing allowlist to edit;
+# the objective repo-list is confirmed ONCE (R1) and any net-add is fitness-gated exactly like a
+# scope.conf add was. The session registry only CACHES a session's transcription of this list; the
+# read path re-verifies the cache against it (session_scope_verified).
+
+# objective_row_names — an 00-OBJECTIVES.md doc on stdin → the bare repo names its "Repositories this
+# objective operates on" table lists, one per line. HEADING-ANCHORED (rows only under that `##` section,
+# until the next `##`); the table's HEADER row (`| Repository | Role |`) and separator (`|---|`) carry no
+# `owner/repo` cell-1 and are dropped by the grammar; each kept cell-1 must match the backticked
+# `owner/repo` shape and is normalized off its `owner/` prefix (lockstep with scope_norm /
+# scope_confirm_names). Fail-closed to EMPTY on no-heading / no-table / zero valid rows.
+objective_row_names(){
+  awk '
+    /^##[[:space:]]/ { insec = ($0 ~ /^##[[:space:]]+Repositories this objective operates on[[:space:]]*$/); next }
+    !insec           { next }
+    /^[[:space:]]*\|/ {
+      l = $0; sub(/\r$/, "", l)
+      sub(/^[[:space:]]*\|[[:space:]]*/, "", l)      # strip leading pipe + ws
+      sub(/[[:space:]]*\|.*$/, "", l)                # keep only table cell 1
+      gsub(/`/, "", l)                                # strip backticks
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", l)
+      if (l ~ /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/) { n = split(l, a, "/"); print a[n] }
+    }
+  '
+}
+
+# scope_objective_adds <objective-doc-path> — a unified diff on stdin → the repo names NET-ADDED to the
+# objective's repo-list table, one per line, sorted. The R16 "agent never authorizes" DOC boundary once
+# the authority moved from scope.conf to 00-OBJECTIVES.md. The hunk-state machine (the crafted
+# `+++`-header / `diff --git`-reset defence, 98e1194 finding 1) is PORTED VERBATIM from scope_diff_adds;
+# ONLY the per-line extraction differs — a markdown table cell-1 held to the backticked `owner/repo`
+# grammar (scope_norm'd), no `#`-comment strip. NOT section-confined within the doc: a stray backticked
+# `owner/repo` table row added anywhere in the objective doc triggers a safe RETURN, never a silent widen
+# (a strict-grammar SUPERSET — over-gates, never under-gates; section-confinement is a follow-up NOTE).
+scope_objective_adds(){
+  awk -v sf="$1" '
+    /^diff --git /  { infile = 0; inhunk = 0; next }        # unforgeable file boundary (content is prefixed)
+    /^@@/           { inhunk = 1; next }                     # hunk opens; only diff --git closes it
+    inhunk == 0 && /^\+\+\+ / { infile = ($2 == "b/" sf); next }  # header, only OUTSIDE a hunk
+    inhunk == 0     { next }                                 # ---/index/mode metadata, never content
+    !infile         { next }
+    /^[+-]/ {
+      sign = substr($0, 1, 1); l = substr($0, 2)
+      sub(/\r$/, "", l)
+      if (l !~ /^[ \t]*\|/) next                             # only a markdown table row can carry a name
+      sub(/^[ \t]*\|[ \t]*/, "", l)
+      sub(/[ \t]*\|.*$/, "", l)
+      gsub(/`/, "", l)
+      gsub(/^[ \t]+|[ \t]+$/, "", l)
+      if (l !~ /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/) next    # require owner/repo (drops header/separator)
+      n = split(l, a, "/"); name = a[n]
+      if (sign == "+") add[name] = 1; else del[name] = 1
+    }
+    END { for (r in add) if (!(r in del)) print r }
+  ' | sort
+}
+
 # ---- PER-SESSION LAYER — pure helpers (R27/R28; --selftest covers exactly these) -------------------
 # A per-session NARROWING layer bolted ON TOP of the ceiling (scope_decide). It NEVER widens: a session
 # can only ever narrow the maintainer-confirmed ceiling to the subset it declared, and it acts on
@@ -297,6 +365,25 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "one non-name token voids valid names beside it" "$(scope_confirm_names 'CONFIRMED a-repo (for now)')" ""
   ck "CONFIRMED must OPEN the line" "$(scope_confirm_names 'Sounds good — CONFIRMED a-repo')" ""
   ck "CRLF tolerated"              "$(scope_confirm_names $'CONFIRMED wl-two\r')" "wl-two"
+  echo "== objective_row_names (heading-anchored table parse — the git-anchored R16 authority) =="
+  OBJ=$'# T\n\n## Objective\n\n| `oso-gato/before-section` | x |\n\n## Repositories this objective operates on\n\nThis objective operates on exactly these repositories:\n\n| Repository | Role |\n|---|---|\n| `oso-gato/fedora-dev` | the DEV |\n| `oso-gato/fedora-bootstrap` | the HOST |\n\nThis list is the authorization.\n\n## Document authority\n\n| `oso-gato/after-section` | w |\n'
+  ck "extracts the two scoped repos; header+separator dropped; owner/ normalized; OTHER sections ignored" \
+     "$(printf '%s' "$OBJ" | objective_row_names | tr '\n' ' ')" "fedora-dev fedora-bootstrap "
+  ck "no Repositories heading → EMPTY (fail-closed)" "$(printf '## Other\n| `oso-gato/x` | y |\n' | objective_row_names)" ""
+  ck "a non-backticked/no-slash cell-1 is dropped" "$(printf '## Repositories this objective operates on\n| plainword | y |\n' | objective_row_names)" ""
+  echo "== scope_objective_adds (NET adds to the objective repo-list table — the DOC-boundary detector) =="
+  OA1=$'diff --git a/00-OBJECTIVES.md b/00-OBJECTIVES.md\n--- a/00-OBJECTIVES.md\n+++ b/00-OBJECTIVES.md\n@@ -1,2 +1,3 @@\n | `oso-gato/fedora-dev` | y |\n | `oso-gato/fedora-bootstrap` | z |\n+| `oso-gato/knowledge-desktop` | new |\n'
+  ck "a net-added table row is detected"            "$(printf '%s' "$OA1" | scope_objective_adds 00-OBJECTIVES.md)" "knowledge-desktop"
+  OA2=$'--- a/00-OBJECTIVES.md\n+++ b/00-OBJECTIVES.md\n@@ -1 +1,3 @@\n x\n+| Repository | Role |\n+|---|---|\n'
+  ck "added header/separator rows are NOT scope names" "$(printf '%s' "$OA2" | scope_objective_adds 00-OBJECTIVES.md)" ""
+  OA3=$'--- a/00-OBJECTIVES.md\n+++ b/00-OBJECTIVES.md\n@@ -1,2 +1,1 @@\n | `oso-gato/fedora-dev` | y |\n-| `oso-gato/e2e-alpha` | z |\n'
+  ck "a removal-only diff is NOT an expansion"      "$(printf '%s' "$OA3" | scope_objective_adds 00-OBJECTIVES.md)" ""
+  OA4=$'--- a/00-OBJECTIVES.md\n+++ b/00-OBJECTIVES.md\n@@ -1,2 +1,2 @@\n-| `oso-gato/x` | a |\n | `oso-gato/y` | b |\n+| `oso-gato/x` | a |\n'
+  ck "a MOVED row is net zero"                      "$(printf '%s' "$OA4" | scope_objective_adds 00-OBJECTIVES.md)" ""
+  OA5=$'--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n line\n+| `oso-gato/knowledge-desktop` | x |\n'
+  ck "the same row added to ANOTHER file never trips (path-scoped)" "$(printf '%s' "$OA5" | scope_objective_adds 00-OBJECTIVES.md)" ""
+  OA6=$'diff --git a/00-OBJECTIVES.md b/00-OBJECTIVES.md\n--- a/00-OBJECTIVES.md\n+++ b/00-OBJECTIVES.md\n@@ -1,2 +1,4 @@\n | `oso-gato/fedora-dev` | y |\n+++ b/README.md\n+| `oso-gato/evil` | x |\n'
+  ck "a crafted +++ line cannot ESCAPE the hunk (the add after it is still seen)" "$(printf '%s' "$OA6" | scope_objective_adds 00-OBJECTIVES.md)" "evil"
   echo "== scope_session_decide (the per-session LAYER — narrows the ceiling, NEVER widens it) =="
   ck "ceiling DENY stands (a session can never widen a repo back into the ceiling)" "$(scope_session_decide DENY 1 1 0)" "DENY"
   ck "ceiling FALLBACK_DENY stands (unreadable-config rc-4 freeze preserved)"       "$(scope_session_decide FALLBACK_DENY 1 1 0)" "FALLBACK_DENY"
@@ -361,6 +448,50 @@ repo_held_by_other(){
   return 0
 }
 
+# ---- BACKING VERIFICATION (R16 actuator boundary) — the cache is checked against git ----------------
+# objective_clone_dir <repo> → where the repo's clone lives locally (test seam: $SCOPE_OBJECTIVE_CLONE).
+objective_clone_dir(){ printf '%s' "${SCOPE_OBJECTIVE_CLONE:-$HOME/.local/share/$1}"; }
+
+# objective_repos <repo> <objective-path> <sha> → the objective's repo-list AT THAT GIT REF, one per line
+# (via objective_row_names). Local backend: `git -C <clone> show <sha>:<path>`. rc 1 (empty) on any
+# unreadable/unparseable ref — the read path fails such a session CLOSED. A cross-repo (gh-api) backend
+# for an absent clone is a recorded follow-up NOTE (the apparatus objective's backing repo is always local).
+objective_repos(){
+  local repo="$1" path="$2" sha="$3" dir out
+  dir="$(objective_clone_dir "$repo")"
+  [ -d "$dir" ] || return 1
+  out="$(git -C "$dir" show "$sha:$path" 2>/dev/null | objective_row_names | grep . )" || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# session_scope_verified <sid> → LINE 1 = the verification STATE, then (on OK only) the verified repos:
+#   OK           — the session is registered, backed, AND its cached line-3 repos SET-EQUAL the objective
+#                  repo-list at its backing ref → lines 2..N are those repos (the verified scope to act on).
+#   UNREGISTERED — no registry entry (or empty scope).
+#   UNBACKED     — registered but line 4 is absent/'-' or malformed (a pre-backing entry, or a hand-forge).
+#   UNREADABLE   — the backing ref (repo/path/sha) can't be read/parsed to a non-empty repo-list.
+#   MISMATCH     — cached repos ≠ objective repo-list at the ref (a hand-edited line 3 tried to widen).
+# The cache is thereby only ever TRUSTED when it still equals the git-anchored, maintainer-confirmed fact;
+# any drift/forgery/breakage fails the session CLOSED (the caller maps everything but OK to no-action).
+# No globals (command-sub safe): the state rides stdout line 1.
+session_scope_verified(){
+  local sid="$1" repos backing brepo bpath bsha objlist
+  repos="$(_run_locked _resolve_impl "$sid" 2>/dev/null)" || repos=""
+  [ -n "$repos" ] || { printf 'UNREGISTERED\n'; return 0; }
+  backing="$(_run_locked _resolve_backing_impl "$sid" 2>/dev/null)" || backing=""
+  [ -n "$backing" ] || { printf 'UNBACKED\n'; return 0; }
+  read -r brepo bpath bsha _ <<< "$backing"
+  [ -n "$brepo" ] && [ -n "$bpath" ] && [ -n "$bsha" ] || { printf 'UNBACKED\n'; return 0; }
+  objlist="$(objective_repos "$brepo" "$bpath" "$bsha")" || objlist=""
+  [ -n "$objlist" ] || { printf 'UNREADABLE\n'; return 0; }
+  # The cache is TRUSTED only when its line-3 repos SET-EQUAL the git-anchored objective repo-list; any
+  # drift/forgery ⇒ MISMATCH ⇒ fail closed. `verified_ok` is the single gating line (the mutation anchor).
+  local verified_ok=0
+  [ "$(printf '%s\n' $repos | grep . | sort -u)" = "$(printf '%s\n' "$objlist" | sort -u)" ] && verified_ok=1
+  if [ "$verified_ok" = 1 ]; then printf 'OK\n'; printf '%s\n' $repos; else printf 'MISMATCH\n'; fi
+}
+
 case "${1:-}" in
   list)
     if [ -z "${SCOPE_SESSION:-}" ]; then
@@ -381,11 +512,13 @@ case "${1:-}" in
       ceiling_list="$(printf '%s\n' $SCOPE_OWN)"
     fi
     session_layer_init
-    sscope="$(session_declared_scope "$SCOPE_SESSION")"
-    if [ -z "$sscope" ]; then
-      log "session '$SCOPE_SESSION' has declared NO operating scope — empty effective set; register it first (bin/session-registry.sh register <sid> <repo…>)"
+    sv="$(session_scope_verified "$SCOPE_SESSION")"
+    sstate="$(printf '%s\n' "$sv" | sed -n '1p')"
+    if [ "$sstate" != OK ]; then
+      log "session '$SCOPE_SESSION' has no VERIFIED objective-backed scope ($sstate) — empty effective set; transcribe it: bin/repo-scope.sh transcribe --backing '<repo> <path> <sha>' <sid> (R16)"
       exit 0
     fi
+    sscope="$(printf '%s\n' "$sv" | sed -n '2,$p')"
     scope_effective "$sscope" "$ceiling_list"
     exit 0;;
   check)
@@ -399,14 +532,28 @@ case "${1:-}" in
       # ── SCOPE_SESSION UNSET → the ceiling verdict IS the answer, byte-identical to the pre-session reader ──
       verdict="$ceiling"
     else
-      # ── SCOPE_SESSION SET → apply the per-session narrowing LAYER on top of the ceiling ──
+      # ── SCOPE_SESSION SET → apply the per-session narrowing LAYER on top of the ceiling. The session's
+      #    scope is the objective-BACKED, git-VERIFIED set (session_scope_verified) — never the raw cache. ──
       session_layer_init
-      sscope="$(session_declared_scope "$SCOPE_SESSION")"
-      declared=0; [ -n "$sscope" ] && declared=1
-      smember=0; [ "$declared" = 1 ] && smember="$(scope_member "$repo" "$sscope")"
-      held_sid="$(repo_held_by_other "$repo" "$SCOPE_SESSION")"
-      held=0; [ -n "$held_sid" ] && held=1
-      verdict="$(scope_session_decide "$ceiling" "$declared" "$smember" "$held")"
+      sv="$(session_scope_verified "$SCOPE_SESSION")"
+      sstate="$(printf '%s\n' "$sv" | sed -n '1p')"
+      sbacking_cause=""
+      case "$sstate" in
+        OK)
+          sscope="$(printf '%s\n' "$sv" | sed -n '2,$p')"
+          smember="$(scope_member "$repo" "$sscope")"
+          held_sid="$(repo_held_by_other "$repo" "$SCOPE_SESSION")"
+          held=0; [ -n "$held_sid" ] && held=1
+          verdict="$(scope_session_decide "$ceiling" 1 "$smember" "$held")";;
+        UNREGISTERED)
+          # undeclared within the ceiling → SESSION_UNDECLARED; outside it → the ceiling DENY stands.
+          verdict="$(scope_session_decide "$ceiling" 0 0 0)";;
+        *)
+          # UNBACKED | UNREADABLE | MISMATCH → the session's git backing is broken/forged; act on NOTHING.
+          # A ceiling DENY/FALLBACK_DENY still stands (preserves its own rc/log); otherwise SESSION_UNBACKED.
+          sbacking_cause="$sstate"
+          case "$ceiling" in DENY|FALLBACK_DENY) verdict="$ceiling";; *) verdict="SESSION_UNBACKED";; esac;;
+      esac
     fi
     case "$verdict" in
       ALLOW) exit 0;;
@@ -428,6 +575,9 @@ case "${1:-}" in
       SESSION_HELD)
         log "DENY: repo '$repo' is held by another LIVE session '$held_sid' — R28 disjoint-scope: no action while another session holds it"
         exit 3;;
+      SESSION_UNBACKED)
+        log "DENY: session '$SCOPE_SESSION' scope is not git-verified ($sbacking_cause) — R16: the registry cache does not match the confirmed-objective repo-list at its backing ref (UNBACKED=no/old backing, UNREADABLE=bad ref, MISMATCH=hand-edited to widen); fail-closed to nothing. Re-transcribe: bin/repo-scope.sh transcribe --backing '<repo> <path> <sha>' <sid>"
+        exit 3;;
     esac;;
   diff-adds)
     scope_diff_adds "${2:-$SCOPE_CONF_REL}"
@@ -435,7 +585,47 @@ case "${1:-}" in
   confirm-names)
     scope_confirm_names "${2:-}"
     exit 0;;
+  objective-adds)
+    # the DOC-boundary detector (R16): net-adds to the objective repo-list table (default 00-OBJECTIVES.md).
+    scope_objective_adds "${2:-00-OBJECTIVES.md}"
+    exit 0;;
+  transcribe)
+    # transcribe --backing '<repo> <objective-path> <sha>' <sid> — DERIVE the repos from the confirmed
+    # objective at that ref and register them for the session (the agent transcribes, never authorizes, R16).
+    shift
+    tbacking=""
+    if [ "${1:-}" = "--backing" ]; then tbacking="${2:-}"; shift 2 2>/dev/null || shift "$#"; fi
+    tsid="${1:-}"
+    { [ -n "$tbacking" ] && [ -n "$tsid" ]; } || { log "usage: repo-scope.sh transcribe --backing '<repo> <objective-path> <sha>' <sid>"; exit 2; }
+    read -r tbrepo tbpath tbsha _ <<< "$tbacking"
+    { [ -n "$tbrepo" ] && [ -n "$tbpath" ] && [ -n "$tbsha" ]; } || { log "transcribe: --backing needs '<repo> <objective-path> <sha>'"; exit 2; }
+    tderived="$(objective_repos "$tbrepo" "$tbpath" "$tbsha")" || tderived=""
+    [ -n "$tderived" ] || { log "transcribe: could not read a non-empty objective repo-list at $tbrepo:$tbpath@$tbsha — fail-closed, registering nothing (R16)"; exit 3; }
+    "$HERE/session-registry.sh" register --backing "$tbacking" "$tsid" $tderived
+    exit $?;;
+  union)
+    # ∪ of every LIVE session's git-VERIFIED scope — the shared-service actionable set (poller cutover, STEP 10).
+    session_layer_init
+    { while IFS=$'\t' read -r usid _; do
+        [ -n "$usid" ] || continue
+        usv="$(session_scope_verified "$usid")"
+        [ "$(printf '%s\n' "$usv" | sed -n '1p')" = OK ] || continue
+        printf '%s\n' "$usv" | sed -n '2,$p'
+      done < <(_run_locked _list_impl 2>/dev/null); } | grep . | sort -u
+    exit 0;;
+  owner)
+    # owner <repo> → the SID of the unique LIVE, verified session whose scope holds <repo> (or empty).
+    orepo="$(scope_norm "${2:-}")"
+    [ -n "$orepo" ] || { log "usage: repo-scope.sh owner <repo>"; exit 2; }
+    session_layer_init
+    while IFS=$'\t' read -r osid _; do
+      [ -n "$osid" ] || continue
+      osv="$(session_scope_verified "$osid")"
+      [ "$(printf '%s\n' "$osv" | sed -n '1p')" = OK ] || continue
+      printf '%s\n' "$osv" | sed -n '2,$p' | grep -qxF -- "$orepo" && { printf '%s\n' "$osid"; exit 0; }
+    done < <(_run_locked _list_impl 2>/dev/null)
+    exit 0;;
   *)
-    echo "usage: repo-scope.sh check <repo> | list | diff-adds [path] | confirm-names <line1> | --selftest" >&2
+    echo "usage: repo-scope.sh check <repo> | list | diff-adds [path] | objective-adds [path] | confirm-names <line1> | transcribe --backing '<repo> <path> <sha>' <sid> | union | owner <repo> | --selftest" >&2
     exit 2;;
 esac

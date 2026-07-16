@@ -10,18 +10,24 @@
 # reaped, so a crashed or torn-down session never wedges a repo forever.
 #
 # STORE: one file per session under ${SCOPE_REGISTRY_DIR:-$HOME/.local/state/scope-registry}, named by
-# the (sanitized) SID, three lines: <sid> / <liveness-record> / <repo…>. All mutation is serialized by a
-# single flock on the store's `.lock` — real cross-process mutual exclusion, not advisory hygiene.
+# the (sanitized) SID, up to FOUR lines: <sid> / <liveness-record> / <repo…> / <backing-ref>. The 4th
+# line (R16, added 2026-07-16) is the git-anchored BACKING REF '<repo> <objective-path> <confirmed-sha>'
+# the READER re-verifies the cached repos against — this store stays a DUMB cache; the AUTHORITY is git.
+# A pre-backing 3-line entry (or a '-' 4th line) has NO backing and the reader fails it closed (UNBACKED).
+# All mutation is serialized by a single flock on the store's `.lock` — real cross-process mutex.
 #
 # SUBCOMMANDS:
-#   register <sid> <repo…>   record the session's scope + its liveness coordinates. DENIED (rc 1) if the
-#                            requested set intersects ANY OTHER live session (R28). Re-registering the
-#                            same SID replaces its own scope (it never conflicts with itself).
+#   register [--backing '<repo> <path> <sha>'] <sid> <repo…>
+#                            record the session's scope + its liveness coordinates (+ optional backing
+#                            ref). DENIED (rc 1) if the requested repo-set intersects ANY OTHER live
+#                            session (R28 — the --backing flag never joins that check). Re-registering
+#                            the same SID replaces its own scope (it never conflicts with itself).
 #   resolve  <sid>           print that session's repo-set (its own only).
+#   resolve-backing <sid>    print that session's BACKING REF line (empty if unregistered / no backing).
 #   release  <sid>           remove that session's entry.
 #   list                     list LIVE sessions and their scopes (TSV: sid<TAB>repos).
 #   reap                     remove entries whose holder is DEAD (per lock-lib liveness), freeing repos.
-#   --selftest               exercise register/resolve/release/list/reap + the disjointness deny.
+#   --selftest               exercise register/resolve/resolve-backing/release/list/reap + disjointness.
 #
 # PURE HELPERS (R28; sourceable + selftested): disjoint <A…> -- <B…> · overlaps <A…> -- <B…>.
 #
@@ -65,6 +71,8 @@ _entry(){ printf '%s/%s.session' "$(_regdir)" "$(_key "$1")"; }
 _read_sid(){    sed -n '1p' "$1" 2>/dev/null; }
 _read_record(){ sed -n '2p' "$1" 2>/dev/null; }
 _read_repos(){  sed -n '3p' "$1" 2>/dev/null; }
+_read_backing(){ sed -n '4p' "$1" 2>/dev/null; }   # line 4 = the R16 BACKING REF '<repo> <path> <sha>'
+                                                    # (absent on a pre-backing 3-line entry ⇒ empty)
 
 # run "$@" with the store's exclusive flock held (real cross-process mutex). The impl operates lockless.
 _run_locked(){
@@ -83,7 +91,14 @@ _reap_locked(){
 }
 
 # ---- SUBCOMMAND impls ------------------------------------------------------------------------------
-_reg_impl(){ # <sid> <repo…>
+_reg_impl(){ # [--backing '<repo> <path> <sha>'] <sid> <repo…>
+  # The OPTIONAL leading --backing flag records the R16 git-anchored authority (repo + objective-doc
+  # path + maintainer-confirmed sha) the read-path re-verifies the cached repos against; absent ⇒ '-'
+  # (a pre-backing entry — the reader fails it closed as UNBACKED, R16). Parsed FIRST so it is never
+  # swallowed into the variadic sid+repos or the R28 disjoint check.
+  local backing="-"
+  if [ "${1:-}" = "--backing" ]; then backing="${2:-}"; shift 2 2>/dev/null || shift "$#"; fi
+  [ -n "$backing" ] || backing="-"
   local sid="${1:-}"; shift || true
   [ -n "$sid" ] && [ "$#" -ge 1 ] || { echo "session-registry: register needs <sid> and at least one repo" >&2; return 2; }
   local key; key="$(_key "$sid")"
@@ -101,14 +116,21 @@ _reg_impl(){ # <sid> <repo…>
     echo "session-registry: DENY register '$sid' — repo(s) [${conflict% }] already held by live session '$conflict_sid'" >&2
     return 1
   fi
-  { printf '%s\n' "$sid"; printf '%s\n' "$(session_coords)"; printf '%s\n' "$*"; } > "$(_entry "$sid")"
-  echo "session-registry: registered '$sid' → $*"
+  { printf '%s\n' "$sid"; printf '%s\n' "$(session_coords)"; printf '%s\n' "$*"; printf '%s\n' "$backing"; } > "$(_entry "$sid")"
+  echo "session-registry: registered '$sid' → $* (backing: $backing)"
 }
 
 _resolve_impl(){ # <sid>
   local sid="${1:-}"; [ -n "$sid" ] || { echo "session-registry: resolve needs <sid>" >&2; return 2; }
   local f; f="$(_entry "$sid")"; [ -e "$f" ] || return 0
   _read_repos "$f"
+}
+
+_resolve_backing_impl(){ # <sid> → the session's BACKING REF line (empty if unregistered or pre-backing 3-line)
+  local sid="${1:-}"; [ -n "$sid" ] || { echo "session-registry: resolve-backing needs <sid>" >&2; return 2; }
+  local f; f="$(_entry "$sid")"; [ -e "$f" ] || return 0
+  local b; b="$(_read_backing "$f")"; [ "$b" = "-" ] && return 0   # '-' sentinel ⇒ no backing, print nothing
+  printf '%s' "$b"
 }
 
 _release_impl(){ # <sid>
@@ -140,7 +162,7 @@ _reap_impl(){
   return 0
 }
 
-_usage(){ echo "usage: session-registry.sh register <sid> <repo…> | resolve <sid> | release <sid> | list | reap | --selftest" >&2; }
+_usage(){ echo "usage: session-registry.sh register [--backing '<repo> <path> <sha>'] <sid> <repo…> | resolve <sid> | resolve-backing <sid> | release <sid> | list | reap | --selftest" >&2; }
 
 # ===================================================================================================
 # DIRECT-EXECUTION: CLI dispatch + selftest. Sourcing loads the functions (incl. the R28 pure helpers)
@@ -170,6 +192,15 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     SESSION_HOLDER_PID="$HPB" _run_locked _reg_impl sidB repo-two >/dev/null && ok "register sidB→repo-two (disjoint)" || bad "register sidB failed"
     [ "$(_run_locked _resolve_impl sidA)" = repo-one ] && ok "resolve sidA = repo-one" || bad "resolve sidA wrong"
     [ "$(_run_locked _resolve_impl sidB)" = repo-two ] && ok "resolve sidB = repo-two" || bad "resolve sidB wrong"
+
+    echo "== backing ref (R16 4th line — backward-compatible with the 3-line readers) =="
+    [ -z "$(_run_locked _resolve_backing_impl sidA)" ] && ok "a 3-line entry has NO backing (empty)" || bad "3-line entry leaked a backing"
+    SESSION_HOLDER_PID="$HPA" _run_locked _reg_impl --backing 'fedora-dev 00-OBJECTIVES.md deadbeef' sidA repo-one >/dev/null \
+      && ok "register --backing sidA" || bad "register --backing failed"
+    [ "$(_run_locked _resolve_backing_impl sidA)" = 'fedora-dev 00-OBJECTIVES.md deadbeef' ] \
+      && ok "resolve-backing round-trips the ref" || bad "resolve-backing lost the ref"
+    [ "$(_run_locked _resolve_impl sidA)" = repo-one ] && ok "resolve (line 3) UNAFFECTED by the added line 4" || bad "line 4 corrupted resolve"
+    [ "$(_run_locked _list_impl | grep -c .)" = 2 ] && ok "list UNAFFECTED by line 4 (still 2 live)" || bad "line 4 broke list"
     if SESSION_HOLDER_PID="$HPB" _run_locked _reg_impl sidB repo-one 2>/dev/null; then
       bad "sidB claimed repo-one while live sidA holds it — R28 deny missing"
     else ok "sidB DENIED repo-one (held by live sidA)"; fi
@@ -198,6 +229,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "$cmd" in
     register) _run_locked _reg_impl "$@";;
     resolve)  _run_locked _resolve_impl "$@";;
+    resolve-backing) _run_locked _resolve_backing_impl "$@";;
     release)  _run_locked _release_impl "$@";;
     list)     _run_locked _list_impl "$@";;
     reap)     _run_locked _reap_impl "$@";;

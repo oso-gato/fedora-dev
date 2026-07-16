@@ -72,7 +72,7 @@ The anchors, one line each:
 | **A2** | The bus | GitHub = IPC + WAL + audit; canonical durable state; signals identity/sha/scope-bound; parse, never execute |
 | **A3** | The loop | confirm once → plan → author → validate → judge → server-merge → deploy → verify-live → self-refresh |
 | **A4** | Validation | two tiers, disposable throwaways, one durable input (the package cache) |
-| **A5** | Multi-tenancy | N sessions, disjoint declared scopes, the R27 registry as source of truth |
+| **A5** | Multi-tenancy | N sessions, disjoint scopes, the R27 registry a git-backed cache of each session's objective-authorized scope |
 | **A6** | The clocks | host image · dev image · claudebox — decoupled; rebuild continuity (R17) |
 | **A7** | Control plane | fail-closed gates; scans layered, never the sole guard; three human anchors |
 
@@ -146,10 +146,24 @@ loop on its own **declared, pairwise-disjoint repo-set** (R16: per-session opera
 **authorized by the session's confirmed objective repo-list — transcribed into the registry, never
 self-authorized** — fail-closed to NOTHING when undeclared). Sessions share one dev App
 identity; isolation is enforced by **code and scope, not identity**: per-session state namespacing
-(R3/BP6), a durable **SESSION REGISTRY** (R27 — session-id, scope, container-id; the single source of
-truth every session-aware actuator reads, each entry's scope backed by a confirmed objective),
-disjointness checks before acting (R28), and the
-per-session routing token on every bus message (R5). The host validates every session's tickets but
+(R3/BP6), a durable **SESSION REGISTRY** (R27 — session-id, scope, container-id, **backing ref**;
+`~/.local/state/scope-registry/<sid>.session`, four lines, on the home volume so it survives box
+recreation), disjointness checks before acting (R28), and the per-session routing token on every bus
+message (R5).
+
+**[BUILT 2026-07-16] The registry is a CACHE; the authority is GIT.** The word "registry" is
+overloaded here — this SCOPE registry is distinct from the D4 process-table *restore* registry (which
+enumerates live tenants for R17 rebuild). A `.session` file's line 3 (repos) is trusted only when it
+still **set-equals the confirmed-objective repo-list** (`00-OBJECTIVES.md`'s "Repositories this
+objective operates on" table) at the file's **line-4 backing ref** (`<repo> <objective-path>
+<confirmed-sha>`). Every actuator reaches a repo through `repo-scope.sh check`, which
+(`session_scope_verified`) re-derives the objective repo-list at that ref and set-compares: a
+match ALLOWs within the scope∩ceiling; any drift/forgery/breakage fails CLOSED
+(`SESSION_UNBACKED`, cause named — no/old backing · unreadable ref · MISMATCH). So a locally
+hand-forged `.session` can never widen scope past what the maintainer confirmed in git. The agent
+`transcribe`s the objective's list into the cache; it never authorizes. `policy/scope.conf` is
+retired as the enrollment authority (it remains the transitional ceiling the SCOPE_SESSION-unset
+poller reads until the cutover — a NOTE). The host validates every session's tickets but
 routes each outcome **only to its originating session**. Whole-container operations (rebuild) act on
 **all resident sessions together** (R20); per-session control (HALT targeting) resolves through the
 registry.
@@ -429,3 +443,38 @@ where an in-container teardown provably does.
   past its `--since` window → the poller + deadman never launched. Recovery: kill the stuck enters;
   the loops relaunch fresh against the ready box. **Lesson:** a restart can strand services in the
   enter-wait; R17's clean, host-orchestrated lifecycle is the durable fix.
+
+---
+
+# NOTES (non-blocking — follow-ups)
+
+Recorded per MVP-first (Arthur 2026-07-12): the objective-backed per-session scope (2026-07-16) shipped
+proven + safe; these are deferred improvements, revisited when a follow-up feature or a second-objective
+tenant makes one load-bearing.
+
+- **STEP-10 CUTOVER (the poller):** repoint `pr-poller.sh`'s sweep list from `scope.conf` to
+  `repo-scope.sh union`, per-repo `check` to `owner`-resolved `SCOPE_SESSION`, and pass the owner SID to
+  the per-PR sub-actuators — behind a `POLLER_ARMED=0` dry-run soak (it controls merges: highest-risk,
+  done last). The `union`/`owner` verbs are built + tested now; only the wiring is deferred.
+- **DELETE `policy/scope.conf`** and drop the transitional `diff-adds` arm from `fitness-review.sh`
+  (the objective-adds gate is the authority) — strictly AFTER the cutover soaks clean.
+- **fedora-desktop / e2e-alpha / knowledge-desktop** migrate to their own objective-backed sessions (or
+  fall out of the sweep) at cutover.
+- **Cross-repo backing backend:** `objective_repos` reads a LOCAL clone; a gh-api backend is needed only
+  when a backing repo's clone is absent (a non-issue for the apparatus objective, whose backing repo
+  `fedora-dev` is always local — the kd session's backing lives in the knowledge-desktop repo and needs
+  either its clone present or this backend before it verifies).
+- **`is-ancestor-of-main` sha hardening:** the read-path re-verify closes the hand-edited-`.session`
+  vector; a residual local-commit-forgery (crafting a local commit that lists an extra repo — same
+  home-volume-write trust level as editing `.session` directly) is hardened by pinning the backing sha
+  to an ancestor of `origin/main`.
+- **Section-confined objective-adds:** the detector is a strict-grammar SUPERSET (a stray backticked
+  `owner/repo` table row anywhere in `00-OBJECTIVES.md` triggers a safe RETURN); confining it to the
+  scope section is polish, not safety.
+- **Detached-timer SID binding:** the three session-bound actuators narrow only inside a real agent
+  session (env inherited); a detached-timer `dev-loop` needs `SCOPE_SESSION` passed by its supervising
+  unit (until then it is fail-closed-safe on the ceiling path).
+- **Registry-scope memoization + cadence re-verify:** a sha-keyed on-disk objective-parse memo (scale
+  only — the read path git-shows per check today; fine at current N).
+- **Full D6 Part-2 design-of-record section** for this portion (this NOTE + the A5 [BUILT] block cover it
+  for now).
