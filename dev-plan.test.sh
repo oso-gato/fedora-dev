@@ -2,6 +2,9 @@
 # dev-plan.test.sh — MOCK dry-run of bin/dev-plan.sh: stubs gh + claude on PATH and asserts the
 # confirmed-guard (R1), the file→backlog-issue creation, and the BLOCKED / unconfirmed / no-progress paths.
 set -uo pipefail
+# Mock harness: neutralize the runner's ambient agent session so the actuator's R16 SCOPE_SESSION wiring
+# stays inert (ceiling path) here — the per-session narrowing layer has its OWN suite (repo-scope-session.test.sh).
+unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID SCOPE_SESSION 2>/dev/null || true
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PLAN="$HERE/bin/dev-plan.sh"
 [ -f "$PLAN" ] || { echo "FATAL: bin/dev-plan.sh not found"; exit 2; }

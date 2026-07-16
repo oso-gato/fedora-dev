@@ -158,10 +158,17 @@ SCOPE_FILE="$SCOPE_FIX" bash "$SCOPE" check fedora-dev 2>/dev/null; rc=$?
 ck "$([ "$rc" = 3 ] && echo 1 || echo 0)" "an emptied config still allowed the own repo (rc=$rc want 3)"
 done_case
 
-DESC="the SHIPPED config pins the confirmed set — and the incident repo, by name, is out"; OK=1
+DESC="the SHIPPED scope.conf is the TRANSITIONAL ceiling; the git-anchored authority is the objective doc"; OK=1
+# 2026-07-16: scope.conf is retired as the ENROLLMENT authority (R16) — the confirmed-objective repo-list
+# in 00-OBJECTIVES.md is. scope.conf survives (deprecation-bannered) ONLY as the transitional ceiling the
+# unset-path poller still reads until the STEP-10 cutover; knowledge-desktop was legitimately added by
+# #203 and rides that ceiling. The apparatus's OWN two repos are always ceiling-present; the per-session
+# OBJECTIVE-BACKED narrowing that actually enforces {fedora-dev,fedora-bootstrap} is proven exhaustively
+# in repo-scope-session.test.sh (NARROW + CANNOT-EXCEED + the backing-verify mutation).
 setup_case
-ck "$([ "$(bash "$SCOPE" list 2>/dev/null | tr '\n' ' ')" = 'fedora-dev fedora-bootstrap fedora-desktop e2e-alpha ' ] && echo 1 || echo 0)" "policy/scope.conf does not hold exactly the #167-confirmed set"
-bash "$SCOPE" check knowledge-desktop 2>/dev/null && ck 0 "knowledge-desktop is IN the shipped scope" || ck 1 x
+ck "$(bash "$SCOPE" check fedora-dev 2>/dev/null && echo 1 || echo 0)" "the apparatus's own fedora-dev is in the ceiling"
+ck "$(bash "$SCOPE" check fedora-bootstrap 2>/dev/null && echo 1 || echo 0)" "the apparatus's own fedora-bootstrap is in the ceiling"
+ck "$(bash "$SCOPE" check some-never-enrolled-repo 2>/dev/null && echo 0 || echo 1)" "a never-enrolled repo is OUT of the ceiling (rc≠0)"
 done_case
 
 # ===================================================================================================
@@ -413,6 +420,51 @@ ck "$(cmp -s "$FITNESS" "$MUTF" && echo 0 || echo 1)" "the sed changed nothing �
 fitness_env -- bash "$MUTF" fedora-dev 1
 ck "$([ -f "$RAN" ] && echo 1 || echo 0)" "the neutralized detector still blocked the model — the real row would pass vacuously"
 ck "$(grep -qx "Fitness review: VERDICT PASS — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "the mutant did not PASS the unconfirmed expansion"
+done_case
+
+# The AUTHORITY moved to the objective repo-list (R16, 2026-07-16): a net-add to 00-OBJECTIVES.md's table
+# must be gated too, by the SAME name-bound confirmation. objective_expansion_diff touches ONLY the
+# objective doc (scope.conf untouched), so these rows exercise the objective-adds detector in isolation.
+objective_expansion_diff(){
+  cat > "$DIFF" <<'DIFF_EOF'
+diff --git a/00-OBJECTIVES.md b/00-OBJECTIVES.md
+--- a/00-OBJECTIVES.md
++++ b/00-OBJECTIVES.md
+@@ -6,3 +6,4 @@
+ | `oso-gato/fedora-dev` | dev |
+ | `oso-gato/fedora-bootstrap` | host |
++| `oso-gato/knowledge-desktop` | new |
+DIFF_EOF
+}
+
+echo "== FITNESS: a net-add to the OBJECTIVE repo-list table (the new authority) RETURNs unconfirmed =="
+DESC="an unconfirmed net-add to 00-OBJECTIVES.md RETURNs deterministically (objective-adds gate)"; OK=1
+setup_case; printf 'fedora-dev\n' > "$SCOPE_FIX"; objective_expansion_diff
+fitness_env -- bash "$FITNESS" fedora-dev 1
+ck "$(grep -qx "Fitness review: VERDICT RETURN — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "the objective-table add did not RETURN"
+ck "$([ ! -f "$RAN" ] && echo 1 || echo 0)" "the reviewer model ran on a deterministic scope block (it must not)"
+out_has 'R16 OPERATING SCOPE'
+out_has 'knowledge-desktop'
+done_case
+
+DESC="a MAINTAINER's line-1 CONFIRMED unlocks the objective-table add → the model reviews it"; OK=1
+setup_case; printf 'fedora-dev\n' > "$SCOPE_FIX"; objective_expansion_diff
+printf 'arthur\tCONFIRMED knowledge-desktop\n' > "$CASE/comments.tsv"
+printf 'admin\n' > "$CASE/roles/arthur"
+fitness_env COMMENTS_TSV="$CASE/comments.tsv" -- bash "$FITNESS" fedora-dev 1
+ck "$([ -f "$RAN" ] && echo 1 || echo 0)" "a maintainer-confirmed objective add still blocked the model"
+err_has 'maintainer-confirmed by @arthur'
+done_case
+
+echo "== MUTATION: neutralize objective-adds → the objective-table add PASSes (objective-adds is the gate) =="
+DESC="the objective-adds row discriminates: the mutant lets the unconfirmed table add through to PASS"; OK=1
+setup_case; printf 'fedora-dev\n' > "$SCOPE_FIX"; objective_expansion_diff
+MUTO="$ROOT/fitness-objmut.sh"
+sed 's@"\$REPO_SCOPE" objective-adds@true objective-adds@' "$FITNESS" > "$MUTO"
+ck "$(cmp -s "$FITNESS" "$MUTO" && echo 0 || echo 1)" "the sed changed nothing — this mutation row is vacuous"
+fitness_env -- bash "$MUTO" fedora-dev 1
+ck "$([ -f "$RAN" ] && echo 1 || echo 0)" "the neutralized objective-adds still blocked the model — the real row would pass vacuously"
+ck "$(grep -qx "Fitness review: VERDICT PASS — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "the mutant did not PASS the unconfirmed objective add"
 done_case
 
 echo "== MUTATION: de-STATE the diff parser → the crafted escape hides the add (finding 1 restored) =="

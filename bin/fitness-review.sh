@@ -213,7 +213,12 @@ diff_note=""; trunc_note=""
 # Cost: zero extra API calls unless an expansion is actually detected (names are parsed locally
 # BEFORE the per-author role call, so only a comment that actually names repos costs a role read).
 verdict=""; rationale=""
-scope_added="$(printf '%s' "$diff" | "$REPO_SCOPE" diff-adds 2>/dev/null)" || scope_added=""
+# The AUTHORITY moved from policy/scope.conf to the confirmed-objective repo-list in 00-OBJECTIVES.md
+# (R16, 2026-07-16). Gate BOTH during the transition so "the agent never authorizes" is NEVER
+# unenforced: a net-add to the objective table (objective-adds — the primary authority) OR to the
+# transitional scope.conf (diff-adds) must be maintainer-confirmed by name. scope.conf's arm is dropped
+# only at the STEP-10 cutover, strictly AFTER this objective-adds gate is live.
+scope_added="$( { printf '%s' "$diff" | "$REPO_SCOPE" objective-adds 2>/dev/null; printf '%s' "$diff" | "$REPO_SCOPE" diff-adds 2>/dev/null; } | grep . | sort -u )" || scope_added=""
 if [ -n "$scope_added" ]; then
   scope_confirmed=""; scope_conf_by=""
   scope_bus="$(gh api "repos/$SLUG/issues/$PR/comments" --paginate \
@@ -247,7 +252,7 @@ if [ -n "$scope_added" ]; then
     scope_paste="CONFIRMED $(printf '%s' "$scope_added" | tr '\n' ' ' | sed 's/ $//')"
     rationale="**R16 OPERATING SCOPE (#167) — BLOCKER, category (b) UNSAFE — determined by the fitness HARNESS (deterministic; no model judgment involved, and none could unblock it).**
 
-This PR NET-ADDS the following repo(s) to the apparatus's operating scope (\`policy/scope.conf\`):
+This PR NET-ADDS the following repo(s) to the apparatus's operating scope — the confirmed-objective repo-list in \`00-OBJECTIVES.md\` (or the transitional \`policy/scope.conf\`):
 $(printf '%s\n' "$scope_added" | sed 's/^/- `/;s/$/`/')
 
 Not covered by any maintainer confirmation on this PR:

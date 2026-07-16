@@ -212,6 +212,12 @@ SLUG="$ORG/$REPO"
 # action of any kind (nothing read, nothing filed, no comment on the foreign repo) and one loud log
 # line. Any non-zero rc from the reader (127 included) refuses (fail-closed).
 REPO_SCOPE="${REPO_SCOPE:-$(dirname "$(readlink -f "$0")")/repo-scope.sh}"
+# R16 per-session scope (2026-07-16): inside a REAL agent session narrow to THIS session's objective-BACKED
+# scope; headless (no real session env) leaves SCOPE_SESSION unset → ceiling only, byte-identical (never
+# the pid-token session_id fallback, which would fail-close every repo). Detached-timer binding = a NOTE.
+if [ -z "${SCOPE_SESSION:-}" ] && [ -n "${CLAUDE_SESSION_ID:-}${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  export SCOPE_SESSION="$(. "$(dirname "$REPO_SCOPE")/session-id.sh" >/dev/null 2>&1; session_id 2>/dev/null || true)"
+fi
 "$REPO_SCOPE" check "$REPO" 2>/dev/null \
   || { log "R16 SCOPE: repo '$REPO' is outside the maintainer-confirmed operating scope — refusing to plan (nothing read, nothing filed)"; exit 12; }
 

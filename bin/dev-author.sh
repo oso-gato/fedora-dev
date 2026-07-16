@@ -125,6 +125,13 @@ SLUG="$ORG/$REPO"
 # scope gate refuses the whole pass first — this is the belt for a direct invocation). Any non-zero
 # reader rc (127 included) refuses (fail-closed).
 REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
+# R16 per-session scope (2026-07-16): inside a REAL agent session, narrow every scope check to THIS
+# session's objective-BACKED declared scope; headless/detached (no real session env) leaves SCOPE_SESSION
+# unset so repo-scope reads the ceiling only, byte-identical — never the pid-token session_id fallback,
+# which would fail-close every repo. (Detached-timer SID binding is a deferred NOTE.)
+if [ -z "${SCOPE_SESSION:-}" ] && [ -n "${CLAUDE_SESSION_ID:-}${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  export SCOPE_SESSION="$(. "$(dirname "$REPO_SCOPE")/session-id.sh" >/dev/null 2>&1; session_id 2>/dev/null || true)"
+fi
 "$REPO_SCOPE" check "$REPO" 2>/dev/null \
   || { log "R16 SCOPE: repo '$REPO' is outside the maintainer-confirmed operating scope — refusing to author (nothing read, nothing posted)"; exit 2; }
 
