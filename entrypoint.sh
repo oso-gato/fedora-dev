@@ -401,10 +401,27 @@ if [ "${POLLER_ENABLED:-0}" = 1 ]; then
     poller_env="POLLER_ARMED=${POLLER_ARMED:-0} FITNESS_LOGIN=${FITNESS_LOGIN:-} FITNESS_SAME_IDENTITY=${FITNESS_SAME_IDENTITY:-}"
     runuser -u core -- bash -c '
         st=/home/core/.local/state/claudebox
+        # box_ready: `distrobox enter` runs a container-setup wait — a `podman logs -f` follow for the
+        # container_setup_done sentinel (distrobox-enter:702/734/756) — ONLY when the box is NOT already
+        # running, and that follow can HANG FOREVER after a container restart if the sentinel is missed
+        # (observed 2026-07-14: it wedged this supervise loop and forced manual poller recovery). A quick
+        # `enter -- true` BOUNDED by `timeout` runs that same wait safely: it returns 0 once setup is done
+        # (leaving the box running, so the real enter below takes the instant fast path) or is KILLED if it
+        # hangs. This shrinks the wedge from DETERMINISTIC-on-every-restart to a rare sub-second RESIDUAL:
+        # if the box stops in the gap between this probe and the real enter reaching its own inspect, the
+        # real enter re-enters the wait and can still wedge — inherent, since a long-running service enter
+        # cannot itself be timeout-bounded. `timeout` runs WITHOUT --foreground so it group-kills the
+        # backgrounded `podman logs -f` a hung probe leaves (no orphan; do NOT add --foreground). Box
+        # down/stuck ⇒ skip + retry.  [no apostrophes here — this whole block is a single-quoted bash -c]
+        box_ready() { timeout -k 10 "${PROBE_TIMEOUT:-120}" distrobox enter claudebox -- true >/dev/null 2>&1; }
         until [ -e "$st/.assembled" ]; do sleep 15; done   # box must exist before `distrobox enter`
         while :; do
-            distrobox enter claudebox -- bash -lc \
-                "$1 exec /home/core/.local/share/fedora-dev/bin/poller-service.sh" || true
+            if box_ready; then
+                distrobox enter claudebox -- bash -lc \
+                    "$1 exec /home/core/.local/share/fedora-dev/bin/poller-service.sh" || true
+            else
+                echo "[poller] claudebox not enterable (down or setup stuck) — retrying" >&2
+            fi
             sleep 30
         done
     ' _ "$poller_env" &
@@ -421,10 +438,19 @@ if [ "${POLLER_ENABLED:-0}" = 1 ]; then
     # the container down — same discipline as the poller).
     runuser -u core -- bash -c '
         st=/home/core/.local/state/claudebox
+        # box_ready: bounded readiness probe — see the identical guard + its RESIDUAL/group-kill notes on
+        # the poller loop above. A `timeout`-bounded `enter -- true` proves the box is enterable (or is
+        # killed if the setup-wait hangs) so this long-running enter almost always takes the distrobox instant
+        # fast path instead of the hang-prone wait. Box down / setup stuck ⇒ skip this iteration and retry.
+        box_ready() { timeout -k 10 "${PROBE_TIMEOUT:-120}" distrobox enter claudebox -- true >/dev/null 2>&1; }
         until [ -e "$st/.assembled" ]; do sleep 15; done   # box must exist before `distrobox enter`
         while :; do
-            distrobox enter claudebox -- bash -lc \
-                "exec /home/core/.local/share/fedora-dev/bin/apparatus-deadman.sh --watch" || true
+            if box_ready; then
+                distrobox enter claudebox -- bash -lc \
+                    "exec /home/core/.local/share/fedora-dev/bin/apparatus-deadman.sh --watch" || true
+            else
+                echo "[deadman] claudebox not enterable (down or setup stuck) — retrying" >&2
+            fi
             sleep 30
         done
     ' &
