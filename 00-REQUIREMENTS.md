@@ -9,8 +9,12 @@
 > **2026-07-16 Trinity/operating-scope amendment:** **R16 rebuilt** (per-session scope authorized by the
 > confirmed objective, not a standing allowlist); **R7/R27 retargeted** to it; **R21/R32/R11/R22 relocated
 > to build principles** BP1/BP3/BP5/BP4 (their numbers now point there); the isolated-working-tree
-> discipline **extracted from R3** to BP6; **R34 added** (spec-vs-build ship gate); and a marked
-> **NON-FUNCTIONAL REQUIREMENTS** section added (R35–R37). **R8 (THE HUMAN GATE) and R19 are RETIRED —
+> discipline **extracted from R3** to BP6; **R34 added** (spec-vs-build ship gate); **R35 added**
+> (deploy-interface contract — the artifact's run-path interface that R10/R23 consume, homed as a
+> functional requirement per the best-practice review, not a build principle: it fails the build-
+> principle universality test — the setup.sh-genesis host ships no run.sh and a throwaway is never
+> deployed — and it mirrors the P5 no-secrets → requirements re-homing); and a marked
+> **NON-FUNCTIONAL REQUIREMENTS** section added (R36–R38). **R8 (THE HUMAN GATE) and R19 are RETIRED —
 > numbers are never reused; relocated requirements keep their number as a pointer.** Amendment is a new
 > maintainer confirmation (R1), never a silent edit. Capabilities, not implementations.
 
@@ -116,6 +120,9 @@ The platform maintains **three independent rebuild cadences — host image, dev-
 ## R34 — SPEC-VS-BUILD SHIP GATE
 A product is declared ready and **shipped only after** the build is complete, **validated at the right tier (R4)**, and has **passed an independent SPEC-VS-BUILD review**: a separate agent-context — **adversarial and critical**, with **architecture-aware reviewers applying the [build principles](./00-BUILDPRINCIPLE.md)** — that verifies the **built product** conforms, in order, to (1) the **objective**, (2) the **functional and non-functional requirements**, and (3) the **build principles**. **The design (`00-DESIGN.md`) is NOT a conformance target** — it is the dev's own mutable means, not the confirmed spec. The author is **never its own sole judge** (this is distinct from and additional to the per-PR fitness check R6: R6 grades each change; R34 is the whole-product gate at ship). **Outcome:** PASS → the product may ship (the R30 whole-objective completion recognition then closes the objective, no human sign-off); **not-PASS → the product is sent back and the loop continues** (develop → validate → review) until it passes. Acceptance: a built product that violates a requirement or a build principle is caught by an independent review and returned, and the objective does not close until a spec-vs-build review PASSES against the shipped aggregate.
 
+## R35 — DEPLOY-INTERFACE CONTRACT
+Every **deployable image artifact exposes exactly ONE sanctioned, non-interactive run path** that declares its **complete runtime shape — health command, devices, volumes, restart policy, and port set** — and is the **single source of runtime truth** for that artifact; an interactive spin-up wizard may only **delegate** to it (never a second source of truth), and the systemd-managed **Quadlet is its managed equivalent**. **Bypassing that path to hand-roll the container-engine run is disallowed.** Network exposure of the declared shape follows **R36** (sensitive ports tailnet-only, never publicly published); the **deploy and self-refresh behaviors of R10/R23 CONSUME this interface** — they read the live artifact back *through* it — rather than restating it. The **host-as-platform is the disclosed categorical carve-out** (it is brought up by `setup.sh` genesis, not deployed as a workload image, and ships no such run path). Per-repo `CLAUDE.md` **Principle 7 is the concrete per-artifact instantiation** of this contract (the real `run.sh`/`spin-up.sh`/Quadlet with its actual device/volume/port set); this requirement is the authoritative apparatus-level statement it instantiates. Fitness treats a deployable image lacking a single sanctioned run path, a second competing source of runtime truth, or a publicly-published sensitive port as a blocking finding.
+
 ---
 
 # NON-FUNCTIONAL REQUIREMENTS
@@ -124,11 +131,11 @@ A product is declared ready and **shipped only after** the build is complete, **
 > build principles, how any artifact is *made*). Added by the 2026-07-16 amendment; graded by the same
 > fitness gate. Numbered in the same R-sequence — a requirement is a requirement.
 
-## R35 — RUNTIME SECURITY POSTURE
+## R36 — RUNTIME SECURITY POSTURE
 The apparatus runs at **least privilege, minimal exposure, and least scope**: components run with the **narrowest privilege** their function needs (the rootless-user-namespace posture, no needless capability or host reach); **network exposure is minimized** (sensitive ports tailnet-only, never publicly published; loopback-only validation fences); the **shared dev App identity is held at the least scope** that lets the objective's sessions do their work (its installation should not stand broader than the confirmed scope requires — a standing pressure to narrow, not widen); and **no credential or identity is ever baked into a built layer** (secrets enter only as runtime inputs, and the entrypoint fails fast when a required one is missing). A change that broadens privilege, publishes a sensitive port, widens the shared identity beyond need, or lands a secret in a layer is **(b) UNSAFE**. *(Absorbs the former no-secrets-in-layers construction draft; the org-wide App installation is the standing finding this NFR exists to press down on.)*
 
-## R36 — NO SILENT CAP / NO SILENT DEGRADATION
+## R37 — NO SILENT CAP / NO SILENT DEGRADATION
 **Any actuator that caps, drops, defers, truncates, self-disables, or otherwise does less than its full job MUST emit a signal** — a log line, a surfaced question, a stamped verdict — and a **would-be no-op surfaces as a fault, never as silent success.** This generalizes the lock-liveness rule (R26, locks) and the process-liveness rule (R18, stalled processes) to the whole class of **"alive but silently not doing its job"**: a truncated diff handed to a reviewer, a capped backlog, a self-refresh that silently self-disabled, a flock corpse read as a healthy peer. It is the running-system counterpart of the objective's "distrust your own reports": the system must not let a bounded/degraded path masquerade as a complete one. A cap/drop/defer/self-disable with no signal is a reviewable defect.
 
-## R37 — UNIVERSAL RECOVERABILITY *(statement 2026-07-16; per-action drills backlogged)*
+## R38 — UNIVERSAL RECOVERABILITY *(statement 2026-07-16; per-action drills backlogged)*
 **Every autonomous mutation the apparatus makes is reversible** — not only deploy (R10's digest rollback), but **merge (git revert), issue/PR closure (reopen), scope change (re-declare/narrow), and rebuild (restore from the registry)** — so the zero-human-shipment model always retains an automatic path back to the last-known-good state. The fitness gate's standing **preserve-recoverability** rule (a change that removes a rollback path, or exfiltrates the merge/secret credential, FAILS) enforces this at review time. **STATEMENT scope:** the NFR binds now; **per-action recoverability DRILLS** (a proven-fired revert/reopen/rollback before each such actuator arms, the R10 model generalized) are **backlogged** as follow-on work. Until the drills land, recoverability is asserted-and-review-enforced for these actions and drill-proven only for deploy.
