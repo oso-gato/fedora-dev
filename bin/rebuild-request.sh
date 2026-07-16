@@ -149,6 +149,16 @@ enumerate_tmux(){
 # EXCLUDES headless `claude -p` runs and subagents (CLAUDE_CODE_CHILD_SESSION=1) — neither is a
 # restorable interactive tmux tenant. A tenant from an OLD bin/claude (no --session-id) yields an empty
 # sid ⇒ emit_manifest_lines degrades it to a v1 cwd-scoped line. Fail-soft throughout.
+# sid_from_cmd: extract a RESUMABLE session-id from a claude process cmdline. A FRESH launch carries the
+# ASSIGNED `--session-id <uuid>` (bin/claude, D4); a RESTORED session carries `--resume <uuid>` / `-r <uuid>`
+# — which is EXACTLY what the executor types to bring a session back (`claude --resume <sid>`, fedora-
+# bootstrap#143). Both forms (space or `=`) hold the uuid in the cmdline, and a session has ONE or the
+# other (bin/claude skips minting --session-id when a session is already named). Reading ONLY --session-id
+# would miss every RESTORED session, so resume-by-id would survive just ONE rebuild then COLLAPSE on the
+# next (rebuild #1 leaves every session as `--resume <sid>`, which the next scan would then read as empty).
+# --continue/-c carry no id (cwd-scoped) and are correctly ignored. valid_sid re-validates the result.
+sid_from_cmd(){ printf ' %s ' "${1:-}" | grep -oE -- ' (--session-id|--resume|-r)[= ][0-9a-fA-F-]{36}' | head -1 | grep -oE -- '[0-9a-fA-F-]{36}' | head -1; }
+
 enumerate_claude_procs(){
   local pid cmd cwd sid child name
   for pid in $("${PGREP_BIN:-pgrep}" -x claude 2>/dev/null); do
@@ -158,7 +168,7 @@ enumerate_claude_procs(){
     child="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^CLAUDE_CODE_CHILD_SESSION=//p' | head -1)"
     [ "$child" = 1 ] && continue                                                     # subagent, not a tenant
     cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)" || continue
-    sid="$(printf '%s ' "$cmd" | grep -oE -- '--session-id [0-9a-fA-F-]{36}' | head -1 | cut -d' ' -f2)"
+    sid="$(sid_from_cmd "$cmd")"                                                     # --session-id OR --resume/-r
     if [ -n "$sid" ]; then name="s-${sid%%-*}"; else name="s-p$pid"; fi             # unique, allowlist-safe
     printf '%s\t%s\t%s\n' "$name" "$cwd" "$sid"
   done
@@ -236,6 +246,14 @@ run_selftest(){
   ok "sid nonhex rejected"     '! valid_sid 0deceee8-34ab-4e41-be19-zzzzzzzzzzzz'
   ok "sid empty rejected"      '! valid_sid ""'
   ok "sid loose-36 rejected"   '! valid_sid 123456789-abc-4444-5555-123456789012'   # len-36 but not 8-4-4-4-12 (executor #143 parity)
+  # sid_from_cmd: read the sid from a FRESH launch (--session-id) OR a RESTORED session (--resume/-r) — the
+  # latter is what the executor produces, so missing it would collapse resume-by-id on the 2nd rebuild
+  ok "sid_from --session-id"   '[ "$(sid_from_cmd "claude --session-id 0deceee8-34ab-4e41-be19-ba4210469eb6 --model x")" = 0deceee8-34ab-4e41-be19-ba4210469eb6 ]'
+  ok "sid_from --resume"       '[ "$(sid_from_cmd "claude --resume 0deceee8-34ab-4e41-be19-ba4210469eb6 --model x")" = 0deceee8-34ab-4e41-be19-ba4210469eb6 ]'
+  ok "sid_from --resume="      '[ "$(sid_from_cmd "claude --resume=0deceee8-34ab-4e41-be19-ba4210469eb6")" = 0deceee8-34ab-4e41-be19-ba4210469eb6 ]'
+  ok "sid_from -r"             '[ "$(sid_from_cmd "claude -r 0deceee8-34ab-4e41-be19-ba4210469eb6")" = 0deceee8-34ab-4e41-be19-ba4210469eb6 ]'
+  ok "sid_from --continue none" '[ -z "$(sid_from_cmd "claude --continue")" ]'
+  ok "sid_from bare none"      '[ -z "$(sid_from_cmd "claude --model default --permission-mode auto")" ]'
   # v2 rollout gate (default OFF): a valid sid emits v2 ONLY when DEVBOX_MANIFEST_V2 is enabled
   ok "v2 gate default off"     '! manifest_v2_enabled'
   ok "v2 gate on for =1"       'DEVBOX_MANIFEST_V2=1 manifest_v2_enabled'
