@@ -142,11 +142,13 @@ and GC'd by age-then-size.
 ## A5. Multi-tenancy — isolation by scope, sessions as first-class citizens
 
 The dev container is multi-tenant: **N isolated claudebox sessions** (tenants), each an autonomous
-loop on its own **declared, pairwise-disjoint repo-set** (R16: per-session operating scope,
-maintainer-gated additions, fail-closed to NOTHING when undeclared). Sessions share one dev App
+loop on its own **declared, pairwise-disjoint repo-set** (R16: per-session operating scope
+**authorized by the session's confirmed objective repo-list — transcribed into the registry, never
+self-authorized** — fail-closed to NOTHING when undeclared). Sessions share one dev App
 identity; isolation is enforced by **code and scope, not identity**: per-session state namespacing
-(R3), a durable **SESSION REGISTRY** (R27 — session-id, scope, container-id; the single source of
-truth every session-aware actuator reads), disjointness checks before acting (R28), and the
+(R3/BP6), a durable **SESSION REGISTRY** (R27 — session-id, scope, container-id; the single source of
+truth every session-aware actuator reads, each entry's scope backed by a confirmed objective),
+disjointness checks before acting (R28), and the
 per-session routing token on every bus message (R5). The host validates every session's tickets but
 routes each outcome **only to its originating session**. Whole-container operations (rebuild) act on
 **all resident sessions together** (R20); per-session control (HALT targeting) resolves through the
@@ -167,10 +169,12 @@ by the pair (A1).
 
 Safety is **structural at the boundary**: the boundary is always a gate's own fail-closed
 verification, and the spec's mandated mechanical scans (the R6(b) red-line scan, R12's diff scan,
-R21's forbidden-pattern gate, R22's cadence check) are **enforcement layers on top of it — never the
+[BP1](./00-BUILDPRINCIPLE.md)'s forbidden-pattern gate, [BP4](./00-BUILDPRINCIPLE.md)'s
+mutate-the-live-host check) are **enforcement layers on top of it — never the
 sole guard** (the anti-theater doctrine: a pattern-sieve alone is not a boundary). The standing
-controls: the **per-session operating scope** (R16, A5) over the **maintainer-confirmed repo set**
-(R7 — out-of-scope repos get no auto-merge, fail-closed); the **fleet HALT** (R9 —
+controls: the **per-session operating scope** (R16, A5) — authorized by the session's **confirmed
+objective repo-list** (R16/R27), never a standing allowlist — over which **out-of-scope repos get no
+auto-merge, fail-closed** (R7); the **fleet HALT** (R9 —
 maintainer-thrown, read at the top of every sweep, the one gate that deliberately fails toward
 STOPPING; the hard stop is revocation of the single shared key); **liveness-bound locks** (R26 — a
 dead or prior-generation holder is adjudicated and reclaimed, never deferred to); **merge trust**
@@ -178,7 +182,9 @@ dead or prior-generation holder is adjudicated and reclaimed, never deferred to)
 sha- and base-bound per R25, server-enforced merge with no custom executor); and **recoverability
 preserved by rule** (health-gate digest rollback + git revert; a change that removes rollback or
 exfiltrates a credential fails review). The human appears at exactly these anchors: the one R1
-confirmation, ESCALATE adjudications, and maintainer-bound controls (HALT, scope additions). Every
+confirmation (which also authorizes the session's operating scope by enumerating its repos, R16 —
+so a scope widening IS a new objective confirmation, not a separate control), ESCALATE
+adjudications, and the maintainer-bound HALT. Every
 gate declares its **fail direction** deliberately: fail-safe toward progress by default, fail-closed
 at trust boundaries, fail-toward-stop only for HALT.
 

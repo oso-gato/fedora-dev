@@ -1,10 +1,13 @@
 # Apparatus — OBJECTIVE (spec of record)
 
-> **Confirmed by the maintainer on 2026-07-14.** This is the durable, versioned objective the
-> apparatus builds to. It is the ground truth the fitness gate re-grounds on, mirrored by spec
-> issue [#135](https://github.com/oso-gato/fedora-dev/issues/135). The **functional requirements**
-> live in [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md). This objective is locked; amendment is a new
-> maintainer confirmation (R1), never a silent edit.
+> **Confirmed by the maintainer on 2026-07-14; amendment pending confirmation 2026-07-16** (the
+> Trinity/operating-scope amendment — adds the repo-list scope authorization, the document-authority
+> clause, and the ship gate; the maintainer's merge of this change is its new confirmation, R1). This
+> is the durable, versioned objective the apparatus builds to. It is the ground truth the fitness gate
+> re-grounds on, mirrored by spec issue [#135](https://github.com/oso-gato/fedora-dev/issues/135). The
+> **functional + non-functional requirements** live in [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md); the
+> **build principles** in [`00-BUILDPRINCIPLE.md`](./00-BUILDPRINCIPLE.md). This objective is locked;
+> amendment is a new maintainer confirmation (R1), never a silent edit.
 
 ## Objective
 
@@ -29,3 +32,24 @@ All software entering the platform — the host, the claudebox, and the DevConta
 Every package and artifact is installed **minimally — relative to the chosen capability, not to an absolute package count.** No package enters without a recorded justification, dnf runs with weak dependencies off (`install_weak_deps=False`), and the **most specific leaf package is chosen over any convenience metapackage** (a metapackage silently pulls unused components through its hard Requires). But **minimum never means less capability**: once a capability is decided, install the minimal leaf footprint that makes *that* capability work and accept-and-disclose the irreducible hard-dependency closure it entails; between options that deliver the **same** capability, prefer the smaller-footprint, built-in, higher-provenance one. A lighter option that **reduces** the capability is not "more minimal" — it is a lesser function, and choosing it is a recorded capability trade-off, never a minimalism win.
 
 Throughout, the apparatus continuously self-checks each change against three questions: (a) is it a stated requirement, (b) does it contradict anything, (c) does it advance the objective.
+
+## Repositories this objective operates on
+
+This objective operates on exactly these repositories:
+
+| Repository | Role |
+|---|---|
+| `oso-gato/fedora-dev` | the DEV CONTAINER (nox) — develop · build · merge |
+| `oso-gato/fedora-bootstrap` | the HOST (erebus) — operate · live-validate |
+
+This list **is the operating-scope authorization** for the session(s) pursuing this objective (R16). The maintainer confirms it **once**, here, at objective/requirements time — and that single confirmation authorizes the scope. The agent **transcribes** this confirmed list into the session registry (R27); it **never authorizes or self-adds** a repository. Scope is **per-session and per-objective, not a standing allowlist**: a different objective confirms its own repo-list, and a repository absent here is out of scope for this objective (a foreign-repo request is surfaced to the maintainer, never self-provisioned). Narrowing is always the maintainer's right; widening is a new confirmation.
+
+## Document authority — the Trinity and the design
+
+- **The objective and the functional requirements** (this document + [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md), functional + non-functional) are **confirmed once by the human maintainer** and are the **fixed spec**. They are tamper-evident and immutable; the fitness gate grades only the confirmed version; amendment is a **new maintainer confirmation** (R1/R31), never a silent edit.
+- **The build principles** ([`00-BUILDPRINCIPLE.md`](./00-BUILDPRINCIPLE.md) — how any artifact is constructed & packaged) are confirmed **with** the requirements and share that fixed authority.
+- **The design** ([`00-DESIGN.md`](./00-DESIGN.md) — the architecture + per-portion mechanisms) is **dev-owned, not maintainer-confirmed**. The dev container draws the architecture up early and **builds to it strongly** — but the architecture is a roadmap taken seriously, **not stone**: it is **altered only on validated fact** (an empirically demonstrated build/validate finding), never freely or lightly, and every architecture change is recorded with its evidence. What is ultimately built to is **the objective**; the design serves it and may mutate for as long as the objective and its requirements are met.
+
+## Ship gate — the final gate before shipping
+
+A product is declared ready and **shipped only after** the build is complete, **validated**, and has passed an independent **SPEC-VS-BUILD review** (R34): a separate, adversarial, critical analysis — with architecture-aware review agents applying the **build principles** — that independently verifies the built product conforms to the **objective**, then to the **functional and non-functional requirements**, then to the build principles. The design is **not** a conformance target for this gate (it is the dev's own mutable means, not the spec). If the review does not pass, the product is **sent back for further iteration** and the loop continues. The order of construction is objective → requirements → design → build; the order of the ship judgment is the same: built product measured against objective, then requirements, then build principles. This is the last gate before ship, and it is independent and adversarial by design — an author is never the sole judge of its own conformance.
