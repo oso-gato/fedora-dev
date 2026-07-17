@@ -160,12 +160,28 @@ echo "[auto-merge] $SLUG#$PR — tier=$tier live-gate=$gate fitness=$fit ⇒ $de
 case "$decision" in
   MERGE)
     if [ "$COMMIT" = 1 ]; then
-      gh pr merge "$PR" --repo "$SLUG" --squash --delete-branch --match-head-commit "$head_sha" \
-        && echo "[auto-merge] MERGED $SLUG#$PR (Tier $tier, GREEN, fitness PASS)" \
-        || { echo "[auto-merge] merge command failed"; exit 1; }
+      if gh pr merge "$PR" --repo "$SLUG" --squash --delete-branch --match-head-commit "$head_sha"; then
+        echo "[auto-merge] MERGED $SLUG#$PR (Tier $tier, GREEN, fitness PASS)"
+      else
+        # ALL THREE GATES PASSED but the merge COMMAND itself failed. This is NOT a gate refusal —
+        # do not let the caller cry "trust boundary broke" at a benign serialized merge-CONFLICT (which
+        # just needs a REBASE onto main). Classify by the PR's mergeability so the exit code is honest:
+        #   rc 2 = MERGE_CONFLICT (conflicting / behind main — rebase needed)  ·  rc 3 = other command
+        #   failure (transient / head moved). rc 1 stays RESERVED for a gate REFUSE (decide()=REFUSE) —
+        #   the only rc that means the merge-trust boundary actually disagrees.
+        ms="$(gh pr view "$PR" --repo "$SLUG" --json mergeable,mergeStateStatus \
+               -q '(.mergeable // "UNKNOWN")+" "+(.mergeStateStatus // "UNKNOWN")' 2>/dev/null || true)"
+        case "$ms" in
+          *CONFLICTING*|*DIRTY*|*BEHIND*)
+            echo "[auto-merge] MERGE_CONFLICT: $SLUG#$PR is behind main / conflicting ($ms) — needs a REBASE, not a gate refusal"; exit 2;;
+          *)
+            echo "[auto-merge] MERGE_FAILED: the merge command failed for $SLUG#$PR ($ms) — not a gate refusal (transient / head moved?)"; exit 3;;
+        esac
+      fi
     else
       echo "[auto-merge] DRY-RUN — would merge (pass --commit to arm). Nothing merged."
     fi;;
   REFUSE) echo "[auto-merge] gates not all green — REFUSE (fail-closed). No merge.";;
 esac
-[ "$decision" = MERGE ]   # exit 0 for MERGE, 1 for REFUSE (HUMAN is gone under zero-gate)
+[ "$decision" = MERGE ]   # exit 0 for a MERGE (merged / dry-run); 1 for a REFUSE gate refusal
+                          # (a post-gate merge-command failure exits 2=conflict / 3=other, above)
