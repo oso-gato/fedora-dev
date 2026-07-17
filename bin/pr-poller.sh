@@ -1199,16 +1199,23 @@ sweep_repo(){
         # (rc 1 — the boundary actually disagrees: misconfigured anchors, same-identity while armed, or a
         # gate its stricter parse rejects). Crying "trust boundary broke" at a routine rebase is
         # alarm-fatigue on the ONE signal class that must stay meaningful. rc 3 = a non-gate merge-command
-        # failure (transient / head moved). Each surface() gates the acted marker on its own POST success,
-        # so a quietly dead path still reaches Arthur while a benign rebase does not raise the alarm.
+        # failure (transient GitHub error / head moved / a BLOCKED mergeStateStatus, which the classifier
+        # folds here too) and deliberately does NOT write the acted marker: that marker is this arm's own
+        # terminal-state skip ([ -f "$done" ] && continue above), so parking on it would strand a
+        # host-GREEN + fitness-PASS PR on a single blip with NOTHING left to re-invoke the merge — the
+        # #156 stranding class, under a comment claiming it retries. The retry is real and cheap: one
+        # plain-shell auto-merge per sweep (no model run), until it lands, the head moves (a new head
+        # re-gates itself), or a real refusal re-routes it; surface() keeps the operator comment at ONE
+        # per (head,kind). The rc-2 and refused arms DO park — a conflicted head only merges via a rebase
+        # push (a NEW head, which re-gates), and a refusal needs a human — each gating its marker on
+        # surface()'s own POST success, so a throttled comment cannot silence the touchpoint.
         LG_HOST_LOGIN="$LG_HOST_LOGIN" FITNESS_LOGIN="$FITNESS_LOGIN" "$HERE/auto-merge.sh" $flag "$POLLER_REPO" "$pr" 2>&1 | tee -a "$LOG"
         local amrc=${PIPESTATUS[0]}
         case "$amrc" in
           0) : > "$done" ;;
           2) surface "$pr" "$sha" "rebase" "auto-merge could not merge: this PR is behind \`main\` / has a merge conflict — it needs a REBASE onto main. All gates were GREEN+PASS; this is NOT a merge-trust refusal. Rebase + push and it re-gates and auto-merges." \
                && : > "$done" ;;
-          3) surface "$pr" "$sha" "merge-failed" "auto-merge's merge command failed for a non-gate reason (transient / the head moved) — NOT a merge-trust refusal. It retries on the next sweep (see poller.log)." \
-               && : > "$done" ;;
+          3) surface "$pr" "$sha" "merge-failed" "auto-merge's merge command failed for a non-gate reason (transient / the head moved) — NOT a merge-trust refusal. The poller keeps retrying the merge every sweep until it lands or the head moves (this comment posts once; see poller.log)." ;;
           *) surface "$pr" "$sha" "refused" "auto-merge REFUSED despite GREEN+PASS routing — the MERGE-TRUST boundary disagrees with the poller's reads (misconfigured anchors, same-identity while armed, or a gate its stricter parse rejects). INVESTIGATE (see poller.log)." \
                && : > "$done" ;;
         esac

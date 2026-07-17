@@ -64,9 +64,18 @@ if cmp -s "$AM" "$MUT"; then bad "mutation VACUOUS (sed changed nothing)"; else
   [ "$mrc" = 1 ] && ok "mutant: a merge CONFLICT wrongly exits 1 (the poller would cry 'refused' — the bug)" || bad "mutant conflict rc=$mrc (want the wrongful 1)"
 fi
 
-echo "== POLLER routing drift-guard: rc 2 → 'rebase', rc 1/other → 'refused' (distinct) =="
+echo "== POLLER routing drift-guard: rc 2 → 'rebase', rc 3 → 'merge-failed' (NO park), rc 1/other → 'refused' =="
 grep -qE '2\) surface .* "rebase"' "$POLLER" && ok "poller routes auto-merge rc 2 → a 'rebase' surface" || bad "poller lost the rc-2 rebase arm"
 grep -qE '\*\) surface .* "refused"' "$POLLER" && ok "poller keeps rc-1/other → the 'refused' trust-boundary surface" || bad "poller lost the refused arm"
 grep -qF 'amrc=${PIPESTATUS[0]}' "$POLLER" && ok "poller captures auto-merge's real exit code (PIPESTATUS)" || bad "poller does not capture the distinct rc"
+# rc 3 must NOT write the acted marker: that marker is the MERGE arm's terminal-state skip, so parking
+# on it strands a host-GREEN + fitness-PASS PR on one transient blip (#156's class) under a comment
+# claiming it retries — the #211 fitness RETURN. The pre-fix arm carried `&& : > "$done"`, so this row
+# fails against it by construction (the discriminator).
+rc3="$(awk '/^[[:space:]]*3\) surface/{f=1} f{print; if (/;;/) exit}' "$POLLER")"
+if [ -z "$rc3" ]; then bad "poller lost the rc-3 merge-failed arm"; else
+  case "$rc3" in *'"merge-failed"'*) ok "poller routes auto-merge rc 3 → a 'merge-failed' surface";; *) bad "rc-3 arm no longer surfaces 'merge-failed'";; esac
+  case "$rc3" in *'$done'*) bad "rc-3 arm writes the acted marker — parks a GREEN PR on a transient (#156 class; the retry claim would be false)";; *) ok "rc-3 arm does NOT park: no acted-marker write, the promised retry is real";; esac
+fi
 
 echo; echo "merge-conflict-signal: $pass passed, $fail failed"; [ "$fail" -eq 0 ]
