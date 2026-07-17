@@ -96,6 +96,13 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # only as the #96 Tier-A arming flip (autonomous Tier-B/C merges). See bin/poller-service.sh.
 # Environment=POLLER_ENABLED=1
 
+# R17 RESUME-BY-ID default ON (self-sustaining multi-tenancy): bin/rebuild-request.sh emits the v2
+# 4-field manifest so every session — incl. N tenants sharing a cwd — restores BY SESSION-ID, not by
+# cwd (which collapses shared-cwd tenants). Requires the host executor on fedora-bootstrap#143 (merged
+# 2026-07-15); against a pre-#143 executor a v2 manifest is FAIL-SAFE REFUSED (rc=2 before the kill,
+# no session stranded), so this is safe to default on. Set DEVBOX_MANIFEST_V2=0 to force v1.
+Environment=DEVBOX_MANIFEST_V2=1
+
 # Optional TS_AUTHKEY for an UNATTENDED tailnet join — a podman secret injected as an ENV
 # VAR (type=env; the entrypoint honors $TS_AUTHKEY, else falls back to web-login).
 # fedora-bootstrap's setup-user creates the secret from the spin-up answer and uncomments:

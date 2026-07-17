@@ -102,6 +102,16 @@ case " $* " in
   *) sid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)" ;;
 esac
 
+# R16/R27 SCOPE SELF-SEED (self-sustaining multi-tenancy): bind or refresh THIS session's objective-backed
+# scope in the registry so it survives every rebuild. THIS wrapper's $$ is the session-lifetime holder (it
+# blocks on the enter loop below for the whole session), so the entry stays live. Effective sid = the
+# minted one (fresh) OR the --resume/--session-id/-r one; a bare --continue has none → no seed (ceiling).
+# Fail-safe (`|| true`, all output swallowed): a seed failure never blocks the launch.
+esid="$sid"
+[ -n "$esid" ] || esid="$(printf ' %s ' "$*" | grep -oE -- ' (--resume|--session-id|-r)[= ][0-9a-fA-F-]{36}' | grep -oE -- '[0-9a-fA-F-]{36}' | head -1 || true)"
+scope_seed="${SCOPE_SELF_SEED:-$HOME/.local/share/fedora-dev/bin/session-scope-seed.sh}"
+[ -n "$esid" ] && [ -x "$scope_seed" ] && SESSION_HOLDER_PID=$$ "$scope_seed" "$esid" 2>/dev/null || true
+
 attempt=0
 while :; do
     # The inner login shell runs IN-BOX (python3 lives there, not at base), so as its FIRST step it

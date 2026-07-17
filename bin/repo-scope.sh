@@ -449,8 +449,20 @@ repo_held_by_other(){
 }
 
 # ---- BACKING VERIFICATION (R16 actuator boundary) — the cache is checked against git ----------------
-# objective_clone_dir <repo> → where the repo's clone lives locally (test seam: $SCOPE_OBJECTIVE_CLONE).
-objective_clone_dir(){ printf '%s' "${SCOPE_OBJECTIVE_CLONE:-$HOME/.local/share/$1}"; }
+# objective_clone_dir <repo> → the repo's LOCAL clone. $SCOPE_OBJECTIVE_CLONE overrides outright (test
+# seam); else the first of $SCOPE_CLONE_ROOTS/<repo> that is a git checkout — so a WORKLOAD objective
+# whose clone lives in ~/work or ~/repos (not the apparatus's ~/.local/share) is readable without a
+# gh-api cross-repo backend. Falls back to ~/.local/share/<repo> when none exists (objective_repos then
+# fails closed on the missing dir). The apparatus's own repos are always at ~/.local/share.
+objective_clone_dir(){
+  local repo="$1" root d
+  [ -n "${SCOPE_OBJECTIVE_CLONE:-}" ] && { printf '%s' "$SCOPE_OBJECTIVE_CLONE"; return 0; }
+  local roots="${SCOPE_CLONE_ROOTS:-$HOME/.local/share $HOME/work $HOME/repos}"
+  for root in $roots; do
+    d="$root/$repo"; [ -d "$d/.git" ] && { printf '%s' "$d"; return 0; }
+  done
+  printf '%s' "$HOME/.local/share/$repo"
+}
 
 # objective_repos <repo> <objective-path> <sha> → the objective's repo-list AT THAT GIT REF, one per line
 # (via objective_row_names). Local backend: `git -C <clone> show <sha>:<path>`. rc 1 (empty) on any
@@ -590,13 +602,26 @@ case "${1:-}" in
     scope_objective_adds "${2:-00-OBJECTIVES.md}"
     exit 0;;
   transcribe)
-    # transcribe --backing '<repo> <objective-path> <sha>' <sid> — DERIVE the repos from the confirmed
-    # objective at that ref and register them for the session (the agent transcribes, never authorizes, R16).
+    # transcribe (--backing '<repo> <path> <sha>' | --objective '<repo> <path>') <sid> — DERIVE the repos
+    # from the confirmed objective and register them for the session (the agent transcribes, never
+    # authorizes, R16). --objective resolves the backing sha from the clone's origin/main (fallback HEAD)
+    # — the self-seed path (session-scope-seed.sh), which knows the objective doc but not a pinned sha.
     shift
-    tbacking=""
+    tbacking=""; tobjective=""
     if [ "${1:-}" = "--backing" ]; then tbacking="${2:-}"; shift 2 2>/dev/null || shift "$#"; fi
+    if [ "${1:-}" = "--objective" ]; then tobjective="${2:-}"; shift 2 2>/dev/null || shift "$#"; fi
     tsid="${1:-}"
-    { [ -n "$tbacking" ] && [ -n "$tsid" ]; } || { log "usage: repo-scope.sh transcribe --backing '<repo> <objective-path> <sha>' <sid>"; exit 2; }
+    if [ -n "$tobjective" ] && [ -z "$tbacking" ]; then
+      read -r torepo topath _ <<< "$tobjective"
+      { [ -n "$torepo" ] && [ -n "$topath" ]; } || { log "transcribe: --objective needs '<repo> <objective-path>'"; exit 2; }
+      todir="$(objective_clone_dir "$torepo")"
+      # --verify: a plain `rev-parse <bad-ref>` ECHOES the ref to stdout on failure; --verify fails clean
+      # (no stdout). Prefer origin/main (an ancestor of the confirmed head) over the local HEAD.
+      tosha="$(git -C "$todir" rev-parse --verify -q origin/main 2>/dev/null || git -C "$todir" rev-parse --verify -q HEAD 2>/dev/null || true)"
+      [ -n "$tosha" ] || { log "transcribe: cannot resolve a backing sha for $torepo:$topath (no clone at $todir?) — fail-closed"; exit 3; }
+      tbacking="$torepo $topath $tosha"
+    fi
+    { [ -n "$tbacking" ] && [ -n "$tsid" ]; } || { log "usage: repo-scope.sh transcribe (--backing '<repo> <path> <sha>' | --objective '<repo> <path>') <sid>"; exit 2; }
     read -r tbrepo tbpath tbsha _ <<< "$tbacking"
     { [ -n "$tbrepo" ] && [ -n "$tbpath" ] && [ -n "$tbsha" ]; } || { log "transcribe: --backing needs '<repo> <objective-path> <sha>'"; exit 2; }
     tderived="$(objective_repos "$tbrepo" "$tbpath" "$tbsha")" || tderived=""
@@ -626,6 +651,6 @@ case "${1:-}" in
     done < <(_run_locked _list_impl 2>/dev/null)
     exit 0;;
   *)
-    echo "usage: repo-scope.sh check <repo> | list | diff-adds [path] | objective-adds [path] | confirm-names <line1> | transcribe --backing '<repo> <path> <sha>' <sid> | union | owner <repo> | --selftest" >&2
+    echo "usage: repo-scope.sh check <repo> | list | diff-adds [path] | objective-adds [path] | confirm-names <line1> | transcribe (--backing '<repo> <path> <sha>' | --objective '<repo> <path>') <sid> | union | owner <repo> | --selftest" >&2
     exit 2;;
 esac

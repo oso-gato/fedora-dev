@@ -81,8 +81,10 @@ ephemeral_session(){ [[ "${1:-}" =~ ^c[0-9]+$ ]]; }
 # so NO session is stranded, the rebuild simply does not fire. Default-off makes the producer safe
 # against ANY deployed executor: every tenant restores by cwd (v1) exactly as before this change —
 # multi-tenant collapse in a shared cwd is the pre-existing v1 behavior, NOT a regression this
-# introduces. Flip DEVBOX_MANIFEST_V2=1 in the fedora-dev deploy env (run.sh / Quadlet) ONCE the host
-# executor is confirmed deployed on #143 — then N tenants sharing a cwd all restore by id.
+# introduces. The CODE default stays OFF (safe for ANY deployment / a lagging host); fedora-dev's own
+# deploy env (run.sh + fedora-dev.container, 2026-07-17) now sets DEVBOX_MANIFEST_V2=1 so THIS apparatus
+# emits v2 by default — self-sustaining resume-by-id for N tenants sharing a cwd — with the fail-safe
+# REFUSE above as the backstop should the host executor still lag #143. Set DEVBOX_MANIFEST_V2=0 to force v1.
 manifest_v2_enabled(){ case "${DEVBOX_MANIFEST_V2:-}" in 1|true|yes|on) return 0;; *) return 1;; esac; }
 
 # emit_manifest_lines: read raw "name<TAB>cwd[<TAB>sid]" candidates on stdin → emit validated

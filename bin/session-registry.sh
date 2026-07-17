@@ -133,6 +133,16 @@ _resolve_backing_impl(){ # <sid> → the session's BACKING REF line (empty if un
   printf '%s' "$b"
 }
 
+_refresh_impl(){ # <sid> — rewrite ONLY line-2 coords to the CURRENT holder (SESSION_HOLDER_PID/$$),
+  # preserving line-3 repos + line-4 backing. A RESUMED session (new pid, same sid) calls this so its
+  # entry stays LIVE and a later register()'s reap does not free its still-held scope. No entry ⇒ no-op.
+  local sid="${1:-}"; [ -n "$sid" ] || { echo "session-registry: refresh needs <sid>" >&2; return 2; }
+  local f; f="$(_entry "$sid")"; [ -e "$f" ] || return 0
+  local repos backing; repos="$(_read_repos "$f")"; backing="$(_read_backing "$f")"
+  { printf '%s\n' "$sid"; printf '%s\n' "$(session_coords)"; printf '%s\n' "$repos"; printf '%s\n' "$backing"; } > "$f"
+  echo "session-registry: refreshed liveness for '$sid'"
+}
+
 _release_impl(){ # <sid>
   local sid="${1:-}"; [ -n "$sid" ] || { echo "session-registry: release needs <sid>" >&2; return 2; }
   rm -f "$(_entry "$sid")"
@@ -162,7 +172,7 @@ _reap_impl(){
   return 0
 }
 
-_usage(){ echo "usage: session-registry.sh register [--backing '<repo> <path> <sha>'] <sid> <repo…> | resolve <sid> | resolve-backing <sid> | release <sid> | list | reap | --selftest" >&2; }
+_usage(){ echo "usage: session-registry.sh register [--backing '<repo> <path> <sha>'] <sid> <repo…> | resolve <sid> | resolve-backing <sid> | refresh <sid> | release <sid> | list | reap | --selftest" >&2; }
 
 # ===================================================================================================
 # DIRECT-EXECUTION: CLI dispatch + selftest. Sourcing loads the functions (incl. the R28 pure helpers)
@@ -201,6 +211,17 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
       && ok "resolve-backing round-trips the ref" || bad "resolve-backing lost the ref"
     [ "$(_run_locked _resolve_impl sidA)" = repo-one ] && ok "resolve (line 3) UNAFFECTED by the added line 4" || bad "line 4 corrupted resolve"
     [ "$(_run_locked _list_impl | grep -c .)" = 2 ] && ok "list UNAFFECTED by line 4 (still 2 live)" || bad "line 4 broke list"
+
+    echo "== refresh (resumed session: NEW coords, scope + backing PRESERVED) =="
+    HPR="$(live_holder)"
+    bR="$(_run_locked _resolve_impl sidA)"; bB="$(_run_locked _resolve_backing_impl sidA)"
+    SESSION_HOLDER_PID="$HPR" _run_locked _refresh_impl sidA >/dev/null && ok "refresh sidA under a new holder pid" || bad "refresh failed"
+    [ "$(_run_locked _resolve_impl sidA)" = "$bR" ] && ok "refresh PRESERVED repos (line 3)" || bad "refresh lost repos"
+    [ "$(_run_locked _resolve_backing_impl sidA)" = "$bB" ] && ok "refresh PRESERVED backing (line 4)" || bad "refresh lost backing"
+    grep -q "^$HPR " "$(_entry sidA)" && ok "refresh WROTE the new holder's coords (line 2)" || bad "refresh did not update coords"
+    _run_locked _refresh_impl nosuchsid >/dev/null 2>&1 && ok "refresh of an unregistered sid is a safe no-op (rc 0)" || bad "refresh of a missing sid errored"
+    # re-point sidA back to HPA so the reap section below (which kills HPA) still frees it
+    SESSION_HOLDER_PID="$HPA" _run_locked _refresh_impl sidA >/dev/null
     if SESSION_HOLDER_PID="$HPB" _run_locked _reg_impl sidB repo-one 2>/dev/null; then
       bad "sidB claimed repo-one while live sidA holds it — R28 deny missing"
     else ok "sidB DENIED repo-one (held by live sidA)"; fi
@@ -230,6 +251,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     register) _run_locked _reg_impl "$@";;
     resolve)  _run_locked _resolve_impl "$@";;
     resolve-backing) _run_locked _resolve_backing_impl "$@";;
+    refresh)  _run_locked _refresh_impl "$@";;
     release)  _run_locked _release_impl "$@";;
     list)     _run_locked _list_impl "$@";;
     reap)     _run_locked _reap_impl "$@";;

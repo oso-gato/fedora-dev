@@ -168,6 +168,19 @@ routes each outcome **only to its originating session**. Whole-container operati
 **all resident sessions together** (R20); per-session control (HALT targeting) resolves through the
 registry.
 
+**[BUILT 2026-07-17] Self-sustaining across every refresh.** Two decoupled properties make N tenants
+*auto-resume AND auto-rebind their scope* on any repo-driven rebuild/refresh — no per-session manual
+step. **RESUME:** `DEVBOX_MANIFEST_V2=1` is now the deploy-env default (`run.sh`/Quadlet), so
+`rebuild-request.sh` emits the v2 4-field manifest and the fedora-bootstrap#143 executor resumes each
+session **by id** (`claude --resume <sid>`); because #202 reads the sid back from `--resume`, the next
+rebuild re-captures it — perpetual, self-sustaining. **SCOPE:** the registry is durable, and every
+launch/resume runs `bin/session-scope-seed.sh` from `bin/claude` (holder `$$`) — it **refreshes** a
+resumed session's liveness (so its persisted scope is never reaped) or **self-seeds** a new session
+from its one-line objective config (`<sid>.objective`) via `transcribe --objective` (sha resolved from
+the clone's `origin/main`). `objective_clone_dir` resolves a workload objective's clone across
+`~/.local/share`·`~/work`·`~/repos`, so a tenant whose objective lives in its own repo binds without a
+gh-api backend. First declaration is one-time per session; thereafter it persists + refreshes.
+
 ## A6. Three decoupled clocks on an immutable substrate
 
 Immutable-host, containerise-everything. Three independent rebuild cadences: the **host image**, the
