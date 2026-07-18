@@ -94,8 +94,8 @@ ck "mutation: it did reach the real enter (proves the row is not vacuous)" '[ -s
 
 # ── Row 4: DRIFT GUARD — the real entrypoint.sh carries the box_ready guard on BOTH supervise loops ───
 n="$(grep -cF 'box_ready() { timeout -k 10 "${PROBE_TIMEOUT:-120}" distrobox enter claudebox -- true' "$ENTRYPOINT")"
-ck "drift guard: entrypoint.sh carries the box_ready probe on both loops (found $n/2)" '[ "$n" = 2 ]'
-ck "drift guard: both loops gate the real enter behind it (if box_ready)" '[ "$(grep -cF "if box_ready; then" "$ENTRYPOINT")" = 2 ]'
+ck "drift guard: entrypoint.sh carries the box_ready probe on all three loops (poller + deadman + dev-loop; found $n/3)" '[ "$n" = 3 ]'
+ck "drift guard: all three loops gate the real enter behind it (if box_ready)" '[ "$(grep -cF "if box_ready; then" "$ENTRYPOINT")" = 3 ]'
 
 echo
 [ "$fail" = 0 ] && echo "supervise-enter-race.test.sh: ALL PASS" || echo "supervise-enter-race.test.sh: FAILURES ABOVE"
