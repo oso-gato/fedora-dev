@@ -55,6 +55,7 @@ podman run -d --name fedora-dev \
     -e TS_AUTHKEY="${TS_AUTHKEY:-}" \
     -e POLLER_ENABLED="${POLLER_ENABLED:-}" \
     -e POLLER_ARMED="${POLLER_ARMED:-}" \
+    -e DEV_LOOP_ENABLED="${DEV_LOOP_ENABLED:-}" \
     -e DEVBOX_MANIFEST_V2="${DEVBOX_MANIFEST_V2:-1}" \
     "${gh_args[@]}" \
     -v fedora-dev-home:/home/core \
