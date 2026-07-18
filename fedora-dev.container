@@ -96,13 +96,14 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # only as the #96 Tier-A arming flip (autonomous Tier-B/C merges). See bin/poller-service.sh.
 # Environment=POLLER_ENABLED=1
 
-# Optional DEV-SIDE AUTONOMOUS AUTHORING loop (front-half of R3) as a headless in-box service. OPT-IN +
-# DISABLED: uncommenting this is the ARMING FLIP — the box begins autonomously AUTHORING a live-validate
-# PR for every open `backlog`-labelled issue (via bin/dev-loop-service.sh → dev-loop.sh → dev-author.sh),
-# each still gated by the host live-gate + the INDEPENDENT fitness review before the poller can merge it,
-# and stoppable via the R9 fleet HALT. INDEPENDENT of POLLER_ENABLED (authoring and merging are separate
-# capabilities). See bin/dev-loop-service.sh.
-# Environment=DEV_LOOP_ENABLED=1
+# DEV-SIDE AUTONOMOUS AUTHORING loop (front-half of R3) as a headless in-box service — ARMED BY DEFAULT
+# (self-arms with the apparatus): the box autonomously AUTHORS a live-validate PR for every open
+# `backlog`-labelled issue (bin/dev-loop-service.sh → dev-loop.sh → dev-author.sh), each still gated by the
+# host live-gate + the INDEPENDENT fitness review before the poller can merge it, and stoppable via the R9
+# fleet HALT (no redeploy needed). The entrypoint defaults the gate ON precisely because a host-set flag is
+# a deploy-CONFIG the self-refresh cannot set — a default-off flag would need a MANUAL host arm, breaking
+# self-arming. To DISABLE, UNCOMMENT the line below (Environment=DEV_LOOP_ENABLED=0). See bin/dev-loop-service.sh.
+# Environment=DEV_LOOP_ENABLED=0
 
 # R17 RESUME-BY-ID default ON (self-sustaining multi-tenancy): bin/rebuild-request.sh emits the v2
 # 4-field manifest so every session — incl. N tenants sharing a cwd — restores BY SESSION-ID, not by

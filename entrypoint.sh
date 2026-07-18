@@ -456,18 +456,22 @@ if [ "${POLLER_ENABLED:-0}" = 1 ]; then
     ' &
 fi
 
-# ---- optional: dev-side AUTONOMOUS AUTHORING loop as a headless IN-BOX service (front-half of R3) --
-# OPT-IN via DEV_LOOP_ENABLED=1 (Quadlet/run.sh env). DISABLED BY DEFAULT — enabling it IS the arming flip
-# (mirrors POLLER_ENABLED; there is no separate armed/observe split because dev-loop.sh's own R9 fleet HALT
-# gives the emergency observe-only stop). Runs INSIDE the claudebox because dev-author spawns `claude` to
-# implement each feature; plain-shell (no gate/classifier), so the sanctioned autonomous-authoring path can
-# execute — NOT the interactive agent, gated FROM authoring. Best-effort + self-restarting, OUTSIDE the
-# hard watchdog: an authoring-loop death must never take the container down. INDEPENDENT of POLLER_ENABLED
-# — authoring and merging are separate capabilities behind separate gates. bin/dev-loop-service.sh reads
-# the R16 scope every cycle + dev-loop.sh reads the R9 HALT + R16 scope every pass, and every PR it opens
-# still faces the host live-gate + the INDEPENDENT fitness review before the poller can merge it.
-if [ "${DEV_LOOP_ENABLED:-0}" = 1 ]; then
-    echo "[dev-loop] DEV_LOOP_ENABLED=1 — starting the autonomous authoring loop in-box"
+# ---- dev-side AUTONOMOUS AUTHORING loop as a headless IN-BOX service (front-half of R3) -----------
+# ARMED BY DEFAULT — the loop SELF-ARMS with the apparatus (2026-07-18): the gate defaults ON, so once the
+# self-refresh deploys this entrypoint the authoring loop starts with NO host action. This is deliberate:
+# a host-set OPT-IN flag (the old `DEV_LOOP_ENABLED=1`-default-off) is a deploy-CONFIG the self-refresh
+# CANNOT set (it deploys the image + live-clone, never the host quadlet's env), so a default-off flag would
+# force a manual host arm — contradicting "self-arming = no more manual host actions after bootstrap". To
+# DISABLE, set `DEV_LOOP_ENABLED=0` in the deploy env; R9 fleet HALT is the emergency observe-only stop
+# (no redeploy needed). Runs INSIDE the claudebox because dev-author spawns `claude` to implement each
+# feature; plain-shell (no gate/classifier), so the sanctioned autonomous-authoring path can execute — NOT
+# the interactive agent, gated FROM authoring. Best-effort + self-restarting, OUTSIDE the hard watchdog: an
+# authoring-loop death must never take the container down. bin/dev-loop-service.sh reads the R16 scope
+# every cycle + dev-loop.sh reads the R9 HALT + R16 scope every pass, and every PR it opens still faces the
+# host live-gate + the INDEPENDENT fitness review before the poller can merge it. (This is the same trust
+# level the already-armed poller runs at — autonomous authoring produces PRs the same two gates decide.)
+if [ "${DEV_LOOP_ENABLED:-1}" != 0 ]; then
+    echo "[dev-loop] authoring loop ARMED (DEV_LOOP_ENABLED=${DEV_LOOP_ENABLED:-1}, default-on) — starting it in-box"
     runuser -u core -- bash -c '
         st=/home/core/.local/state/claudebox
         # box_ready: bounded readiness probe — identical guard + RESIDUAL/group-kill notes as the poller
