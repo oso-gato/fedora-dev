@@ -255,9 +255,9 @@ pr_title="AUTHOR_DONE"; [ "${sentinel#DONE }" != "$sentinel" ] && pr_title="${se
 [ -n "$pr_title" ] && [ "$pr_title" != "AUTHOR_DONE" ] || pr_title="$title"
 pr_body="Autonomously authored by \`dev-author.sh\` (R3) for issue #$ISSUE.
 
-Closes #$ISSUE
+Backlog-ticket: #$ISSUE
 
-<sub>Draft-opened at first push, in-box validated GREEN, then marked ready + labelled \`$AUTHOR_LABEL\` to enrol in the host live-gate → fitness → poller pipeline. No human in this loop.</sub>"
+<sub>Draft-opened at first push, in-box validated GREEN, then marked ready + labelled \`$AUTHOR_LABEL\` to enrol in the host live-gate → fitness → poller pipeline. No human in this loop. NOTE: this is a \`Backlog-ticket:\` linkage, NOT a \`Closes\` keyword — the backlog issue is closed by \`bin/reconcile.sh\` on OBSERVED proof (merge + host GREEN + CI published + live read-back), never auto-closed at merge before the change is proven live (task #19).</sub>"
 bodyfile="$(mktemp)"; printf '%s' "$pr_body" > "$bodyfile"
 
 # draft at first push (R3: state visible in GitHub immediately, resumable), then flip to ready so the
