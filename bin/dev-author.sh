@@ -154,6 +154,14 @@ meta="$(gh issue view "$ISSUE" --repo "$SLUG" --json state,labels,title \
   || { log "cannot read $SLUG#$ISSUE (fail-closed) — aborting"; exit 2; }
 { read -r state; read -r hasbacklog; read -r title; } <<<"$meta"
 body="$(gh issue view "$ISSUE" --repo "$SLUG" --json body -q .body 2>/dev/null)"
+# #177 — READ THE DISCUSSION, not just the body. dev-loop UN-PARKS a blocked issue on a REPLY (a comment
+# after this box's BLOCKED question), but if the author re-runs reading ONLY the body it re-runs on
+# UNCHANGED information — the maintainer's guidance (and the prior BLOCKED question's context) is invisible,
+# so the retry repeats the same failure and re-blocks, forever. Read the comment stream and thread it into
+# the prompt so a retry INCORPORATES the feedback that un-parked it. The prompt rides stdin (#155), so an
+# unbounded thread cannot break the EXEC.
+discussion="$(gh issue view "$ISSUE" --repo "$SLUG" --json comments -q '[.comments[] | "— @\(.author.login): \(.body)"] | join("\n\n")' 2>/dev/null)"
+disc_section=""; [ -n "$discussion" ] && disc_section=$'\nDISCUSSION on the issue (comments — INCLUDING any maintainer guidance since a prior attempt; a REPLY is\nwhy this issue was re-offered, so INCORPORATE it rather than repeating a prior approach):\n'"$discussion"$'\n'
 haspr=0
 if gh pr list --repo "$SLUG" --state open --search "$ISSUE in:body" --json number -q '.[].number' 2>/dev/null | grep -q .; then haspr=1; fi
 marked=0; [ -f "$marker" ] && marked=1
@@ -178,7 +186,7 @@ $SLUG#$ISSUE, working ONLY in the current directory (an isolated git worktree on
 FEATURE (issue #$ISSUE): $title
 
 $body
-
+$disc_section
 RULES (hard):
 - Implement the SMALLEST correct change that satisfies the issue. Follow the repo's CLAUDE.md build
   principles and existing conventions. Add/adjust tests or a --selftest where the repo expects them.
