@@ -456,6 +456,36 @@ if [ "${POLLER_ENABLED:-0}" = 1 ]; then
     ' &
 fi
 
+# ---- optional: dev-side AUTONOMOUS AUTHORING loop as a headless IN-BOX service (front-half of R3) --
+# OPT-IN via DEV_LOOP_ENABLED=1 (Quadlet/run.sh env). DISABLED BY DEFAULT — enabling it IS the arming flip
+# (mirrors POLLER_ENABLED; there is no separate armed/observe split because dev-loop.sh's own R9 fleet HALT
+# gives the emergency observe-only stop). Runs INSIDE the claudebox because dev-author spawns `claude` to
+# implement each feature; plain-shell (no gate/classifier), so the sanctioned autonomous-authoring path can
+# execute — NOT the interactive agent, gated FROM authoring. Best-effort + self-restarting, OUTSIDE the
+# hard watchdog: an authoring-loop death must never take the container down. INDEPENDENT of POLLER_ENABLED
+# — authoring and merging are separate capabilities behind separate gates. bin/dev-loop-service.sh reads
+# the R16 scope every cycle + dev-loop.sh reads the R9 HALT + R16 scope every pass, and every PR it opens
+# still faces the host live-gate + the INDEPENDENT fitness review before the poller can merge it.
+if [ "${DEV_LOOP_ENABLED:-0}" = 1 ]; then
+    echo "[dev-loop] DEV_LOOP_ENABLED=1 — starting the autonomous authoring loop in-box"
+    runuser -u core -- bash -c '
+        st=/home/core/.local/state/claudebox
+        # box_ready: bounded readiness probe — identical guard + RESIDUAL/group-kill notes as the poller
+        # loop above (do NOT add --foreground; it group-kills a hung probe s backgrounded podman logs -f).
+        box_ready() { timeout -k 10 "${PROBE_TIMEOUT:-120}" distrobox enter claudebox -- true >/dev/null 2>&1; }
+        until [ -e "$st/.assembled" ]; do sleep 15; done   # box must exist before `distrobox enter`
+        while :; do
+            if box_ready; then
+                distrobox enter claudebox -- bash -lc \
+                    "exec /home/core/.local/share/fedora-dev/bin/dev-loop-service.sh" || true
+            else
+                echo "[dev-loop] claudebox not enterable (down or setup stuck) — retrying" >&2
+            fi
+            sleep 30
+        done
+    ' &
+fi
+
 echo "fedora-dev up: ssh :22 (tailnet) + ssh :4444 (public, key-only) + mosh UDP 61001-62000, $(podman --version)"
 
 # ---- supervision: exit on service death; outer --restart=always heals -------
