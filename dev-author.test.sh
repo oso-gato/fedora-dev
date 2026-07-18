@@ -32,6 +32,7 @@ case "$sub" in
         # emit the three comma-operator lines dev-author reads: state, backlog(0/1), title
         bk=0; case "${FAKE_LABELS:-backlog}" in *backlog*) bk=1;; esac
         printf '%s\n%s\n%s\n' "${FAKE_STATE:-OPEN}" "$bk" "${FAKE_TITLE:-Add a thing}";;
+      *"--json comments"*) printf '%s' "${FAKE_COMMENTS:-}";;   # #177: the discussion (a maintainer reply)
       *) printf '{}';;
     esac ;;
   "pr list")   printf '%s' "${FAKE_PRLIST:-}";;                 # empty = no existing PR
@@ -181,6 +182,27 @@ else
   AUTHOR="$_AUTHOR_SAVE"   # restore — the rows below must run against the REAL script
 fi
 rm -f "$MUT"
+
+echo "== #177: a maintainer's un-park REPLY reaches the author on retry (reads comments, not just body) =="
+# dev-loop un-parks a blocked issue on a REPLY; the author must READ that reply (the discussion), not just
+# the body, or the retry re-runs on unchanged info and re-blocks forever. The reply token must appear in
+# the PROMPT the model actually receives.
+run "the discussion (maintainer reply) reaches the model" \
+    "FAKE_AUTHOR=done FAKE_VALIDATE=GREEN FAKE_COMMENTS=SCOPE_IT_TO_ONE_PROBE_177" PRCREATE 'SCOPE_IT_TO_ONE_PROBE_177'
+
+echo "== MUTATION: neutralize the discussion → the reply is INVISIBLE to the author (the exact #177 bug) =="
+MUT177="$HERE/bin/.dev-author-mut177-$$.sh"
+sed 's/\[ -n "\$discussion" \] && disc_section=/false \&\& disc_section=/' "$AUTHOR" > "$MUT177"
+if ! grep -q 'false && disc_section=' "$MUT177"; then
+  echo "  FAIL mutation VACUOUS (sed did not change the copy)"; fail=$((fail+1))
+else
+  _S177="$AUTHOR"; AUTHOR="$MUT177"
+  # the mutant still ships (PRCREATE) but the reply token must be ABSENT from the prompt (5th arg).
+  run "mutant: the maintainer reply never reaches the model (the bug #177 removes)" \
+      "FAKE_AUTHOR=done FAKE_VALIDATE=GREEN FAKE_COMMENTS=SCOPE_IT_TO_ONE_PROBE_177" PRCREATE '' 'SCOPE_IT_TO_ONE_PROBE_177'
+  AUTHOR="$_S177"   # restore
+fi
+rm -f "$MUT177"
 
 echo "== in-box RED: author commits but validate.sh fails → surfaced, NO PR, NO push =="
 run "in-box RED blocks the push" "FAKE_AUTHOR=done FAKE_VALIDATE=RED" ISSUECOMMENT
