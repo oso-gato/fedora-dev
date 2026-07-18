@@ -233,9 +233,27 @@ case "$sentinel" in
     exit 4 ;;
 esac
 if [ "$committed" = 0 ]; then
-  log "author produced no commit and no explicit block — surfacing as no-progress"
-  surface_blocked "the author run finished without committing an implementation (timeout or unable to make progress). A maintainer should refine the issue or check the environment."
-  exit 5
+  # #182 — DON'T lose completed-but-uncommitted work. The bounded run may implement the feature and then
+  # exit (or hit the timeout) BEFORE its own `git commit`, leaving a DIRTY worktree with HEAD==base_sha.
+  # The old code read that as "no-progress" and surfaced — silently DISCARDING the implementation. Instead
+  # RESCUE-commit a dirty tree (the work IS the deliverable), then let the SAME in-box validate.sh gate
+  # below decide GREEN/RED on it — so a partial/broken rescue RED-surfaces rather than shipping blind, and
+  # the host live-gate + fitness still gate the PR downstream. A truly CLEAN tree (the model wrote nothing)
+  # is the genuine no-progress case and still surfaces.
+  if [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
+    log "author wrote an implementation but did not commit it — RESCUE-committing the dirty tree (#182)"
+    if git -C "$WT" add -A && git -C "$WT" commit -q -m "author: implement #$ISSUE $title (harness rescue-commit — #182)"; then
+      head_sha="$(git -C "$WT" rev-parse HEAD 2>/dev/null)"; committed=1
+    else
+      log "rescue-commit FAILED — surfacing as no-progress"
+      surface_blocked "the author run wrote an implementation but neither it nor the harness could commit it (a git error). A maintainer should check the branch '$branch'."
+      exit 5
+    fi
+  else
+    log "author produced no commit and a CLEAN worktree — genuine no-progress"
+    surface_blocked "the author run finished without writing or committing an implementation (timeout or unable to make progress). A maintainer should refine the issue or check the environment."
+    exit 5
+  fi
 fi
 
 # 4b) IN-BOX GATE — cheap build+assembly+lint before spending a host build. RED here → surface, no push.

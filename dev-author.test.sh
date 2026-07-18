@@ -79,6 +79,8 @@ case "${FAKE_AUTHOR:-done}" in
            echo "did the work"; echo "AUTHOR_DONE: implement the thing";;
   blocked) echo "AUTHOR_BLOCKED: the issue needs a product decision";;
   noop)    echo "thought about it, changed nothing";;   # no commit, no sentinel → no-progress
+  dirty)   echo change >> f;                             # #182: WROTE the work but exited before `git commit`
+           echo "implemented it (but the process was cut off before the commit)";;   # dirty tree, no sentinel
 esac
 exit 0
 EOF
@@ -154,8 +156,31 @@ run "authored feature reaches the pipeline" "FAKE_AUTHOR=done FAKE_VALIDATE=GREE
 echo "== BLOCKED: author cannot implement → dev-task question on the ISSUE, NO PR =="
 run "explicit AUTHOR_BLOCKED surfaces" "FAKE_AUTHOR=blocked" ISSUECOMMENT 'needs a decision'
 
-echo "== no-progress: author commits nothing, no sentinel → surfaced, NO PR =="
-run "no-commit is surfaced not shipped" "FAKE_AUTHOR=noop" ISSUECOMMENT
+echo "== no-progress: author writes NOTHING (clean tree), no sentinel → surfaced, NO PR =="
+run "clean-tree no-commit is surfaced not shipped" "FAKE_AUTHOR=noop" ISSUECOMMENT
+
+echo "== #182 rescue: author WROTE work but did not commit (dirty tree) → harness rescue-commits + SHIPS =="
+# The bounded run implemented the feature and exited (or timed out) before its own `git commit`, leaving a
+# DIRTY worktree with HEAD==base_sha. The harness must NOT read that as no-progress and discard the work —
+# it rescue-commits the dirty tree and proceeds through the SAME in-box validate gate, so the work reaches
+# the pipeline (PRCREATE) instead of being lost. (validate GREEN here; a bad rescue would RED-surface.)
+run "dirty-tree work is rescue-committed + ships, not lost" "FAKE_AUTHOR=dirty FAKE_VALIDATE=GREEN" PRCREATE
+
+echo "== MUTATION: neutralize the #182 rescue → the SAME dirty-tree work is LOST (surfaced as no-progress) =="
+# The mutant MUST sit BESIDE the real dev-author.sh (in bin/) so it resolves the same $HERE and finds its
+# sibling repo-scope.sh — else it R16-scope-refuses before reaching the committed block and the mutation
+# is silently VACUOUS (the poller-rebase.test.sh lesson: a mutant that dies for the wrong reason proves
+# nothing).
+MUT="$HERE/bin/.dev-author-mut-$$.sh"
+sed 's/if \[ -n "\$(git -C "\$WT" status --porcelain 2>\/dev\/null)" \]; then/if false; then/' "$AUTHOR" > "$MUT"
+if ! grep -q 'if false; then' "$MUT"; then
+  echo "  FAIL mutation VACUOUS (sed did not change the copy)"; fail=$((fail+1))
+else
+  _AUTHOR_SAVE="$AUTHOR"; AUTHOR="$MUT"
+  run "mutant: dirty work surfaces no-progress (the exact bug #182 removes)" "FAKE_AUTHOR=dirty FAKE_VALIDATE=GREEN" ISSUECOMMENT
+  AUTHOR="$_AUTHOR_SAVE"   # restore — the rows below must run against the REAL script
+fi
+rm -f "$MUT"
 
 echo "== in-box RED: author commits but validate.sh fails → surfaced, NO PR, NO push =="
 run "in-box RED blocks the push" "FAKE_AUTHOR=done FAKE_VALIDATE=RED" ISSUECOMMENT
