@@ -609,6 +609,12 @@ LAUNCH_HEAD="${POLLER_LAUNCH_HEAD:-$(git -C "$SELF_REFRESH_CLONE" rev-parse HEAD
 HOST_REFRESH_SCAN="${HOST_REFRESH_SCAN:-$HERE/host-refresh.sh}"
 HOST_REFRESH_EVERY="${HOST_REFRESH_EVERY:-30}"
 HOST_REFRESH_TICKS=0
+# RECONCILE (task #19) — proof-gated closure of backlog issues (design in bin/reconcile.sh's header).
+# Same wiring shape as host-refresh: once per RECONCILE_EVERY sweeps, at the END of a tick, gated by THAT
+# tick's R9 halt read (closing an issue is an ACTION). FAIL-SAFE: a scan failure logs and never stops the loop.
+RECONCILE_SCAN="${RECONCILE_SCAN:-$HERE/reconcile.sh}"
+RECONCILE_EVERY="${RECONCILE_EVERY:-30}"
+RECONCILE_TICKS=0
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
@@ -1025,6 +1031,24 @@ host_refresh_tick(){
   return 0
 }
 
+# RECONCILE tick (task #19) — proof-gated closure of backlog issues whose authored PR merged + published
+# + went live. Same discipline as host_refresh_tick: END of a tick, R9-halt-gated (a close is an ACTION),
+# rate-limited to once per RECONCILE_EVERY sweeps, failures logged + SWALLOWED (a missed close leaves the
+# issue OPEN — the safe direction — for the next scan).
+reconcile_tick(){
+  [ "${RECONCILE_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
+  RECONCILE_TICKS=$((RECONCILE_TICKS+1))
+  [ "$RECONCILE_TICKS" -ge "$RECONCILE_EVERY" ] || return 0
+  RECONCILE_TICKS=0
+  if [ "${POLLER_HALTED:-0}" = 1 ]; then
+    log "reconcile: R9 HALT — scan skipped this tick (no issue closed; resumes when the halt clears)"
+    return 0
+  fi
+  "$RECONCILE_SCAN" --once 2>&1 | tee -a "$LOG" >&2 \
+    || log "reconcile: scan failed (continuing — an unclosed issue stays OPEN for the next scan)"
+  return 0
+}
+
 # ORG-WIDE wrapper (P0 uniform loop): one tick sweeps EVERY apparatus repo through the SAME harness,
 # re-setting POLLER_REPO/SLUG per repo. sweep_repo() is the original single-repo body unchanged.
 #
@@ -1059,6 +1083,7 @@ sweep(){
     POLLER_REPO="$_r"; SLUG="oso-gato/$_r"; sweep_repo
   done
   host_refresh_tick
+  reconcile_tick
 }
 sweep_repo(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"
