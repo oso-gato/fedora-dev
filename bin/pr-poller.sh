@@ -196,6 +196,22 @@ plan(){
   esac
 }
 
+# R18 IDLE-WITH-WORK-PENDING (audit 2026-07-18, CAT-42/01; the kd#23 six-hour silent stall). The poller's
+# process-liveness is watched (the apparatus-deadman: is it sweeping?) but its WORK progress is NOT: a
+# poller that NOOPs on `host=NONE` every 10s is "healthy" by construction while the workstream is dead.
+# stall_verdict is the missing WORK-level clock: a live-validate-LABELLED open head that has sat at
+# host=NONE (no host verdict produced) past a bound is a STALL to SURFACE, not a NOOP to repeat forever.
+# The age is derived from GitHub truth (the head commit's committer date), never a local first-seen marker
+# a restart would reset (R24 no-proxy). NOT a merge decision — surfacing only; pure + selftested.
+POLLER_STALL_MAX="${POLLER_STALL_MAX:-1800}"   # s a labelled head may sit at host=NONE before it surfaces (30m; the host gate normally verdicts in ~10m)
+# stall_verdict <host> <labelled:0|1> <age_seconds> <bound> -> OK | STALL
+stall_verdict(){
+  local host="$1" lbl="$2" age="$3" bound="$4"
+  case "$age"   in ''|*[!0-9]*) age=0;;   esac
+  case "$bound" in ''|*[!0-9]*) bound=0;; esac
+  if [ "$host" = NONE ] && [ "$lbl" = 1 ] && [ "$age" -ge "$bound" ]; then echo STALL; else echo OK; fi
+}
+
 # fix_outcome <blocked:0|1> <gated-sha> <worktree-head> <push-rc> <origin-head>
 #   -> BLOCKED | NO_COMMIT | PUSH_FAILED | NOT_LANDED | LANDED
 # The fixer's TRUTHFUL outcome — this retires the old `new head (if pushed) will re-gate` shrug, which
@@ -362,6 +378,14 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "green B escalate"   GREEN B   ESCALATE 1 PRESENT
   ck "green unknown tier" GREEN ""  PASS 1 MERGE          # ZERO-GATE: unknown tier no longer gates
   ck "green unknown fit"  GREEN B   WAT  1 PRESENT
+  # R18 idle-with-work-pending (audit CAT-42): a live-validate-labelled head at host=NONE past the bound STALLs.
+  sv(){ local got; got="$(stall_verdict "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — stall_verdict($2,$3,$4,$5)=$got want $6"; fail=1; }; }
+  sv "labelled NONE aged → STALL"  NONE  1 2000 1800 STALL
+  sv "labelled NONE fresh → OK"    NONE  1  600 1800 OK
+  sv "unlabelled NONE aged → OK"   NONE  0 9999 1800 OK
+  sv "GREEN never stalls"          GREEN 1 9999 1800 OK
+  sv "RED never stalls"            RED   1 9999 1800 OK
+  sv "non-numeric age → OK"        NONE  1 abc  1800 OK
   # R6 — the fixer must be told WHICH gate failed. plan() returns FIX from two routes; fix_cause pins
   # the mapping so a fitness RETURN can never again be handed a canned "host live-gate RED" prompt.
   fc(){ local got; got="$(fix_cause "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — fix_cause($2,$3)=$got want $4"; fail=1; }; }
@@ -1024,15 +1048,15 @@ sweep_repo(){
   # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
   # number (no torn read across a mid-sweep push).
   local rows
-  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid \
-          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)"' 2>/dev/null)" \
+  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid,labels \
+          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\([.labels[].name]|join(","))"' 2>/dev/null)" \
     || { log "pr list failed — skipping sweep"; return 0; }
   [ -n "$rows" ] || return 0                       # zero open PRs — quiet (rc 0 distinguishes it)
   # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
   # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
   # --watch flock; FD 3 is free.
-  local pr ref sha comments host tier fit action files fitraw ferr frc nf ef n last now since
-  while IFS=$'\t' read -r -u 3 pr ref sha; do
+  local pr ref sha labels comments host tier fit action files fitraw ferr frc nf ef n last now since
+  while IFS=$'\t' read -r -u 3 pr ref sha labels; do
     [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
     # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — bound to THIS
@@ -1092,7 +1116,26 @@ sweep_repo(){
       continue
     fi
     case "$action" in
-      NOOP) : ;;
+      NOOP)
+        # R18 IDLE-WITH-WORK-PENDING (kd#23; audit 2026-07-18 CAT-42/01). host=NONE means no host verdict
+        # yet. For a live-validate-LABELLED head that has sat here past POLLER_STALL_MAX, the gate has
+        # almost certainly SKIPPED this sha (a stale host .done marker, or a transient fetch-failure
+        # deduped as delivered) and will NOT re-gate on its own — SURFACE it once rather than NOOP
+        # forever. Age = the head commit's committer date (GitHub truth). One `gh api` per stuck head
+        # until surfaced, then the surface marker suppresses it. Unlabelled host=NONE stays a quiet NOOP.
+        case ",$labels," in
+          *,live-validate,*)
+            [ -f "$STATE/surfaced-${pr}-${sha}-stalled.done" ] && continue
+            local cdate age
+            cdate="$(timeout 20 gh api "repos/$SLUG/commits/$sha" -q '.commit.committer.date' 2>/dev/null)"
+            [ -n "$cdate" ] || continue
+            age=$(( $(date +%s) - $(date -d "$cdate" +%s 2>/dev/null || echo 0) ))
+            if [ "$(stall_verdict NONE 1 "$age" "$POLLER_STALL_MAX")" = STALL ]; then
+              surface "$pr" "$sha" "stalled" "this \`live-validate\`-labelled head has had NO host live-gate verdict for ~$((age/60))m (surfacing bound $((POLLER_STALL_MAX/60))m). The host gate produced no GREEN/RED for \`${sha:0:7}\` and will not re-gate on its own — most likely it SKIPPED this sha (a stale per-(repo,sha) \`.done\` marker on the host, or a transient PR-head fetch-failure deduped as a delivered SKIP; audit CAT-01/CAT-04). REMEDIATION: on the host, remove \`~/.local/state/live-gate/$(basename "$SLUG")-${sha}.done\` to force a re-gate, or push a new commit. (R18 idle-with-work-pending — the poller had been silently NOOPing on this since the head was pushed.)"
+            fi
+            ;;
+        esac
+        ;;
       FIX)
         # R6 — FINDINGS ARE GENERATIVE. plan() routes FIX from TWO causes; derive the reason from the one
         # that ACTUALLY fired, and in BOTH cases from that gate's OWN COMMENT BODY.
