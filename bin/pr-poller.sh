@@ -212,6 +212,21 @@ stall_verdict(){
   if [ "$host" = NONE ] && [ "$lbl" = 1 ] && [ "$age" -ge "$bound" ]; then echo STALL; else echo OK; fi
 }
 
+# CAT-17 (audit 2026-07-18, rank #2): a GREEN+PASS PR merely BEHIND main must not park TERMINALLY on its
+# acted marker — with nobody owning the rebase, every sibling merge strands the remaining backlog (O(N^2)).
+# The poller now OWNS the mechanical rebase: `gh pr update-branch` server-side-merges main into the PR
+# branch (NO local clone touched, unlike the fixer) — a CLEAN behind succeeds, minting a NEW head that
+# re-gates (progress, NOT parked); a genuine CONFLICT fails → surface + park for a human. Bounded so a
+# pathological "advances but never merges" head cannot churn forever. rebase_due is the pure bound.
+POLLER_REBASE_MAX="${POLLER_REBASE_MAX:-6}"   # auto-rebases attempted on ONE PR before surfacing for a human
+# rebase_due <attempts-so-far> <max> -> TRY | GIVEUP
+rebase_due(){
+  local n="$1" max="$2"
+  case "$n"   in ''|*[!0-9]*) n=0;;   esac
+  case "$max" in ''|*[!0-9]*) max=6;; esac
+  [ "$n" -lt "$max" ] && echo TRY || echo GIVEUP
+}
+
 # fix_outcome <blocked:0|1> <gated-sha> <worktree-head> <push-rc> <origin-head>
 #   -> BLOCKED | NO_COMMIT | PUSH_FAILED | NOT_LANDED | LANDED
 # The fixer's TRUTHFUL outcome — this retires the old `new head (if pushed) will re-gate` shrug, which
@@ -386,6 +401,12 @@ if [ "${1:-}" = "--selftest" ]; then
   sv "GREEN never stalls"          GREEN 1 9999 1800 OK
   sv "RED never stalls"            RED   1 9999 1800 OK
   sv "non-numeric age → OK"        NONE  1 abc  1800 OK
+  # CAT-17 bounded auto-rebase of GREEN+PASS-behind-main.
+  rb(){ local got; got="$(rebase_due "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — rebase_due($2,$3)=$got want $4"; fail=1; }; }
+  rb "0 attempts → TRY"    0 6 TRY
+  rb "at bound → GIVEUP"   6 6 GIVEUP
+  rb "over bound → GIVEUP" 9 6 GIVEUP
+  rb "garbage n → TRY"     x 6 TRY
   # R6 — the fixer must be told WHICH gate failed. plan() returns FIX from two routes; fix_cause pins
   # the mapping so a fitness RETURN can never again be handed a canned "host live-gate RED" prompt.
   fc(){ local got; got="$(fix_cause "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — fix_cause($2,$3)=$got want $4"; fail=1; }; }
@@ -1255,9 +1276,23 @@ sweep_repo(){
         LG_HOST_LOGIN="$LG_HOST_LOGIN" FITNESS_LOGIN="$FITNESS_LOGIN" "$HERE/auto-merge.sh" $flag "$POLLER_REPO" "$pr" 2>&1 | tee -a "$LOG"
         local amrc=${PIPESTATUS[0]}
         case "$amrc" in
-          0) : > "$done" ;;
-          2) surface "$pr" "$sha" "rebase" "auto-merge could not merge: this PR is behind \`main\` / has a merge conflict — it needs a REBASE onto main. All gates were GREEN+PASS; this is NOT a merge-trust refusal. Rebase + push and it re-gates and auto-merges." \
-               && : > "$done" ;;
+          0) : > "$done"; rm -f "$STATE/rebase-${pr}.n" ;;   # merged → clear the auto-rebase counter
+          2)  # CAT-17: OWN the mechanical rebase of a GREEN+PASS PR merely behind main — do NOT park it.
+              # `gh pr update-branch` server-side-merges main into the PR branch (NO local clone touched,
+              # unlike the fixer): CLEAN behind → succeeds, minting a NEW head that re-gates (PROGRESS,
+              # not parked); a genuine CONFLICT → fails → surface + park (a human resolves). Bounded by
+              # rebase_due so a head that keeps falling behind can't churn forever.
+              local rn="$STATE/rebase-${pr}.n" rc_n=0; [ -f "$rn" ] && read -r rc_n < "$rn"
+              case "$rc_n" in ''|*[!0-9]*) rc_n=0;; esac
+              if [ "$(rebase_due "$rc_n" "$POLLER_REBASE_MAX")" = TRY ] \
+                 && gh pr update-branch "$pr" --repo "$POLLER_REPO" >/dev/null 2>&1; then
+                echo $((rc_n+1)) > "$rn"
+                log "#$pr auto-rebased onto main (behind, clean) — attempt $((rc_n+1))/$POLLER_REBASE_MAX; the new head re-gates, NOT parked (CAT-17)"
+              else
+                surface "$pr" "$sha" "rebase" "auto-merge could not merge (behind \`main\` / conflict), and the poller's bounded auto-rebase then $( [ "$(rebase_due "$rc_n" "$POLLER_REBASE_MAX")" = GIVEUP ] && echo "hit its bound ($POLLER_REBASE_MAX attempts) — the head keeps falling behind" || echo "could not update-branch — likely a genuine merge CONFLICT to resolve by hand"). All gates were GREEN+PASS; NOT a merge-trust refusal. Rebase + push and it re-gates and auto-merges." \
+                  && : > "$done"
+              fi
+              ;;
           3) surface "$pr" "$sha" "merge-failed" "auto-merge's merge command failed for a non-gate reason (transient / the head moved) — NOT a merge-trust refusal. The poller keeps retrying the merge every sweep until it lands or the head moves (this comment posts once; see poller.log)." ;;
           *) surface "$pr" "$sha" "refused" "auto-merge REFUSED despite GREEN+PASS routing — the MERGE-TRUST boundary disagrees with the poller's reads (misconfigured anchors, same-identity while armed, or a gate its stricter parse rejects). INVESTIGATE (see poller.log)." \
                && : > "$done" ;;
