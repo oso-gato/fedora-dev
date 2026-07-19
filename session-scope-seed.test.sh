@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # session-scope-seed.test.sh — proves bin/session-scope-seed.sh (the launch-time scope binder, R16/R27):
 # SELF-SEED a declared new session · REFRESH a persisted (resumed) one · NO-OP undeclared · fail-safe on a
-# bad config · + TWO in-suite mutation rows + a bin/claude wiring drift-guard. Drives the REAL seed against
-# the REAL session-registry.sh + repo-scope.sh + a REAL git objective fixture. No gh/network/model.
+# bad config · PROVENANCE: a clone with NO origin/main binds nothing (R34/#210 HEAD-fallback drop) · + TWO
+# in-suite mutation rows + a bin/claude wiring drift-guard. Drives the REAL seed against the REAL
+# session-registry.sh + repo-scope.sh + a REAL git objective fixture. No gh/network/model.
 set -uo pipefail
 unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID SCOPE_SESSION 2>/dev/null || true
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -20,6 +21,16 @@ ROOT="$TMP/clones"; mkdir -p "$ROOT/wl-obj"
 git -C "$ROOT/wl-obj" init -q; git -C "$ROOT/wl-obj" config user.email x@y; git -C "$ROOT/wl-obj" config user.name x
 printf '# T\n\n## Repositories this objective operates on\n\n| Repository | Role |\n|---|---|\n| `oso-gato/wl-obj` | dev |\n\n## Document authority\n' > "$ROOT/wl-obj/00-OBJECTIVES.md"
 git -C "$ROOT/wl-obj" add -A; git -C "$ROOT/wl-obj" commit -qm init
+# R34/#210: transcribe --objective resolves the backing sha ONLY from origin/main (no HEAD fallback), so a
+# gated clone MUST carry a remote-tracking main ref. (update-ref stands in for a fetched origin/main.)
+git -C "$ROOT/wl-obj" update-ref refs/remotes/origin/main HEAD
+
+# a clone that EXISTS but has NO origin/main — a self-authored ~/work/<repo> shape (R34/#210): after the
+# HEAD-fallback drop it can back NOTHING, even though its local HEAD is perfectly committable.
+mkdir -p "$ROOT/wl-noorig"
+git -C "$ROOT/wl-noorig" init -q; git -C "$ROOT/wl-noorig" config user.email x@y; git -C "$ROOT/wl-noorig" config user.name x
+printf '# T\n\n## Repositories this objective operates on\n\n| Repository | Role |\n|---|---|\n| `oso-gato/wl-noorig` | dev |\n\n## Document authority\n' > "$ROOT/wl-noorig/00-OBJECTIVES.md"
+git -C "$ROOT/wl-noorig" add -A; git -C "$ROOT/wl-noorig" commit -qm init   # NO update-ref: no gated remote main
 
 REGDIR="$TMP/reg"; mkdir -p "$REGDIR"
 run_seed(){     SESSION_HOLDER_PID="$1" SCOPE_REGISTRY_DIR="$REGDIR" SCOPE_CLONE_ROOTS="$ROOT" SCOPE_REGISTRY_CLI="$REG" REPO_SCOPE_CLI="$RS" bash "$SEED" "$2" >/dev/null 2>&1; }
@@ -49,6 +60,11 @@ echo "== FAIL-SAFE: a declared objective with NO local clone is a safe no-op (ne
 objcfg svc-badclone "no-such-repo 00-OBJECTIVES.md"
 run_seed "$(live_holder)" svc-badclone && ok "bad-clone seed exits 0" || bad "bad-clone seed returned non-zero (would risk a launch)"
 [ -e "$(entry svc-badclone)" ] && bad "bad-clone created a bogus entry" || ok "bad-clone bound nothing"
+
+echo "== PROVENANCE (R34/#210): a clone with NO origin/main binds NOTHING (the HEAD fallback is gone) =="
+objcfg svc-noorig "wl-noorig 00-OBJECTIVES.md"
+run_seed "$(live_holder)" svc-noorig && ok "no-origin seed exits 0 (fail-safe)" || bad "no-origin seed returned non-zero (would risk a launch)"
+[ -e "$(entry svc-noorig)" ] && bad "no-origin clone bound a scope off a local HEAD (the fallback is back!)" || ok "no-origin clone bound NOTHING (origin/main-only backing enforced)"
 
 echo "== MUTATION 1: neutralize the SELF-SEED transcribe → a declared session binds nothing =="
 MUT1="$TMP/seed-mut1.sh"; sed 's@bash "\$RS" transcribe@true "\$RS" transcribe@' "$SEED" > "$MUT1"; chmod +x "$MUT1"

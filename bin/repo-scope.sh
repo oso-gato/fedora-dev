@@ -65,9 +65,10 @@
 #     poller sets nothing, so enabling this file changes NOTHING until a caller opts in per-session.
 #   * SCOPE_SESSION SET → the session's GIT-VERIFIED scope (session_scope_verified <sid>) NARROWS the
 #     ceiling: effective set = verified ∩ ceiling. The session's cached repos are TRUSTED only when they
-#     still SET-EQUAL the confirmed-objective repo-list at the session's backing ref — otherwise the
-#     session fails CLOSED with the cause named (SESSION_UNBACKED: no/old backing · bad ref · MISMATCH =
-#     a hand-edited cache tried to widen). On OK, `check` ALLOWs iff the repo is in the verified set AND
+#     still SET-EQUAL the confirmed-objective repo-list at the session's backing ref, AND that ref is a
+#     GATED-REMOTE (origin/main-ancestor) sha — otherwise the session fails CLOSED with the cause named
+#     (SESSION_UNBACKED: no/old backing · bad ref · MISMATCH = a hand-edited cache tried to widen · UNGATED
+#     = an off-main, agent-committed backing sha, R34/#210). On OK, `check` ALLOWs iff the repo is in the verified set AND
 #     not held by another LIVE session (disjointness, R28); an UNDECLARED session (SCOPE_SESSION set but
 #     unregistered) acts on NOTHING (fail-closed, F6). A session can only ever NARROW the ceiling, never
 #     exceed it. `list` mirrors: the verified effective set, or empty when unverified/undeclared. The
@@ -477,12 +478,29 @@ objective_repos(){
   printf '%s\n' "$out"
 }
 
+# objective_sha_gated <repo> <sha> → rc 0 iff <sha> is an ANCESTOR of the clone's origin/main — i.e. it
+# sits on the maintainer-GATED remote line, not an off-main AGENT-committed sha (R34/#210). The read path
+# calls this before trusting a cached backing: a hand-forged .session line-4 that points at a LOCAL widening
+# commit is reachable from HEAD but NOT from origin/main, so it fails CLOSED. `merge-base --is-ancestor`
+# returns rc 0 iff <sha> is reachable from origin/main (a sha is its own ancestor, so origin/main itself
+# passes). A missing origin/main (no gated remote) or an unknown sha ⇒ rc≠0 ⇒ fail closed. RESIDUAL
+# (disclosed — a 00-DESIGN.md NOTE): a locally-forged refs/remotes/origin/main is the same home-volume-write
+# trust level as editing .session directly — this gate RAISES THE BAR, it is not a hard boundary against that.
+objective_sha_gated(){
+  local repo="$1" sha="$2" dir
+  dir="$(objective_clone_dir "$repo")"
+  [ -d "$dir" ] || return 1
+  git -C "$dir" merge-base --is-ancestor "$sha" origin/main 2>/dev/null
+}
+
 # session_scope_verified <sid> → LINE 1 = the verification STATE, then (on OK only) the verified repos:
 #   OK           — the session is registered, backed, AND its cached line-3 repos SET-EQUAL the objective
 #                  repo-list at its backing ref → lines 2..N are those repos (the verified scope to act on).
 #   UNREGISTERED — no registry entry (or empty scope).
 #   UNBACKED     — registered but line 4 is absent/'-' or malformed (a pre-backing entry, or a hand-forge).
 #   UNREADABLE   — the backing ref (repo/path/sha) can't be read/parsed to a non-empty repo-list.
+#   UNGATED      — the backing sha is READABLE but is NOT an ancestor of origin/main (an off-main,
+#                  agent-committed sha — a self-authored provenance forge; R34/#210).
 #   MISMATCH     — cached repos ≠ objective repo-list at the ref (a hand-edited line 3 tried to widen).
 # The cache is thereby only ever TRUSTED when it still equals the git-anchored, maintainer-confirmed fact;
 # any drift/forgery/breakage fails the session CLOSED (the caller maps everything but OK to no-action).
@@ -497,6 +515,12 @@ session_scope_verified(){
   [ -n "$brepo" ] && [ -n "$bpath" ] && [ -n "$bsha" ] || { printf 'UNBACKED\n'; return 0; }
   objlist="$(objective_repos "$brepo" "$bpath" "$bsha")" || objlist=""
   [ -n "$objlist" ] || { printf 'UNREADABLE\n'; return 0; }
+  # R34/#210 PROVENANCE: the backing sha must sit on the GATED-REMOTE main line (an ancestor of
+  # origin/main), never an off-main AGENT-committed sha. A readable doc at a locally-forged off-main sha
+  # (a hand-edited .session line 4 pointing at a local widening commit) fails CLOSED here — separate from
+  # UNREADABLE (bad ref) so the cause is named. Checked BEFORE the set-equal so a forged sha whose doc
+  # merely matches the cache cannot pass.
+  objective_sha_gated "$brepo" "$bsha" || { printf 'UNGATED\n'; return 0; }
   # The cache is TRUSTED only when its line-3 repos SET-EQUAL the git-anchored objective repo-list; any
   # drift/forgery ⇒ MISMATCH ⇒ fail closed. `verified_ok` is the single gating line (the mutation anchor).
   local verified_ok=0
@@ -561,8 +585,8 @@ case "${1:-}" in
           # undeclared within the ceiling → SESSION_UNDECLARED; outside it → the ceiling DENY stands.
           verdict="$(scope_session_decide "$ceiling" 0 0 0)";;
         *)
-          # UNBACKED | UNREADABLE | MISMATCH → the session's git backing is broken/forged; act on NOTHING.
-          # A ceiling DENY/FALLBACK_DENY still stands (preserves its own rc/log); otherwise SESSION_UNBACKED.
+          # UNBACKED | UNREADABLE | MISMATCH | UNGATED → the session's git backing is broken/forged/off-main;
+          # act on NOTHING. A ceiling DENY/FALLBACK_DENY still stands (preserves its own rc/log); else SESSION_UNBACKED.
           sbacking_cause="$sstate"
           case "$ceiling" in DENY|FALLBACK_DENY) verdict="$ceiling";; *) verdict="SESSION_UNBACKED";; esac;;
       esac
@@ -588,7 +612,7 @@ case "${1:-}" in
         log "DENY: repo '$repo' is held by another LIVE session '$held_sid' — R28 disjoint-scope: no action while another session holds it"
         exit 3;;
       SESSION_UNBACKED)
-        log "DENY: session '$SCOPE_SESSION' scope is not git-verified ($sbacking_cause) — R16: the registry cache does not match the confirmed-objective repo-list at its backing ref (UNBACKED=no/old backing, UNREADABLE=bad ref, MISMATCH=hand-edited to widen); fail-closed to nothing. Re-transcribe: bin/repo-scope.sh transcribe --backing '<repo> <path> <sha>' <sid>"
+        log "DENY: session '$SCOPE_SESSION' scope is not git-verified ($sbacking_cause) — R16: the registry cache does not match the confirmed-objective repo-list at its backing ref (UNBACKED=no/old backing, UNREADABLE=bad ref, MISMATCH=hand-edited to widen, UNGATED=backing sha not on origin/main — R34/#210); fail-closed to nothing. Re-transcribe: bin/repo-scope.sh transcribe --backing '<repo> <path> <sha>' <sid>"
         exit 3;;
     esac;;
   diff-adds)
@@ -604,8 +628,9 @@ case "${1:-}" in
   transcribe)
     # transcribe (--backing '<repo> <path> <sha>' | --objective '<repo> <path>') <sid> — DERIVE the repos
     # from the confirmed objective and register them for the session (the agent transcribes, never
-    # authorizes, R16). --objective resolves the backing sha from the clone's origin/main (fallback HEAD)
-    # — the self-seed path (session-scope-seed.sh), which knows the objective doc but not a pinned sha.
+    # authorizes, R16). --objective resolves the backing sha ONLY from the clone's origin/main (a
+    # maintainer-gated remote-tracking ref; NO local-HEAD fallback — R34/#210) — the self-seed path
+    # (session-scope-seed.sh), which knows the objective doc but not a pinned sha.
     shift
     tbacking=""; tobjective=""
     if [ "${1:-}" = "--backing" ]; then tbacking="${2:-}"; shift 2 2>/dev/null || shift "$#"; fi
@@ -615,10 +640,14 @@ case "${1:-}" in
       read -r torepo topath _ <<< "$tobjective"
       { [ -n "$torepo" ] && [ -n "$topath" ]; } || { log "transcribe: --objective needs '<repo> <objective-path>'"; exit 2; }
       todir="$(objective_clone_dir "$torepo")"
-      # --verify: a plain `rev-parse <bad-ref>` ECHOES the ref to stdout on failure; --verify fails clean
-      # (no stdout). Prefer origin/main (an ancestor of the confirmed head) over the local HEAD.
-      tosha="$(git -C "$todir" rev-parse --verify -q origin/main 2>/dev/null || git -C "$todir" rev-parse --verify -q HEAD 2>/dev/null || true)"
-      [ -n "$tosha" ] || { log "transcribe: cannot resolve a backing sha for $torepo:$topath (no clone at $todir?) — fail-closed"; exit 3; }
+      # R34/#210: resolve the backing sha ONLY from origin/main — a REMOTE-TRACKING, maintainer-gated ref.
+      # The old `|| rev-parse HEAD` fallback let a self-authored local clone with NO gated remote main (a
+      # fabricated ~/work/<repo>) back a session's scope off an AGENT-COMMITTED local HEAD; once the ceiling
+      # is gone at the STEP-10 cutover that scope becomes DIRECTLY actionable, so the fallback is DROPPED —
+      # a clone with no origin/main now fails CLOSED here rather than trusting agent-controllable local
+      # state. `--verify` fails clean (no stdout) on a missing ref (a plain rev-parse would ECHO the ref).
+      tosha="$(git -C "$todir" rev-parse --verify -q origin/main 2>/dev/null || true)"
+      [ -n "$tosha" ] || { log "transcribe: cannot resolve origin/main for $torepo:$topath (no gated-remote clone at $todir?) — fail-closed, registering nothing (R34/#210)"; exit 3; }
       tbacking="$torepo $topath $tosha"
     fi
     { [ -n "$tbacking" ] && [ -n "$tsid" ]; } || { log "usage: repo-scope.sh transcribe (--backing '<repo> <path> <sha>' | --objective '<repo> <path>') <sid>"; exit 2; }
