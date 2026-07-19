@@ -125,6 +125,7 @@ while :; do
             SEED_CWD="$1"; SID="$2"; shift 2
             s="$HOME/.local/share/fedora-dev/bin/seed-claude-trust.py"
             [ -f "$s" ] && command -v python3 >/dev/null 2>&1 && python3 "$s" "$SEED_CWD" 2>/dev/null || true
+            export FD_INTERACTIVE=1   # marks THIS as an interactive session for the anti-stall Stop hook; headless `claude -p` (which bypasses this wrapper) never sets it, so the hook never touches a bounded headless run
             exec /usr/bin/claude ${SID:+--session-id "$SID"} --model default --permission-mode auto --effort ultracode "$@"
         ' bash "$PWD" "$sid" "$@"
     rc=$?
