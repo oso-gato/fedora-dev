@@ -156,6 +156,106 @@ check "request: body carries the sid"           '[ "$(exec_parse_manifest < "$TM
 bash "$SUT" --selftest >/dev/null 2>&1
 check "--selftest passes"                       '[ "$?" = 0 ]'
 
+# ═══ FILE MODE (R17 approval flow — pairs with fedora-bootstrap v1.2.69) ═════════════════════════════
+# A stub gh serves `issue list` (the dedup probe, from $FAKE_OPEN — the value the real -q would emit)
+# and RECORDS `issue create` (title/labels/body-file content). A stub repo-scope answers R16 ($SCOPE_OK).
+FBIN="$TMPD/fbin"; mkdir -p "$FBIN"
+cat > "$FBIN/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "issue list")   printf '%s' "${FAKE_OPEN:-}" ;;
+  "issue create")
+    prev=''; title=''; bodyf=''
+    for a in "$@"; do
+      case "$prev" in --title) title="$a";; --body-file) bodyf="$a";; --label) printf 'LABEL:%s\n' "$a" >> "${FILE_REC:?}";; esac
+      prev="$a"
+    done
+    { printf 'TITLE:%s\n' "$title"; cat "$bodyf"; } >> "${FILE_REC:?}"
+    [ "${FAKE_CREATE_FAIL:-0}" = 1 ] && { echo boom; exit 1; }
+    echo "https://github.com/oso-gato/fedora-bootstrap/issues/99" ;;
+  "label create") : ;;
+  *) : ;;
+esac
+exit 0
+GHEOF
+chmod +x "$FBIN/gh"
+printf '#!/usr/bin/env bash\n[ "${SCOPE_OK:-1}" = 1 ] && exit 0 || exit 1\n' > "$FBIN/repo-scope-stub"
+chmod +x "$FBIN/repo-scope-stub"
+run_file(){ # extra env…
+  FILE_REC="$TMPD/file-rec"; : > "$FILE_REC"; export FILE_REC
+  SESSION_SOURCE="$STUB" DEVBOX_MANIFEST_V2=1 REPO_SCOPE="$FBIN/repo-scope-stub" PATH="$FBIN:$PATH" \
+    env "$@" bash "$SUT" file >"$TMPD/file-out" 2>"$TMPD/file-err"; FRC=$?
+}
+body_rec(){ sed -n '/^TITLE:/,$p' "$FILE_REC" | sed 1d; }   # the created body (after the TITLE line)
+
+echo "── file: files the approval ticket (title + both labels + mention + parseable manifest) ──"
+fixture "main\t/home/core\t$UUID\n"
+run_file
+check "file: rc 0"                              '[ "$FRC" = 0 ]'
+check "file: title is APPROVAL REQUIRED"        'grep -q "^TITLE:🔴 APPROVAL REQUIRED: rebuild-devbox fedora-dev" "$FILE_REC"'
+check "file: host-task label"                   'grep -q "^LABEL:host-task$" "$FILE_REC"'
+check "file: rebuild-approval label"            'grep -q "^LABEL:rebuild-approval$" "$FILE_REC"'
+check "file: body line-1 is the exact op"       '[ "$(body_rec | head -1)" = "host-op: rebuild-devbox fedora-dev" ]'
+check "file: @mention present (phone push)"     'body_rec | grep -q -- "@oso-gato"'
+check "file: approved-label one-tap instruction" 'body_rec | grep -q "approved.*label"'
+check "file: manifest parses via the executor"  'body_rec | exec_parse_manifest >/dev/null'
+check "file: manifest carries the sid (v2)"     '[ "$(body_rec | exec_parse_manifest)" = "$(printf "main\t/home/core\t%s" "$UUID")" ]'
+check "file: URL printed on stdout"             'grep -q "issues/99" "$TMPD/file-out"'
+
+echo "── file: IDEMPOTENT — an OPEN rebuild ticket ⇒ NO second filing (rc 0, no create) ──"
+run_file FAKE_OPEN='88'
+check "file: dedup rc 0"                        '[ "$FRC" = 0 ]'
+check "file: dedup did NOT create"              '[ ! -s "$FILE_REC" ]'
+check "file: dedup names the existing ticket"   'grep -q "already exists (#88)" "$TMPD/file-err"'
+
+echo "── file: R16 out-of-scope control repo ⇒ REFUSED (rc 1, no create) ──"
+run_file SCOPE_OK=0
+check "file: scope refuse rc 1"                 '[ "$FRC" = 1 ]'
+check "file: scope refuse did NOT create"       '[ ! -s "$FILE_REC" ]'
+
+echo "── file: a failed create ⇒ rc 1 (the poller keeps the flag + retries) ──"
+run_file FAKE_CREATE_FAIL=1
+check "file: create-failure rc 1"               '[ "$FRC" = 1 ]'
+
+# ═══ POLLER WIRING — rebuild_request_tick (flag-fired one-shot, R9-gated) ════════════════════════════
+POLLER="$HERE/bin/pr-poller.sh"
+if [ -f "$POLLER" ]; then
+  printf '#!/usr/bin/env bash\necho "file $*" >> "${RR_REC:?}"\nexit "${RR_RC:-0}"\n' > "$FBIN/rr-rec"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$FBIN/gh-quiet"
+  chmod +x "$FBIN/rr-rec" "$FBIN/gh-quiet"
+  run_tick(){ # <flag-present 0|1> extra env…
+    local fp="$1"; shift
+    local phome; phome="$TMPD/ph-$RANDOM$RANDOM"; mkdir -p "$phome/bin"
+    cp "$FBIN/gh-quiet" "$phome/bin/gh"
+    RR_REC="$phome/rr.rec"; : > "$RR_REC"; export RR_REC
+    FLAG="$phome/requested"; [ "$fp" = 1 ] && : > "$FLAG"
+    env HOME="$phome" PATH="$phome/bin:$PATH" POLLER_REPOS=fedora-dev POLLER_ARMED=0 \
+        HOST_REFRESH_EVERY=0 RECONCILE_EVERY=0 DEV_LOOP_LAUNCH_EVERY=0 REBUILD_REQUEST_EVERY=1 \
+        REBUILD_REQUEST_SCRIPT="$FBIN/rr-rec" REBUILD_REQUEST_FLAG="$FLAG" \
+        REPO_SCOPE="$HERE/bin/repo-scope.sh" "$@" \
+        bash "$POLLER" --once >"$phome/out" 2>&1
+    TOUT="$phome/out"
+  }
+  echo "── poller: flag present → files ONCE + consumes the flag ──"
+  run_tick 1 FLEET_HALT=true
+  check "tick: filed"                           'grep -q "^file file" "$RR_REC"'
+  check "tick: flag consumed"                   '[ ! -e "$FLAG" ]'
+  echo "── poller: NO flag → nothing runs ──"
+  run_tick 0 FLEET_HALT=true
+  check "tick: no flag, no filing"              '[ ! -s "$RR_REC" ]'
+  echo "── poller: R9 HALT → skipped, flag KEPT ──"
+  run_tick 1 FLEET_HALT=false
+  check "tick: halted → no filing"              '[ ! -s "$RR_REC" ]'
+  check "tick: halted → flag kept"              '[ -e "$FLAG" ]'
+  check "tick: halted → says so"                'grep -q "rebuild-request: R9 HALT" "$TOUT"'
+  echo "── poller: filing FAILS → flag KEPT for retry ──"
+  run_tick 1 FLEET_HALT=true RR_RC=1
+  check "tick: failed filing ran"               'grep -q "^file file" "$RR_REC"'
+  check "tick: failed filing keeps the flag"    '[ -e "$FLAG" ]'
+else
+  echo "  skip poller wiring rows (bin/pr-poller.sh not beside the test)"
+fi
+
 echo
 [ "$fail" = 0 ] && echo "rebuild-request.test.sh: ALL PASS" || echo "rebuild-request.test.sh: FAILURES ABOVE"
 exit "$fail"

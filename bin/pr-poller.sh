@@ -632,6 +632,18 @@ DEV_LOOP_SERVICE="${DEV_LOOP_SERVICE:-$HERE/dev-loop-service.sh}"
 DEV_LOOP_SERVICE_LOG="${DEV_LOOP_SERVICE_LOG:-$HOME/.local/state/dev-loop/service.log}"
 DEV_LOOP_LAUNCH_EVERY="${DEV_LOOP_LAUNCH_EVERY:-6}"   # ~1 min at the 10s cadence — arm authoring promptly after a self-refresh
 DEV_LOOP_LAUNCH_TICKS=0
+# ── REBUILD-REQUEST (R17 approval flow, 2026-07-19) — flag-fired ONE-SHOT filing of the rebuild-devbox
+# APPROVAL ticket. Anything in-box may request a purposeful rebuild by touching the FLAG file (a LOCAL
+# write, not a bus write); THIS tick — the sanctioned headless bus-writer, the host-refresh/host-ticket
+# precedent — then runs `rebuild-request.sh file`, which captures a FRESH session manifest and files the
+# ticket AS the App (🔴 APPROVAL REQUIRED title + `rebuild-approval` label + @mention → the maintainer's
+# phone). The maintainer's ENTIRE act is one `approved`-label tap; the host executor (fedora-bootstrap
+# v1.2.69 approval gate) fires on it. ONE-SHOT: the flag is consumed on rc 0 (filed OR already-open —
+# file_ticket is idempotent); a failure KEEPS the flag for a retry next firing. 0 disables.
+REBUILD_REQUEST_SCRIPT="${REBUILD_REQUEST_SCRIPT:-$HERE/rebuild-request.sh}"
+REBUILD_REQUEST_FLAG="${REBUILD_REQUEST_FLAG:-$HOME/.local/state/rebuild-request/requested}"
+REBUILD_REQUEST_EVERY="${REBUILD_REQUEST_EVERY:-6}"
+REBUILD_REQUEST_TICKS=0
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
@@ -1094,6 +1106,31 @@ dev_loop_launch_tick(){
   return 0
 }
 
+# REBUILD-REQUEST tick (R17 approval flow, 2026-07-19) — see the REBUILD_REQUEST config block above.
+# Same discipline as host_refresh_tick: END of a tick, R9-halt-gated (filing a ticket is an ACTION),
+# rate-limited. Fires ONLY while the FLAG file exists; the flag is consumed on a successful filing (rc 0
+# = filed or already-open) and KEPT on failure so the next firing retries. FAIL-SAFE: a filing failure
+# logs and never stops the loop.
+rebuild_request_tick(){
+  [ "${REBUILD_REQUEST_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
+  REBUILD_REQUEST_TICKS=$((REBUILD_REQUEST_TICKS+1))
+  [ "$REBUILD_REQUEST_TICKS" -ge "$REBUILD_REQUEST_EVERY" ] || return 0
+  REBUILD_REQUEST_TICKS=0
+  [ -e "$REBUILD_REQUEST_FLAG" ] || return 0
+  if [ "${POLLER_HALTED:-0}" = 1 ]; then
+    log "rebuild-request: R9 HALT — not filing the approval ticket this tick (flag kept; resumes when the halt clears)"
+    return 0
+  fi
+  [ -x "$REBUILD_REQUEST_SCRIPT" ] || { log "rebuild-request: $REBUILD_REQUEST_SCRIPT not executable — skipping (flag kept)"; return 0; }
+  if "$REBUILD_REQUEST_SCRIPT" file 2>&1 | tee -a "$LOG" >&2; then
+    rm -f "$REBUILD_REQUEST_FLAG" 2>/dev/null || :
+    log "rebuild-request: approval ticket filed (or already open) — flag consumed; awaiting the maintainer's approved-label tap"
+  else
+    log "rebuild-request: filing FAILED — flag kept, retrying next firing"
+  fi
+  return 0
+}
+
 # ORG-WIDE wrapper (P0 uniform loop): one tick sweeps EVERY apparatus repo through the SAME harness,
 # re-setting POLLER_REPO/SLUG per repo. sweep_repo() is the original single-repo body unchanged.
 #
@@ -1130,6 +1167,7 @@ sweep(){
   host_refresh_tick
   reconcile_tick
   dev_loop_launch_tick
+  rebuild_request_tick
 }
 sweep_repo(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"

@@ -38,6 +38,9 @@
 # USAGE:
 #   rebuild-request.sh                 # enumerate → compose ticket body → present for a maintainer to file
 #   rebuild-request.sh manifest        # print ONLY the manifest block (BEGIN…session…END) to stdout
+#   rebuild-request.sh file            # FILE the approval ticket as the apparatus (R17 approval flow —
+#                                      #   the maintainer's whole act is ONE `approved`-label tap; invoked
+#                                      #   by the poller's rebuild_request_tick, not the interactive agent)
 #   rebuild-request.sh --selftest      # pure-helper self-checks (no tmux, no network)
 #   rebuild-request.sh --help
 set -uo pipefail
@@ -52,6 +55,11 @@ TICKET_ORG="${HOST_TICKET_ORG:-oso-gato}"
 TICKET_REPO="${HOST_TICKET_REPO:-fedora-bootstrap}"
 TICKET_LABEL="${HOST_TICKET_LABEL:-host-task}"
 TMUX_BIN="${TMUX_BIN:-tmux}"                            # test seam: a stub tmux drives the real logic
+# ── `file` mode (R17 approval flow, 2026-07-19 — pairs with fedora-bootstrap v1.2.69) ────────────────
+APPROVAL_LABEL="${APPROVAL_LABEL:-rebuild-approval}"    # the maintainer's mobile-filter label on the filed ticket
+REBUILD_APPROVER_MENTION="${REBUILD_APPROVER_MENTION:-@oso-gato}"   # @mentioned in the ticket body → GitHub-app push; AUTHORIZATION is the role-checked `approved` label, never this string
+HERE_RR="$(dirname "$(readlink -f "$0")")"
+REPO_SCOPE="${REPO_SCOPE:-$HERE_RR/repo-scope.sh}"      # R16: filing targets the control repo — scope-checked
 
 log(){ echo "rebuild-request: $*" >&2; }
 die(){ log "$*"; exit 1; }
@@ -199,19 +207,78 @@ SESSION_SOURCE="${SESSION_SOURCE:-enumerate_claude_procs}"
 manifest_block(){ "$SESSION_SOURCE" | dedup_by_sid | emit_manifest_lines | compose_manifest_block; }
 
 # compose_body: the full ticket body. LINE 1 is the machine op (exactly `host-op: rebuild-devbox
-# <workload>`); the manifest block rides below, prose between is ignored by both parsers.
-compose_body(){
-  local manifest; manifest="$(cat)"
-  cat <<EOF
+# <workload>`); the manifest block rides below, prose between is ignored by both parsers. Mode `filed`
+# writes the APPROVAL-FLOW prose (the apparatus filed it; the maintainer's one tap authorizes — the
+# fedora-bootstrap v1.2.69 approval gate); default = the present-to-a-maintainer prose (authorship path).
+compose_body(){ # [filed]
+  local manifest mode="${1:-present}"; manifest="$(cat)"
+  if [ "$mode" = filed ]; then
+    cat <<EOF
+host-op: rebuild-devbox $REBUILD_WORKLOAD
+
+$REBUILD_APPROVER_MENTION — **ONE-TAP APPROVAL NEEDED**: apply the **\`approved\` label** to this issue to
+authorize a purposeful **R17 rebuild** of the \`$REBUILD_WORKLOAD\` dev box (KILL → REBUILD → RESTORE →
+RESUME → VERIFY; every session in the manifest below is restored + resumed + nudged back to work). Filed
+by the apparatus (\`bin/rebuild-request.sh file\`); the host fires ONLY on a maintainer's act — the label
+APPLIER is role-checked admin|maintain from the label's own timeline (an App-applied label is inert). The
+host re-checks every ~10s and fires the moment the label lands. To REJECT: close this issue. The session
+manifest was captured live at filing time.
+
+$manifest
+EOF
+  else
+    cat <<EOF
 host-op: rebuild-devbox $REBUILD_WORKLOAD
 
 Purposeful **R17 rebuild** of the \`$REBUILD_WORKLOAD\` dev box — the host executes
 KILL → REBUILD → RESTORE → RESUME → VERIFY (\`rebuild-devbox\` verb). The session manifest below was
-captured on the dev box by \`bin/rebuild-request.sh\`. This ticket must be authored by a maintainer:
-the executor author-gates this destructive verb to admin|maintain and refuses a bot author.
+captured on the dev box by \`bin/rebuild-request.sh\`. Authorization is a MAINTAINER'S explicit act:
+author this ticket yourself, OR (the one-tap path) any maintainer may apply the \`approved\` label.
 
 $manifest
 EOF
+  fi
+}
+
+# file_ticket: FILE the approval ticket AS THE APPARATUS (the R17 approval flow — the executor half is
+# fedora-bootstrap v1.2.69: a bot-filed ticket fires once a maintainer taps the `approved` label, so
+# filing needs NO human; the maintainer's ENTIRE act is the one tap). Meant to be invoked by the POLLER's
+# rebuild_request_tick (the sanctioned headless bus-writer — the host-refresh/host-ticket precedent),
+# not the interactive agent. IDEMPOTENT: skips when an OPEN ticket for this workload already exists
+# (line-1 op match on open host-task issues — a closed/rejected ticket never blocks a re-file). R16:
+# refuses when the control repo is out of the operating scope (fail-closed; a missing reader is never a
+# go). Labels: $TICKET_LABEL (host discovery) + $APPROVAL_LABEL (the maintainer's mobile notification
+# filter), both create-on-use. The manifest is captured FRESH at filing time (it is a snapshot — a stale
+# one strands sessions started since). rc 0 = filed (URL on stdout) or already-open; non-zero = not filed.
+file_ticket(){
+  local slug="$TICKET_ORG/$TICKET_REPO" existing mb count body tmp url
+  "$REPO_SCOPE" check "$TICKET_REPO" 2>/dev/null \
+    || { log "R16: control repo '$TICKET_REPO' is not in the operating scope (or the reader is unavailable) — refusing to file"; return 1; }
+  existing="$(gh issue list --repo "$slug" --state open --label "$TICKET_LABEL" --limit 50 \
+              --json number,body -q '.[] | select(.body | startswith("host-op: rebuild-devbox '"$REBUILD_WORKLOAD"'")) | .number' 2>/dev/null | head -n1)" || existing=''
+  if [ -n "$existing" ]; then
+    log "an OPEN rebuild ticket already exists (#$existing) — not filing a duplicate (idempotent)"
+    return 0
+  fi
+  mb="$(manifest_block)"
+  count="$(printf '%s\n' "$mb" | grep -c '^session ' || true)"
+  [ "$count" -gt 0 ] || log "WARNING: zero sessions captured — the rebuild would restore nothing"
+  body="$(printf '%s\n' "$mb" | compose_body filed)"
+  tmp="$(mktemp)" || return 1
+  printf '%s\n' "$body" > "$tmp"
+  gh label create "$TICKET_LABEL"   --repo "$slug" --color 5319e7 >/dev/null 2>&1 || true   # create-on-use
+  gh label create "$APPROVAL_LABEL" --repo "$slug" --color d93f0b >/dev/null 2>&1 || true
+  if url="$(gh issue create --repo "$slug" \
+        --title "🔴 APPROVAL REQUIRED: rebuild-devbox $REBUILD_WORKLOAD ($count session(s)) — tap the approved label" \
+        --label "$TICKET_LABEL" --label "$APPROVAL_LABEL" --body-file "$tmp" 2>&1)"; then
+    rm -f "$tmp"
+    log "FILED $url ($count session(s)) — awaiting the maintainer's one-tap \`approved\` label"
+    printf '%s\n' "$url"
+    return 0
+  fi
+  rm -f "$tmp"
+  log "gh issue create FAILED (does the App hold Issues:write on $slug?): $url"
+  return 1
 }
 
 # urlencode: RFC-3986 percent-encoding for the prefilled new-issue URL (ASCII manifest only).
@@ -301,8 +368,9 @@ case "${1:-}" in
   --selftest) run_selftest; exit $? ;;
   --help|-h)  usage; exit 0 ;;
   manifest)   manifest_block; exit 0 ;;
+  file)       file_ticket; exit $? ;;   # R17 approval flow: the apparatus files; the maintainer taps `approved`
   ""|request) : ;;   # default → compose + present
-  *)          die "unknown argument '$1' (use: manifest | request | --selftest | --help)" ;;
+  *)          die "unknown argument '$1' (use: manifest | request | file | --selftest | --help)" ;;
 esac
 
 mb="$(manifest_block)"
