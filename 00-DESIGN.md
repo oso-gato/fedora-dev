@@ -181,6 +181,14 @@ the clone's `origin/main`). `objective_clone_dir` resolves a workload objective'
 `~/.local/share`·`~/work`·`~/repos`, so a tenant whose objective lives in its own repo binds without a
 gh-api backend. First declaration is one-time per session; thereafter it persists + refreshes.
 
+**Shared-resource back-pressure under unbounded N (R39 / gap 10).** Isolation keeps tenants from
+*colliding*; it does not keep them from *saturating* the singleton resources they share — the one host
+validator, the one dev App rate budget, the shared storage. R39 requires bounded/graceful degradation and
+per-session fair-share (no tenant starves another) with a saturation signal at exhaustion (R37, no silent
+cap) — the N-scaling generalization of R29's pairwise concurrent-validator safety. The **fair-share
+decider is built** (`bin/back-pressure.sh`, an ADMIT/WAIT/SATURATED admission call); **live wiring into
+the shared-resource actuators is deferred to N>1** (a no-op at N=1). Full note in NOTES below.
+
 ## A6. Three decoupled clocks on an immutable substrate
 
 Immutable-host, containerise-everything. Three independent rebuild cadences: the **host image**, the
@@ -491,3 +499,20 @@ tenant makes one load-bearing.
   only — the read path git-shows per check today; fine at current N).
 - **Full D6 Part-2 design-of-record section** for this portion (this NOTE + the A5 [BUILT] block cover it
   for now).
+- **SHARED-RESOURCE BACK-PRESSURE (R39 / gap 10, #208):** the N tenant sessions (R20) share ONE host
+  validator, ONE dev App identity (its REST + search budget, shared even with the fixer), and ONE
+  storage/dnf-cache budget. R29 makes the pairwise (N≈2) concurrent case cross-contamination-safe; R39 is
+  its N-scaling generalization — bounded/graceful degradation under unbounded N, per-session fair-share so
+  no tenant starves another, and a SATURATION signal (R37, no silent cap) at exhaustion. **The decider is
+  BUILT + proven** (`bin/back-pressure.sh`: `fair_share = max(1, budget/n)`; a single pre-consumption
+  admission call returns ADMIT rc0 / WAIT rc10 / SATURATED rc20 — mirroring `fleet-halt.sh`'s rc contract
+  — and emits the signal on WAIT/SATURATED; `--selftest` + `back-pressure.test.sh`, mutation-checked;
+  `live-sessions` reads N from the R27 registry). **LIVE WIRING is deferred to when N>1 makes it
+  load-bearing** (this NOTE's premise — a second concurrent objective tenant): at N=1 the decider is a
+  pure global cap with a signal (`fair_share = budget`), so no inter-tenant throttling occurs and there is
+  nothing to wire yet, exactly as #208 scopes it ("non-blocking now; revisit when N grows"). Drop-in when
+  it bites: each shared-resource actuator (the host validator scheduler; the poller/App-budget consumers;
+  the storage GC) makes one `back-pressure.sh decide "$B" "$(back-pressure.sh live-sessions)" "$total"
+  "$mine" "$resource"` call and gates on its rc. The strict reserving fair-share (a peer's share is held
+  even while it is idle — starvation-free but not work-conserving) is the MVP; work-conservation (borrow an
+  idle peer's slack) needs per-peer in-flight accounting and is the follow-on refinement.
