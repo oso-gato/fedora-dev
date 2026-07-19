@@ -36,12 +36,18 @@
 # only the apparatus's own two repos; empty ⇒ nothing), and a non-zero rc yields an EMPTY list here, so a
 # cycle authors NOTHING rather than guessing a default.
 #
-# NO SINGLETON FLOCK (deliberate). A naive `flock -n || exit` would REINTRODUCE the #173 dead-holder-
-# blocks-forever bug (a box recreate orphans the holder; the fresh service reads the corpse as a healthy
-# peer and exits — four silent hours, 2026-07-13). Correctness against a double-launch rests instead on
-# dev-author's OWN per-(repo,issue) idempotency marker + "is there already an open PR?" guard, which make a
-# duplicate author run a cheap no-op. A #173-grade ADJUDICATED singleton is a follow-up (NOTE), not an MVP
-# blocker — the idempotency is the real guard, the flock would only be defense-in-depth.
+# LIVENESS-ADJUDICATED SINGLETON (#173-grade). This service now has TWO launchers — entrypoint.sh (on a
+# box built from an image carrying the launch block) AND the self-refreshing poller's dev_loop_launch_tick
+# (the SELF-ARM path: the poller is CLONE-side, so it reaches a running box with NO rebuild). Two launchers
+# means a double-launch is routine, so a dedup is now warranted. It is NOT a naive `flock -n || exit`: that
+# reintroduces the #173 dead-holder-blocks-forever bug (a box recreate orphans the holder; the fresh
+# service reads the corpse as a healthy peer and exits — four silent hours, 2026-07-13). Instead the holder
+# records its pid in a pidfile and a contender ADJUDICATES liveness (service_live): a peer defers a start
+# ONLY when the recorded pid is positively live AND its /proc cmdline still names this script (so a dead or
+# a RECYCLED pid never blocks a start). FAIL DIRECTION: liveness in doubt ⇒ START (a brief double-run is a
+# cheap no-op — dev-author's per-(repo,issue) idempotency marker + "is there already an open PR?" guard
+# make a duplicate author run harmless; the singleton only spares the wasted model runs). The pidfile is
+# reclaimed on clean EXIT only when it still holds OUR pid, so a race-loser never unlinks the winner's.
 #
 # FAIL-SAFE: a dev-loop pass that fails is logged and the NEXT repo / NEXT cycle proceeds (one stuck repo
 # never wedges the rest). Best-effort + self-restarting (entrypoint's supervise loop restarts a death), and
@@ -51,7 +57,26 @@ HERE="$(dirname "$(readlink -f "$0")")"
 STATE="$HOME/.local/state/claudebox"
 LOGDIR="$HOME/.local/state/dev-loop"; mkdir -p "$LOGDIR"
 LOG="$LOGDIR/service.log"
+PIDFILE="${PIDFILE:-$LOGDIR/service.pid}"
 log(){ echo "[$(date -u +%FT%TZ 2>/dev/null || date)] dev-loop-service: $*" | tee -a "$LOG" >&2; }
+
+# service_live — is a DIFFERENT, verified dev-loop-service instance currently holding the pidfile? The
+# #173 discipline: never trust a bare marker. Require the recorded pid to (a) be a number, (b) not be us,
+# (c) be ALIVE (kill -0), and (d) actually BE a dev-loop-service (its /proc/<pid>/cmdline still names this
+# script) — so a DEAD holder or a RECYCLED pid wearing the old number reads as NOT live and never blocks a
+# start. Probes the SPECIFIC recorded pid, never a `pgrep -f dev-loop-service` string-match across all
+# procs (the process-pattern-self-match trap: a broad match would hit this very check and the poller's own
+# `dev-loop-service.sh --is-live` launch probe). Used by the startup singleton guard AND by the poller
+# (via --is-live) to decide whether to launch.
+service_live(){
+  local p
+  p="$(cat "$PIDFILE" 2>/dev/null)" || return 1
+  case "$p" in ''|*[!0-9]*) return 1;; esac
+  [ "$p" != "$$" ] || return 1
+  kill -0 "$p" 2>/dev/null || return 1
+  tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'dev-loop-service\.sh' || return 1
+  return 0
+}
 
 DEV_LOOP="${DEV_LOOP:-$HERE/dev-loop.sh}"
 REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
@@ -81,7 +106,21 @@ EOF
 }
 case "${1:-}" in
   --one-cycle) one_cycle; exit 0;;
+  --is-live)   service_live; exit $?;;   # poller launch-probe (#173-adjudicated liveness of the holder)
 esac
+
+# SINGLETON (liveness-adjudicated, #173) — with two launchers (entrypoint + the self-refreshing poller),
+# a double-launch is routine; if a verified peer already holds the loop, this launch exits cleanly. Checked
+# BEFORE the readiness waits (no point waiting for assembly when a peer is already cycling). A race that
+# slips two past here is a cheap no-op (dev-author idempotency); a dead/recycled holder never blocks.
+if service_live; then
+  log "a live dev-loop-service (pid $(cat "$PIDFILE" 2>/dev/null)) already holds the loop — this launch exits (singleton)"
+  exit 0
+fi
+echo "$$" > "$PIDFILE"
+# reclaim the pidfile on clean exit ONLY while it still names US — a race-loser must never unlink the
+# winner's record (the winner overwrote it with its own pid).
+trap 'p="$(cat "$PIDFILE" 2>/dev/null)"; [ "$p" = "$$" ] && rm -f "$PIDFILE" 2>/dev/null; :' EXIT
 
 # 1) box ASSEMBLED — dev-author needs `claude` + `gh`, present only post-assemble.
 log "waiting for claudebox assembly (.assembled)…"
