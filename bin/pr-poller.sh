@@ -615,6 +615,23 @@ HOST_REFRESH_TICKS=0
 RECONCILE_SCAN="${RECONCILE_SCAN:-$HERE/reconcile.sh}"
 RECONCILE_EVERY="${RECONCILE_EVERY:-30}"
 RECONCILE_TICKS=0
+# ── DEV-LOOP LAUNCH (self-arm the authoring loop, 2026-07-19) ────────────────────────────────────────
+# The authoring loop (dev-loop-service.sh) is launched by entrypoint.sh — but entrypoint.sh is
+# IMAGE-BAKED, so on a box whose RUNNING image predates the loop, NOTHING launches it until a rebuild.
+# A rebuild kills+restores every live session (R17) and its trigger is human-gated, so an image-only
+# launch could NEVER self-arm on a busy multi-tenant box (the "box idle" contradiction). THIS tick closes
+# the gap: the poller is CLONE-side and SELF-REFRESHES its own code (#162), so a poller carrying this tick
+# reaches a running box with NO rebuild, and it kick-starts the authoring loop the same way — arming it
+# CLONE-side instead of image-side. dev-loop-service.sh's liveness-adjudicated singleton dedups against
+# the entrypoint's own launch on a rebuilt box (both may run; the singleton keeps one). Gated
+# DEV_LOOP_ENABLED default-ON (the #220 self-arm default — a pre-loop container may not even carry the
+# var, so default-on IS the self-arm; explicit =0 disables) + R9 halt (launching a service is an ACTION).
+# Rate-limited to once per DEV_LOOP_LAUNCH_EVERY sweeps (0 disables; a lone `--once` fires it only under
+# =1 — the test/catch-up seam, since each --once is a fresh process whose counter starts at 0).
+DEV_LOOP_SERVICE="${DEV_LOOP_SERVICE:-$HERE/dev-loop-service.sh}"
+DEV_LOOP_SERVICE_LOG="${DEV_LOOP_SERVICE_LOG:-$HOME/.local/state/dev-loop/service.log}"
+DEV_LOOP_LAUNCH_EVERY="${DEV_LOOP_LAUNCH_EVERY:-6}"   # ~1 min at the 10s cadence — arm authoring promptly after a self-refresh
+DEV_LOOP_LAUNCH_TICKS=0
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
@@ -1049,6 +1066,34 @@ reconcile_tick(){
   return 0
 }
 
+# DEV-LOOP LAUNCH tick (self-arm, 2026-07-19) — see the DEV_LOOP config block above. Same discipline as
+# host_refresh_tick/reconcile_tick: END of a tick, R9-halt-gated (launching a service is an ACTION),
+# rate-limited. IDEMPOTENT: launches ONLY when no live dev-loop-service already holds the loop
+# (`dev-loop-service.sh --is-live` adjudicates the holder's liveness the #173 way), so a re-tick and the
+# entrypoint's own launch never stack a second looping service. DETACHED via setsid into its OWN session
+# so it OUTLIVES this poller — including the poller's own self-refresh exit+relaunch (#162), which is the
+# whole point: the authoring loop must survive the vehicle that started it. FAIL-SAFE: any failure is
+# logged and swallowed (a missed launch degrades to the entrypoint's launch on the next rebuild).
+dev_loop_launch_tick(){
+  [ "${DEV_LOOP_LAUNCH_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
+  DEV_LOOP_LAUNCH_TICKS=$((DEV_LOOP_LAUNCH_TICKS+1))
+  [ "$DEV_LOOP_LAUNCH_TICKS" -ge "$DEV_LOOP_LAUNCH_EVERY" ] || return 0
+  DEV_LOOP_LAUNCH_TICKS=0
+  [ "${DEV_LOOP_ENABLED:-1}" != 0 ] || return 0   # #220 self-arm gate: default ON; explicit =0 disables
+  if [ "${POLLER_HALTED:-0}" = 1 ]; then
+    log "dev-loop-launch: R9 HALT — not launching the authoring loop this tick (resumes when the halt clears)"
+    return 0
+  fi
+  [ -x "$DEV_LOOP_SERVICE" ] || { log "dev-loop-launch: $DEV_LOOP_SERVICE not executable — skipping (degrades to the entrypoint's launch on the next rebuild)"; return 0; }
+  if "$DEV_LOOP_SERVICE" --is-live 2>/dev/null; then
+    return 0    # a live authoring loop already holds it — nothing to do (quiet: this is the steady state)
+  fi
+  log "dev-loop-launch: no live authoring loop — starting dev-loop-service.sh detached (self-arm via the self-refreshing poller, no rebuild)"
+  mkdir -p "$(dirname "$DEV_LOOP_SERVICE_LOG")" 2>/dev/null || :
+  setsid "$DEV_LOOP_SERVICE" >>"$DEV_LOOP_SERVICE_LOG" 2>&1 </dev/null &
+  return 0
+}
+
 # ORG-WIDE wrapper (P0 uniform loop): one tick sweeps EVERY apparatus repo through the SAME harness,
 # re-setting POLLER_REPO/SLUG per repo. sweep_repo() is the original single-repo body unchanged.
 #
@@ -1084,6 +1129,7 @@ sweep(){
   done
   host_refresh_tick
   reconcile_tick
+  dev_loop_launch_tick
 }
 sweep_repo(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"

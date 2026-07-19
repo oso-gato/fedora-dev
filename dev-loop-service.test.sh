@@ -61,6 +61,60 @@ else
   [ "$(dispatched)" = "fedora-dev " ] && ok "mutant: empty scope authors the hardcoded default ⇒ the real fail-closed row discriminates" || no "mutant did not author a default on empty scope (row would not bite)"
 fi
 
+echo "== SINGLETON (#173-adjudicated liveness): --is-live reports the holder correctly =="
+# The self-arm gives dev-loop-service TWO launchers (entrypoint + the poller's dev_loop_launch_tick), so a
+# double-launch is routine and must dedup — WITHOUT the #173 dead-holder-blocks-forever bug. service_live
+# (exposed as --is-live for the poller's launch probe) defers ONLY to a positively-live holder whose /proc
+# cmdline still names this script; a dead or a RECYCLED pid never blocks a start.
+PF="$ROOT/svc.pid"
+islive(){ env HOME="$ROOT" PIDFILE="$1" bash "$SVC" --is-live >/dev/null 2>&1; RC=$?; }
+
+rm -f "$PF"; islive "$PF"
+[ "$RC" = 1 ] && ok "no pidfile → not live" || no "no pidfile misjudged live (rc=$RC)"
+
+# a pid that has already exited (a subshell's own $$, dead the moment the substitution returns) — no
+# background kill (killing a fresh `cmd &` before its exec runs the inherited EXIT trap, nuking $ROOT).
+dp="$(bash -c 'echo $$')"; echo "$dp" > "$PF"; islive "$PF"
+[ "$RC" = 1 ] && ok "dead pid → not live" || no "dead pid misjudged live (rc=$RC)"
+
+# a live pid whose cmdline does NOT name the service = a recycled pid wearing the old number
+sleep 300 & rp=$!; echo "$rp" > "$PF"; islive "$PF"
+[ "$RC" = 1 ] && ok "live but unrelated cmdline (recycled pid) → not live" || no "recycled pid misjudged live (rc=$RC)"
+
+# a live pid whose cmdline NAMES the service (exec -a sets argv0 in-place, so $! IS the named process)
+bash -c 'exec -a "/x/bin/dev-loop-service.sh" sleep 300' & lp=$!; echo "$lp" > "$PF"; islive "$PF"
+[ "$RC" = 0 ] && ok "live + cmdline names the service → live" || no "live-named holder misjudged not-live (rc=$RC)"
+
+echo "== SINGLETON: a second launch exits cleanly when a verified peer is live; a start proceeds otherwise =="
+# peer ($lp) is live and holds $PF → the persistent launch must exit 0 WITHOUT cycling (never reaches one_cycle)
+: > "$DL_LOG"
+env HOME="$ROOT" PIDFILE="$PF" DEV_LOOP="$BIN/dev-loop.sh" REPO_SCOPE="$BIN/repo-scope.sh" SCOPE_REPOS="fedora-dev" \
+  timeout 5 bash "$SVC" > "$ROOT/out" 2>&1; RC=$?
+{ [ "$RC" = 0 ] && [ ! -s "$DL_LOG" ] && grep -q 'already holds the loop' "$ROOT/out"; } \
+  && ok "peer live → launch exits 0 without cycling (singleton dedup)" || no "singleton did not dedup a live peer (rc=$RC)"
+
+# no live peer (kill the holders, clear the pidfile) → the launch PASSES the singleton and reaches the
+# readiness wait (blocks on .assembled, which never appears) — proving a dead/absent holder never blocks.
+kill "$lp" "$rp" 2>/dev/null; rm -f "$PF"
+env HOME="$ROOT" PIDFILE="$PF" DEV_LOOP="$BIN/dev-loop.sh" REPO_SCOPE="$BIN/repo-scope.sh" \
+  timeout 3 bash "$SVC" > "$ROOT/out" 2>&1; RC=$?
+{ [ "$RC" = 124 ] && grep -q 'waiting for claudebox assembly' "$ROOT/out"; } \
+  && ok "no live peer → passes singleton, waits for assembly (a dead/absent holder never blocks)" || no "singleton wrongly blocked a start OR did not reach readiness (rc=$RC)"
+rm -f "$PF"
+
+echo "== MUTATION: neutralize the /proc cmdline verify → a recycled pid reads as LIVE (the verify row bites) =="
+MUT2="$ROOT/dev-loop-service-mut2.sh"
+sed "/grep -q 'dev-loop-service/d" "$SVC" > "$MUT2"
+if grep -q "grep -q 'dev-loop-service" "$SVC" && ! grep -q "grep -q 'dev-loop-service" "$MUT2"; then
+  sleep 300 & mp=$!; echo "$mp" > "$PF"
+  env HOME="$ROOT" PIDFILE="$PF" bash "$MUT2" --is-live >/dev/null 2>&1; MRC=$?
+  kill "$mp" 2>/dev/null
+  [ "$MRC" = 0 ] && ok "mutant: recycled pid misjudged LIVE ⇒ the real cmdline-verify row discriminates" || no "mutant did not flip the recycled-pid row (mrc=$MRC)"
+else
+  no "mutation VACUOUS (sed did not remove the cmdline verify)"
+fi
+rm -f "$PF"
+
 echo "== DRIFT GUARD: the entrypoint gate is ARMED BY DEFAULT (self-arm) — never default-off =="
 # The loop self-arms ONLY if entrypoint.sh's gate defaults ON. A regression back to `${DEV_LOOP_ENABLED:-0}`
 # (default-off) silently re-introduces the manual host arm that breaks self-arming — catch it here.
