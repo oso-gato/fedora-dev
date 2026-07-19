@@ -19,9 +19,13 @@
 # the host live-gate + an INDEPENDENT fitness review before the poller can merge it — so an enabled loop is
 # fenced by the SAME two independent gates that fence the merge, PLUS the R9 fleet HALT and R16 scope that
 # dev-loop.sh reads at the top of every pass, PLUS dev-author's bounded per-run timeout and MAX_PER_PASS
-# cap. DISABLED BY DEFAULT — enabling it (DEV_LOOP_ENABLED=1 in the deploy env) is the arming flip,
-# mirroring the poller's POLLER_ENABLED. Authoring and merging are INDEPENDENT capabilities (separate
-# gates), so this is gated separately from POLLER_ENABLED.
+# cap. ARMED BY DEFAULT (2026-07-18) — the entrypoint gate defaults ON, so the loop SELF-ARMS with the
+# apparatus: once the self-refresh deploys the new entrypoint, authoring starts with NO host action. A
+# host-set OPT-IN flag would be a deploy-CONFIG the self-refresh CANNOT set (it deploys the image +
+# live-clone, never the host quadlet env), so a default-off flag would force a MANUAL host arm —
+# contradicting "self-arming = no more manual host actions". Set DEV_LOOP_ENABLED=0 to disable; R9 fleet
+# HALT is the emergency stop (no redeploy needed). Same trust level as the already-armed poller — authoring
+# produces PRs the SAME two gates (host live-gate + fitness) decide.
 #
 # MULTI-REPO — THIS wrapper's own job. pr-poller.sh iterates the scoped repos INSIDE its own sweep, so
 # poller-service.sh need not; dev-loop.sh is single-repo (one pass over one repo's backlog), so THIS

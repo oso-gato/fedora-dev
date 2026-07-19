@@ -61,4 +61,18 @@ else
   [ "$(dispatched)" = "fedora-dev " ] && ok "mutant: empty scope authors the hardcoded default ⇒ the real fail-closed row discriminates" || no "mutant did not author a default on empty scope (row would not bite)"
 fi
 
+echo "== DRIFT GUARD: the entrypoint gate is ARMED BY DEFAULT (self-arm) — never default-off =="
+# The loop self-arms ONLY if entrypoint.sh's gate defaults ON. A regression back to `${DEV_LOOP_ENABLED:-0}`
+# (default-off) silently re-introduces the manual host arm that breaks self-arming — catch it here.
+ENTRY="$HERE/entrypoint.sh"
+if [ -f "$ENTRY" ]; then
+  if grep -q 'DEV_LOOP_ENABLED:-1' "$ENTRY" && ! grep -q '"${DEV_LOOP_ENABLED:-0}" = 1' "$ENTRY"; then
+    ok "entrypoint gate defaults ON (\${DEV_LOOP_ENABLED:-1} != 0) — the loop self-arms"
+  else
+    no "entrypoint gate is NOT default-on — the authoring loop would need a MANUAL host arm (breaks self-arming)"
+  fi
+else
+  echo "  skip drift guard (entrypoint.sh not beside the test)"
+fi
+
 echo; echo "dev-loop-service: $pass passed, $fail failed"; [ "$fail" -eq 0 ]
