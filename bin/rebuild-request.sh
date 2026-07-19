@@ -171,17 +171,32 @@ enumerate_claude_procs(){
     [ "$child" = 1 ] && continue                                                     # subagent, not a tenant
     cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)" || continue
     sid="$(sid_from_cmd "$cmd")"                                                     # --session-id OR --resume/-r
-    if [ -n "$sid" ]; then name="s-${sid%%-*}"; else name="s-p$pid"; fi             # unique, allowlist-safe
+    if [ -n "$sid" ]; then name="s-${sid%%-*}"; else name="s-p$pid"; fi             # collision-unlikely (first 8 hex of the sid), allowlist-safe
     printf '%s\t%s\t%s\n' "$name" "$cwd" "$sid"
   done
 }
 
-# manifest_block: the whole enumerate→validate→wrap pipeline (the testable core). SESSION_SOURCE is the
-# seam (default: the live-process scan; the test injects a fixture emitter). enumerate_tmux is kept as
+# dedup_by_sid: collapse the raw session source to ONE line per interactive session. A single tenant can
+# have MULTIPLE live `claude` processes ALL carrying the SAME resumable id (observed 2026-07-19: TWO
+# `/usr/bin/claude --resume <sid>` procs per tenant — a per-proc source therefore double-counts the SAME
+# session). Left uncollapsed, the manifest lists N sessions for N/2 real tenants, and the executor's FINISH
+# tally then reports "restored N/N" for N/2 real sessions — an UNTRUE count (and it redundantly recreates
+# each tmux name: restore_session kills the same-name session first, so the duplicate just churns). A sid
+# is UNIQUE per session (a session UUID), so two lines bearing the same non-empty sid ARE one tenant: the
+# FIRST wins, later same-sid lines drop. A NO-SID (degraded/old-wrapper) line has no dedup key and always
+# passes through — we cannot prove two keyless procs are one session, and each yields a distinct s-p<pid>
+# name. Emits the input line VERBATIM (`print` = print $0, tabs intact — never re-split with OFS). Placed
+# in the testable pipeline (not in enumerate_claude_procs) so the SESSION_SOURCE seam exercises it.
+dedup_by_sid(){
+  awk -F'\t' '{ if ($3=="") { print; next } if (!($3 in seen)) { seen[$3]=1; print } }'
+}
+
+# manifest_block: the whole enumerate→dedup→validate→wrap pipeline (the testable core). SESSION_SOURCE is
+# the seam (default: the live-process scan; the test injects a fixture emitter). enumerate_tmux is kept as
 # an alternative source but is no longer the default — it cannot carry a sid (tmux knows the pane, not
 # the claude session-id), so it can only ever produce v1 lines.
 SESSION_SOURCE="${SESSION_SOURCE:-enumerate_claude_procs}"
-manifest_block(){ "$SESSION_SOURCE" | emit_manifest_lines | compose_manifest_block; }
+manifest_block(){ "$SESSION_SOURCE" | dedup_by_sid | emit_manifest_lines | compose_manifest_block; }
 
 # compose_body: the full ticket body. LINE 1 is the machine op (exactly `host-op: rebuild-devbox
 # <workload>`); the manifest block rides below, prose between is ignored by both parsers.

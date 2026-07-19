@@ -15,6 +15,7 @@ TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT
 fail=0
 check(){ if eval "$2"; then echo "ok   - $1"; else echo "FAIL - $1"; fail=1; fi; }
 UUID=0deceee8-34ab-4e41-be19-ba4210469eb6                      # a valid UUID for the fixtures
+UUID2=ebcfa847-31d1-4a2d-9ecc-ad0f7e2ebbfa                     # a SECOND valid UUID (dedup row)
 
 # ── the executor's REAL parse_manifest (VERBATIM from host-agent-watch.sh, #143) — the byte-compat oracle
 MANIFEST_BEGIN='%%DEVBOX-MANIFEST-BEGIN%%'
@@ -60,6 +61,23 @@ check "with-sid: executor parses rc=0"          '[ "$rc" = 0 ]'
 check "with-sid: 4-field line (name cwd sid)"   '[ "$parsed" = "$(printf "main\t/home/core\t%s" "$UUID")" ]'
 check "with-sid: ephemeral c999 excluded"       '! printf "%s" "$out" | grep -q c999'
 
+# ── Row 1c: DEDUP by sid (2026-07-19) — one tenant has MULTIPLE `claude --resume <sid>` procs, so the ──
+# raw source double-counts. dedup_by_sid collapses same-sid lines to ONE (else the executor reports
+# "restored N/N" for N/2 real sessions — an untrue count). A NO-SID line has no dedup key → passes through.
+fixture "s-a\t/home/core\t$UUID\ns-a\t/home/core\t$UUID\ns-b\t/r/b\t$UUID2\ns-a\t/home/core\t$UUID\ns-p7\t/r/p7\t\ns-p8\t/r/p8\t\n"
+out="$(run_manifest)"; printf '%s\n' "$out" | exec_parse_manifest >/dev/null; rc=$?
+check "dedup: executor parses rc=0"             '[ "$rc" = 0 ]'
+check "dedup: 3 same-sid procs → ONE line"      '[ "$(printf "%s" "$out" | grep -c "^session s-a ")" = 1 ]'
+check "dedup: the other sid survives once"      '[ "$(printf "%s" "$out" | grep -c "^session s-b ")" = 1 ]'
+check "dedup: both NO-SID lines pass through"   '[ "$(printf "%s" "$out" | grep -cE "^session s-p[78] ")" = 2 ]'
+check "dedup: exactly 4 session lines total"    '[ "$(printf "%s" "$out" | grep -c "^session ")" = 4 ]'
+# MUTATION — remove the dedup stage; the 3 same-sid procs must then LEAK as 3 lines (the untrue count).
+cp "$SUT" "$TMPD/mutdd.sh"
+sed -i 's/| dedup_by_sid |/| cat |/' "$TMPD/mutdd.sh"
+check "dedup-mutation genuinely changed the copy" '! cmp -s "$SUT" "$TMPD/mutdd.sh"'
+out="$(SESSION_SOURCE="$STUB" DEVBOX_MANIFEST_V2=1 bash "$TMPD/mutdd.sh" manifest)"
+check "dedup-mutation: same-sid now leaks 3 lines" '[ "$(printf "%s" "$out" | grep -c "^session s-a ")" = 3 ]'
+
 # ── Row 1b: v2 rollout gate DEFAULT OFF — a valid sid still emits v1 (safe against a pre-#143 executor) ─
 fixture "main\t/home/core\t$UUID\n"
 out="$(run_manifest_v2off)"; parsed="$(printf '%s\n' "$out" | exec_parse_manifest)"; rc=$?
@@ -91,7 +109,10 @@ check "skip: executor parses rc=0"              '[ "$rc" = 0 ]'
 check "skip: only the safe tenant, 4-field"     '[ "$parsed" = "$(printf "main\t/home/core\t%s" "$UUID")" ]'
 
 # ── Row 5: > DEVBOX_MAX_SESSIONS → producer caps at 32, executor accepts (never the >MAX rc=2) ────────
-: > "$TMPD/big"; for i in $(seq 1 33); do printf 's%s\t/home/core\t%s\n' "$i" "$UUID" >> "$TMPD/big"; done
+# DISTINCT sids per tenant (each real session has a UNIQUE UUID) — so dedup_by_sid keeps all 33 and the
+# CAP trims to 32. (A same-sid fixture would be ONE session post-dedup, making the cap test vacuous — and
+# it proves the pipeline order: dedup BEFORE the cap, so the cap counts DISTINCT sessions, not raw procs.)
+: > "$TMPD/big"; for i in $(seq 1 33); do printf 's%s\t/home/core\t%08x-34ab-4e41-be19-ba4210469eb6\n' "$i" "$i" >> "$TMPD/big"; done
 export SESSION_FIXTURE="$TMPD/big"
 out="$(run_manifest)"; parsed="$(printf '%s\n' "$out" | exec_parse_manifest)"; rc=$?
 check "cap: executor parses rc=0 (not >MAX)"    '[ "$rc" = 0 ]'
