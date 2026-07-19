@@ -181,9 +181,11 @@ GHEOF
 chmod +x "$FBIN/gh"
 printf '#!/usr/bin/env bash\n[ "${SCOPE_OK:-1}" = 1 ] && exit 0 || exit 1\n' > "$FBIN/repo-scope-stub"
 chmod +x "$FBIN/repo-scope-stub"
-run_file(){ # extra env…
+run_file(){ # extra env…  — deliberately does NOT set DEVBOX_MANIFEST_V2: the FILING path must default v2
+            # ON itself (incident 2026-07-19: env-dependent v2 filed a v1 cwd-scoped manifest live — a
+            # multi-tenant collapse for sessions sharing one cwd; the sid row below proves the default)
   FILE_REC="$TMPD/file-rec"; : > "$FILE_REC"; export FILE_REC
-  SESSION_SOURCE="$STUB" DEVBOX_MANIFEST_V2=1 REPO_SCOPE="$FBIN/repo-scope-stub" PATH="$FBIN:$PATH" \
+  SESSION_SOURCE="$STUB" REPO_SCOPE="$FBIN/repo-scope-stub" PATH="$FBIN:$PATH" \
     env "$@" bash "$SUT" file >"$TMPD/file-out" 2>"$TMPD/file-err"; FRC=$?
 }
 body_rec(){ sed -n '/^TITLE:/,$p' "$FILE_REC" | sed 1d; }   # the created body (after the TITLE line)
@@ -199,8 +201,12 @@ check "file: body line-1 is the exact op"       '[ "$(body_rec | head -1)" = "ho
 check "file: @mention present (phone push)"     'body_rec | grep -q -- "@oso-gato"'
 check "file: approved-label one-tap instruction" 'body_rec | grep -q "approved.*label"'
 check "file: manifest parses via the executor"  'body_rec | exec_parse_manifest >/dev/null'
-check "file: manifest carries the sid (v2)"     '[ "$(body_rec | exec_parse_manifest)" = "$(printf "main\t/home/core\t%s" "$UUID")" ]'
+check "file: manifest carries the sid — v2 BY DEFAULT (env unset; the 2026-07-19 incident row)" '[ "$(body_rec | exec_parse_manifest)" = "$(printf "main\t/home/core\t%s" "$UUID")" ]'
 check "file: URL printed on stdout"             'grep -q "issues/99" "$TMPD/file-out"'
+
+echo "── file: explicit DEVBOX_MANIFEST_V2=0 still forces v1 (the override survives) ──"
+run_file DEVBOX_MANIFEST_V2=0
+check "file: v2=0 → v1 3-field manifest"        '[ "$(body_rec | exec_parse_manifest)" = "$(printf "main\t/home/core")" ]'
 
 echo "── file: IDEMPOTENT — an OPEN rebuild ticket ⇒ NO second filing (rc 0, no create) ──"
 run_file FAKE_OPEN='88'

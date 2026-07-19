@@ -252,6 +252,14 @@ EOF
 # one strands sessions started since). rc 0 = filed (URL on stdout) or already-open; non-zero = not filed.
 file_ticket(){
   local slug="$TICKET_ORG/$TICKET_REPO" existing mb count body tmp url
+  # v2 BY-ID manifest is DEFAULT-ON for the FILING path (incident 2026-07-19: the running container's env
+  # predated the deploy-env DEVBOX_MANIFEST_V2 flip, so the first live filing went out v1 cwd-scoped — a
+  # MULTI-TENANT COLLAPSE for sessions sharing one cwd; caught in the poller log, the ticket body was
+  # edit-corrected by hand). Depending on deploy env for CORRECTNESS was the bug; the code default for the
+  # OTHER modes stays OFF (grammar safety for foreign deployments), but the filing path exists only in
+  # THIS apparatus, whose deployed executor has understood v2 since fedora-bootstrap#143 (2026-07-15) —
+  # and a pre-#143 executor fail-safe REFUSES a 4-field manifest BEFORE any kill. Explicit =0 forces v1.
+  export DEVBOX_MANIFEST_V2="${DEVBOX_MANIFEST_V2:-1}"
   "$REPO_SCOPE" check "$TICKET_REPO" 2>/dev/null \
     || { log "R16: control repo '$TICKET_REPO' is not in the operating scope (or the reader is unavailable) — refusing to file"; return 1; }
   existing="$(gh issue list --repo "$slug" --state open --label "$TICKET_LABEL" --limit 50 \
