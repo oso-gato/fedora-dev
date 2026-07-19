@@ -365,18 +365,18 @@ fi
 # Doesn't block sshd — you can connect immediately; `claude` will tail this if
 # you try to enter the box before assemble completes.
 runuser -u core -- bash -c '
-    # Assemble when not yet assembled OR when a prior assemble FAILED (#115): the
-    # .assemble-failed marker (written by claudebox-assemble.sh on a non-zero exit)
-    # overrides a STALE .assembled from a previous good run, so a box broken by a
-    # failed rebuild recovers on the next boot instead of staying stuck UNHEALTHY.
-    if [ ! -e /home/core/.local/state/claudebox/.assembled ] \
-       || [ -e /home/core/.local/state/claudebox/.assemble-failed ]; then
-        echo "[first-boot] assembling claudebox in the background..."
-        bash /home/core/.local/share/fedora-dev/claudebox-assemble.sh \
-            > /home/core/.local/state/claudebox/first-assemble.log 2>&1 < /dev/null \
-            && echo "[first-boot] claudebox ready" \
-            || echo "[first-boot] assemble FAILED — see ~/.local/state/claudebox/first-assemble.log"
-    fi
+    # (Re)assemble via claudebox-assemble.sh --if-stale, which SELF-DECIDES and no-ops fast when the
+    # box is already assembled for the CURRENT image. It reassembles when: not yet assembled, OR a
+    # prior assemble FAILED (#115 — the .assemble-failed marker overrides a STALE .assembled so a box
+    # broken by a failed rebuild self-heals next boot), OR the fedora-dev CONTAINER was recreated on a
+    # DIFFERENT image (an R17 rebuild / monthly base refresh / redeploy) — the persistent home-volume
+    # claudebox would otherwise stay frozen at its last assembly (claude-code + policy stamp stale)
+    # because .assembled outlives the container. On an image change --if-stale clears .assembled first,
+    # so the R17 box-ready gate WAITS for the fresh box instead of restoring sessions onto the stale one.
+    bash /home/core/.local/share/fedora-dev/claudebox-assemble.sh --if-stale \
+        > /home/core/.local/state/claudebox/first-assemble.log 2>&1 < /dev/null \
+        && echo "[first-boot] claudebox ready (or already current)" \
+        || echo "[first-boot] assemble FAILED — see ~/.local/state/claudebox/first-assemble.log"
 ' &
 
 # ---- optional: dev-side PR poller as a headless IN-BOX service (Step 5 / #93) --
