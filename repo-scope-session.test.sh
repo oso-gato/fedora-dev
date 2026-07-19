@@ -13,12 +13,18 @@
 #   * the git-VERIFICATION is the boundary: an UNBACKED (no line-4), UNREADABLE (bad sha) or MISMATCH
 #     (line-3 hand-edited to widen) session acts on NOTHING (SESSION_UNBACKED rc 3, the cause named) —
 #     a hand-forged .session can never widen scope past the confirmed objective;
+#   * the PROVENANCE GATE (R34/#210): a backing sha that is READABLE but NOT an ancestor of origin/main
+#     (an off-main, agent-committed sha — the self-authored-scope vector) fails closed (UNGATED rc 3),
+#     while the SAME cache backed to an ON-main sha ALLOWs — the gate discriminates on sha PROVENANCE, not
+#     doc content;
 #   * DISJOINTNESS (R28): a repo held by another LIVE backed session is DENIED even when it is in your own
 #     verified scope; freeing that holder flips it to ALLOW (the deny WAS the live cross-check);
-#   * TWO MUTATION-CHECKS restored + run in-suite (each sed must genuinely change the copy, else vacuous):
+#   * THREE MUTATION-CHECKS restored + run in-suite (each sed must genuinely change the copy, else vacuous):
 #       (1) neutralize the session-narrowing → an out-of-session check WRONGLY ALLOWs;
 #       (2) neutralize the git-VERIFY (verified_ok) → a FORGED cache (widened line-3) WRONGLY ALLOWs the
-#           smuggled repo — proving the backing re-verification is the thing that stops the forgery.
+#           smuggled repo — proving the backing re-verification is the thing that stops the forgery;
+#       (3) neutralize the ANCESTOR gate (objective_sha_gated) → an off-main backing sha WRONGLY ALLOWs —
+#           proving the origin/main-ancestor check is the thing that stops the off-main provenance forge.
 #
 # Run:  bash repo-scope-session.test.sh   → exit 0 = all rows pass
 set -uo pipefail
@@ -58,6 +64,13 @@ objdoc repo-a        > "$OBJ/obj-a.md"
 objdoc repo-a repo-b > "$OBJ/obj-ab.md"
 objdoc repo-a repo-z > "$OBJ/obj-az.md"
 git -C "$OBJ" add -A; git -C "$OBJ" commit -qm init; OSHA="$(git -C "$OBJ" rev-parse HEAD)"
+# R34/#210: OSHA sits on the GATED-REMOTE main line — the read path's provenance gate requires the backing
+# sha to be an ancestor of origin/main. (update-ref faithfully stands in for a fetched remote-tracking ref.)
+git -C "$OBJ" update-ref refs/remotes/origin/main "$OSHA"
+# an OFF-MAIN commit: a perfectly READABLE objective doc ({repo-a}), but NOT reachable from origin/main —
+# the self-authored-provenance vector (a local widening commit a hand-forged .session line-4 could name).
+objdoc repo-a > "$OBJ/obj-offmain.md"
+git -C "$OBJ" add -A; git -C "$OBJ" commit -qm 'off-main commit (not on origin/main)'; OFFSHA="$(git -C "$OBJ" rev-parse HEAD)"
 export SCOPE_OBJECTIVE_CLONE="$OBJ"   # the local backend objective_repos reads (repo field is nominal)
 
 # detach the holder's std fds — else the backgrounded sleep inherits the $(…) command-sub pipe.
@@ -133,6 +146,22 @@ check_rc sessX repo-a; { [ "$RC" = 3 ] && printf '%s' "$ERR" | grep -q 'MISMATCH
 check_rc sessX repo-b; [ "$RC" = 3 ] && ok "sessX (forged): the SMUGGLED repo-b is NOT allowed rc 3 (forgery blocked)" || bad "sessX: check repo-b rc=$RC (want 3 — the forged widen must not act)"
 
 # ===================================================================================================
+echo "== PROVENANCE GATE (R34/#210): a READABLE but OFF-origin/main backing sha fails closed (UNGATED) =="
+reset_reg ungated
+HPUG="$(live_holder)"
+# inject a session backed to OFFSHA (its doc reads cleanly as {repo-a}, so line-3 SET-EQUALS its doc —
+# only the ANCESTOR-of-origin/main gate stands between this off-main sha and an actionable scope).
+{ printf '%s\n' sessG; printf '%s\n' "$(SESSION_HOLDER_PID="$HPUG" session_coords)"; printf '%s\n' repo-a; printf '%s\n' "fedora-dev obj-offmain.md $OFFSHA"; } > "$(entry_of sessG)"
+check_rc sessG repo-a; { [ "$RC" = 3 ] && printf '%s' "$ERR" | grep -q 'UNGATED'; } && ok "sessG (off-main sha): check repo-a → DENY rc 3 (UNGATED — sha not on the gated remote line)" || bad "sessG: check repo-a rc=$RC err=[$ERR] (want 3 + UNGATED)"
+# and an ON-main control (its OWN registry, so sessG's declared repo-a can't trip the R28 held cross-check):
+# the SAME cache line-3 {repo-a} backed to OSHA (an origin/main ancestor) ALLOWs — proving the gate
+# discriminates on PROVENANCE (the sha), not on the doc content (identical here).
+reset_reg ungated_ok
+HPUGok="$(live_holder)"
+{ printf '%s\n' sessGok; printf '%s\n' "$(SESSION_HOLDER_PID="$HPUGok" session_coords)"; printf '%s\n' repo-a; printf '%s\n' "fedora-dev obj-a.md $OSHA"; } > "$(entry_of sessGok)"
+check_rc sessGok repo-a; [ "$RC" = 0 ] && ok "sessGok (on-main sha, same repo): check repo-a → ALLOW rc 0 (gate lets a gated sha through)" || bad "sessGok: check repo-a rc=$RC err=[$ERR] (want 0)"
+
+# ===================================================================================================
 echo "== DISJOINTNESS (R28): a repo held by another LIVE backed session is DENIED =="
 reset_reg held
 HPA="$(live_holder)"; HPB="$(live_holder)"
@@ -183,6 +212,24 @@ else
   RC=0; SCOPE_SESSION=sessF SCOPE_FILE="$FIX" bash "$MUT2/repo-scope.sh" check repo-b >/dev/null 2>&1 || RC=$?
   [ "$RC" = 0 ] && ok "mutant: with the verify gone, the forged repo-b WRONGLY ALLOWs rc 0 (the verify IS the boundary)" \
     || bad "mutant: forged check repo-b rc=$RC (want a wrongful 0)"
+fi
+
+# ===================================================================================================
+echo "== MUTATION 3: neutralizing the ANCESTOR gate makes an off-main backing sha WRONGLY ALLOW (R34/#210) =="
+MUT3="$TMP/mut3"; mkdir -p "$MUT3"
+cp "$HERE/bin/repo-scope.sh" "$HERE/bin/session-registry.sh" "$HERE/bin/session-id.sh" "$HERE/bin/lock-lib.sh" "$MUT3/"
+sed -i 's|.*merge-base --is-ancestor.*|  return 0 # ancestor gate neutralized|' "$MUT3/repo-scope.sh"
+if [ "$(cat "$HERE/bin/repo-scope.sh")" = "$(cat "$MUT3/repo-scope.sh")" ]; then
+  bad "mutation3: the sed changed NOTHING — vacuous"
+else
+  ok "mutation3: objective_sha_gated ancestor check neutralized in the copy"
+  reset_reg mut3; HPMG="$(live_holder)"
+  { printf '%s\n' sessMG; printf '%s\n' "$(SESSION_HOLDER_PID="$HPMG" session_coords)"; printf '%s\n' repo-a; printf '%s\n' "fedora-dev obj-offmain.md $OFFSHA"; } > "$(entry_of sessMG)"
+  RC=0; SCOPE_SESSION=sessMG SCOPE_FILE="$FIX" bash "$SCOPE" check repo-a >/dev/null 2>&1 || RC=$?
+  [ "$RC" = 3 ] && ok "real script: off-main sessMG check repo-a → DENY rc 3 (ancestor gate bites)" || bad "real: off-main check repo-a rc=$RC (want 3)"
+  RC=0; SCOPE_SESSION=sessMG SCOPE_FILE="$FIX" bash "$MUT3/repo-scope.sh" check repo-a >/dev/null 2>&1 || RC=$?
+  [ "$RC" = 0 ] && ok "mutant: with the gate gone, the off-main sha WRONGLY ALLOWs rc 0 (the ancestor gate IS the boundary)" \
+    || bad "mutant: off-main check repo-a rc=$RC (want a wrongful 0)"
 fi
 
 echo
