@@ -110,7 +110,7 @@ esac
 esid="$sid"
 [ -n "$esid" ] || esid="$(printf ' %s ' "$*" | grep -oE -- ' (--resume|--session-id|-r)[= ][0-9a-fA-F-]{36}' | grep -oE -- '[0-9a-fA-F-]{36}' | head -1 || true)"
 scope_seed="${SCOPE_SELF_SEED:-$HOME/.local/share/fedora-dev/bin/session-scope-seed.sh}"
-[ -n "$esid" ] && [ -x "$scope_seed" ] && SESSION_HOLDER_PID=$$ "$scope_seed" "$esid" 2>/dev/null || true
+[ -n "$esid" ] && [ -x "$scope_seed" ] && SESSION_HOLDER_PID=$$ "$scope_seed" "$esid" >/dev/null 2>&1 || true
 
 attempt=0
 while :; do
