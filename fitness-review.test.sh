@@ -228,21 +228,45 @@ printf 'FITNESSRUN %s\n' "$*" >> "$ACT_LOG"
 echo "[fitness] reviewer FAILED TO RUN: 'claude -p' exited 126 — Argument list too long" >&2
 exit "${FAKE_FITRC:-3}"
 EOF
+# ---- stub reviewer-infra probe: the cheap `claude -p` liveness check the health gate runs on rc 3. ----
+# FAKE_PROBE=up → emit output (infra reachable ⇒ review_infra_ok reads UP ⇒ genuinely per-head);
+# down → emit NOTHING (a GLOBAL `claude -p` outage ⇒ review_infra_ok reads DOWN ⇒ pause, no strike).
+# Drains stdin like the real probe (review_infra_ok pipes it the prompt), so the printf never SIGPIPEs.
+# NB the DEFAULT is up, so every pre-existing rc-3 row keeps its per-head behaviour DETERMINISTICALLY —
+# without this the unstubbed default probe ($FITNESS_INFRA_PROBE=`claude -p`) shells out to the REAL
+# claude binary, breaking the suite's no-model contract and reading whatever it prints to stdout.
+cat > "$BIN/infra-probe" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null 2>&1
+case "${FAKE_PROBE:-up}" in
+  up)   printf 'OK\n';;
+  down) : ;;
+esac
+exit 0
+EOF
 chmod +x "$BIN"/*
 
 # TRIES/BACKOFF are the knobs under test — each row sets them explicitly; BACKOFF=0 makes the retry
-# schedule deterministic without sleeping, and one row pins the backoff itself.
-TRIES=3; BACKOFF=0; FITV=""
+# schedule deterministic without sleeping, and one row pins the backoff itself. PROBE is the
+# reviewer-infra health-gate probe verdict (up/down) — DEFAULT up, so a pre-existing rc-3 row is a
+# genuinely-per-head failure (the behaviour those rows assert); the global-outage rows flip it down.
+TRIES=3; BACKOFF=0; FITV=""; PROBE=up
 poller_sweep(){ # <fitness-harness rc> — one --once sweep against the same fake HOME (state persists)
   env PATH="$BIN:$PATH" HOME="$CASE/home" ACT_LOG="$ACT_LOG" FAKE_SHA="$SHA" FAKE_FIT="$FITV" \
       POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FLEET_HALT=true \
       LG_HOST_LOGIN=host-bot FITNESS_LOGIN=fit-bot FITNESS_REVIEW="$BIN/fitness-stub" \
       FITNESS_REVIEW_TRIES="$TRIES" FITNESS_RETRY_BACKOFF="$BACKOFF" \
+      FITNESS_INFRA_PROBE="$BIN/infra-probe" FAKE_PROBE="$PROBE" \
       FAKE_FITRC="$1" bash "$POLLER" --once >> "$CASE/out.log" 2>&1
 }
-setup_poller_case(){ setup_case; cp "$BIN/gh-poller" "$BIN/gh"; TRIES=3; BACKOFF=0; FITV=""; }
+setup_poller_case(){ setup_case; cp "$BIN/gh-poller" "$BIN/gh"; TRIES=3; BACKOFF=0; FITV=""; PROBE=up; }
 runs(){ grep -c '^FITNESSRUN' "$ACT_LOG" 2>/dev/null || true; }
 asks(){ grep -c '^SURFACE.*could not produce a verdict' "$ACT_LOG" 2>/dev/null || true; }
+surfaces(){ grep -c '^SURFACE' "$ACT_LOG" 2>/dev/null || true; }
+# the per-(pr,sha) PER-HEAD strike marker the bounded retry writes; absent = no strike counted.
+strikefile(){ printf '%s' "$CASE/home/.local/state/pr-poller/reviewfail-1-$SHA.n"; }
+struck(){ [ -f "$(strikefile)" ] && echo 1 || echo 0; }
+strike_n(){ [ -f "$(strikefile)" ] && cat "$(strikefile)" || echo ""; }
 
 echo "== R4: a PERSISTENT failure is retried a BOUNDED number of times, then surfaced ONCE and stopped =="
 DESC="an un-runnable review surfaces its real cause once and stops; it never re-spins per sweep"; OK=1
@@ -301,6 +325,60 @@ ck "$([ "$(runs)" -eq 2 ] && echo 1 || echo 0)" "the reviewer ran $(runs) times,
 # forever. A refusal that is not self-healing (unset FITNESS_LOGIN, no --post token, SoD misconfig)
 # would then retry in silence, on the loudest loop in the harness. The reason must reach the log.
 ck "$(grep -q 'Argument list too long' "$CASE/out.log" && echo 1 || echo 0)" "the retryable refusal did not log WHY the harness declined — the reviewer's own stderr was captured and then dropped"
+done_case
+
+# ===================================================================================================
+# THE REVIEW-INFRA HEALTH GATE (2026-07-20): rc 3 alone cannot tell a GLOBAL `claude -p` outage (down
+# for EVERY PR) from a PER-HEAD breakage (infra up, this one review broken). A >15-min global outage was
+# absorbed as N per-head failures and PARKED EVERY open PR (the incident). The gate probes on an rc-3
+# review: probe DOWN ⇒ global ⇒ NO strike + pause the arm (self-heals next sweep); probe UP ⇒ per-head ⇒
+# the existing bounded retry. These rows drive the REAL `pr-poller.sh --once` REVIEW arm with the probe
+# scripted up/down.
+# ===================================================================================================
+echo "== INFRA GATE: a GLOBAL claude -p outage (rc 3 + probe DOWN) does NOT strike the head, asks nobody, and SELF-HEALS =="
+DESC="an rc-3 review with the infra probe DOWN is a global outage: no per-head strike, no question, the pause is logged; it heals when the probe clears"; OK=1
+setup_poller_case; PROBE=down
+poller_sweep 3                                          # reviewer rc 3 AND the infra probe DOWN ⇒ GLOBAL outage
+ck "$([ "$(struck)" = 0 ] && echo 1 || echo 0)" "a PER-HEAD strike ($(strike_n)) was written during a GLOBAL outage — every open PR would accrue one and PARK, the exact incident this gate exists to stop"
+ck "$([ "$(asks)" -eq 0 ] && echo 1 || echo 0)" "a per-head 'could not produce a verdict' question was surfaced during a global outage — a global outage must not be mistaken for a broken PR"
+ck "$([ "$(surfaces)" -eq 0 ] && echo 1 || echo 0)" "the outage surfaced a question on its FIRST sweep — the pause must be silent to the human until it PERSISTS past FITNESS_INFRA_PAUSE_SURFACE"
+ck "$(grep -q 'REVIEW INFRA DOWN' "$CASE/out.log" && echo 1 || echo 0)" "the arm never LOGGED the infra-down pause — a global outage that stops all reviews must announce itself in the log"
+# SELF-HEAL: the head was NEVER parked, so the instant the probe clears (and the reviewer succeeds) it is
+# reviewed and routes — no manual rescue, unlike the pre-gate behaviour that parked it permanently.
+PROBE=up
+poller_sweep 0
+ck "$([ "$(struck)" = 0 ] && echo 1 || echo 0)" "a strike leaked into the healed sweep — the head was penalised for an outage it had no part in"
+ck "$(grep -q 'fitness posted' "$CASE/out.log" && echo 1 || echo 0)" "after the outage cleared the review never ran or routed — the head was stranded, not self-healed"
+done_case
+
+echo "== INFRA GATE: an rc 3 with the probe UP is genuinely PER-HEAD — a strike IS counted (the bounded retry still works) =="
+DESC="probe UP ⇒ per-head ⇒ the existing bounded-retry strike is written, so a truly-broken PR is still handled"; OK=1
+setup_poller_case; PROBE=up; TRIES=3
+poller_sweep 3
+ck "$([ "$(struck)" = 1 ] && echo 1 || echo 0)" "no strike was counted with the infra probe UP — a genuinely per-head failure is being wrongly absorbed as global"
+ck "$([ "$(strike_n | awk '{print $1}')" = 1 ] && echo 1 || echo 0)" "the strike count is [$(strike_n)] — the first per-head failure must record attempt 1"
+ck "$([ "$(asks)" -eq 0 ] && echo 1 || echo 0)" "the FIRST per-head failure surfaced a question — the retry is not bounded, it surfaced immediately instead of retrying"
+done_case
+
+echo "== INFRA GATE MUTATION: neutralize the gate (review_infra_ok → always UP) → the SAME global outage WRONGLY strikes =="
+DESC="the gate is what withholds the strike: remove it and the global-outage fixture accrues one (the incident)"; OK=1
+setup_poller_case; PROBE=down
+MUTP="$CASE/pr-poller-noinfra.sh"
+# force review_infra_ok to always report UP — the pre-gate behaviour (rc 3 ⇒ always per-head). The sed
+# must genuinely change the copy, else the row is vacuous; the mutant must still be valid bash.
+sed 's/^review_infra_ok(){/review_infra_ok(){ REVIEW_INFRA=up; return 0;/' "$POLLER" > "$MUTP"
+ck "$(cmp -s "$POLLER" "$MUTP" && echo 0 || echo 1)" "the mutation changed NOTHING — this row is vacuous and proves nothing"
+ck "$(bash -n "$MUTP" 2>/dev/null && echo 1 || echo 0)" "the mutant is not valid bash — the sed broke the script, not the gate"
+# drive the MUTANT against the SAME probe-DOWN fixture. REPO_SCOPE is pinned to the REAL reader (the
+# mutant's $HERE is $CASE, where the default $HERE/repo-scope.sh does not exist — a missing reader is a
+# fail-closed sweep refusal that would pass this row VACUOUSLY, for the wrong reason).
+env PATH="$BIN:$PATH" HOME="$CASE/home" ACT_LOG="$ACT_LOG" FAKE_SHA="$SHA" FAKE_FIT="" \
+    POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FLEET_HALT=true \
+    LG_HOST_LOGIN=host-bot FITNESS_LOGIN=fit-bot FITNESS_REVIEW="$BIN/fitness-stub" \
+    FITNESS_REVIEW_TRIES=3 FITNESS_RETRY_BACKOFF=0 REPO_SCOPE="$HERE/bin/repo-scope.sh" \
+    FITNESS_INFRA_PROBE="$BIN/infra-probe" FAKE_PROBE=down \
+    FAKE_FITRC=3 bash "$MUTP" --once >> "$CASE/out.log" 2>&1
+ck "$([ "$(struck)" = 1 ] && echo 1 || echo 0)" "with the gate neutralized a GLOBAL outage did NOT strike — the real rows above cannot then prove the gate is what prevents it"
 done_case
 
 echo
