@@ -480,12 +480,9 @@ tenant makes one load-bearing.
   maintainer-authored apparatus `<sid>.objective` in place + a clean soak — a deploy step, not a code PR).
 - **DELETE `policy/scope.conf`** and drop the transitional `diff-adds` arm from `fitness-review.sh`
   (the objective-adds gate is the authority) — strictly AFTER the cutover soaks clean.
-- **fedora-desktop / e2e-alpha / knowledge-desktop** migrate to their own objective-backed sessions (or
-  fall out of the sweep) at cutover.
 - **Cross-repo backing backend:** `objective_repos` reads a LOCAL clone; a gh-api backend is needed only
   when a backing repo's clone is absent (a non-issue for the apparatus objective, whose backing repo
-  `fedora-dev` is always local — the kd session's backing lives in the knowledge-desktop repo and needs
-  either its clone present or this backend before it verifies).
+  `fedora-dev` is always local).
 - **`is-ancestor-of-main` sha hardening [BUILT — R34/#210]:** the read-path re-verify already closed the
   hand-edited-`.session`-widening vector (MISMATCH); `objective_sha_gated` now ALSO pins the backing sha
   to an ancestor of `origin/main` (`UNGATED` otherwise), closing the local-commit-forgery variant (a local

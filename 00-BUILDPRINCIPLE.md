@@ -12,7 +12,7 @@
 > confirmed with them and share that authority — they are graded by the same fitness gate and enforced
 > by the same mechanical scans. The **design** ([`00-DESIGN.md`](./00-DESIGN.md)) is dev-owned and
 > mutable-on-fact; a build principle is not. Where a per-repo `CLAUDE.md` BUILD PRINCIPLES table exists
-> (fedora-dev, fedora-desktop, fedora-bootstrap), it is the **per-repo instantiation** of these
+> (fedora-dev, fedora-bootstrap), it is the **per-repo instantiation** of these
 > apparatus-wide principles; it must not contradict them, and DRY (BP9) governs which is authoritative.
 >
 > Revised from the 2026-07-14 spec by the best-practice-lens holistic review: **BP1/BP3/BP4/BP5 are the

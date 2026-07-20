@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # spin-up.sh — the interactive "spin-up container" wizard for fedora-dev.
 # ============================================================================
-# Mirrors the fleet spin-up pattern (see fedora-desktop/spin-up.sh) so the VPS
+# Mirrors the fleet spin-up pattern (see fedora-bootstrap/spin-up.sh) so the VPS
 # claudebox follows ONE consistent flow across the fleet: ASK for the Tailscale
 # auth key, then hand off to run.sh. run.sh stays the NON-interactive deploy
 # contract (env-driven) — a scripted/host-claudebox deploy can set the same env

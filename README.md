@@ -2,11 +2,11 @@
 
 ## TL;DR — in plain words
 
-A headless cloud **workshop where Claude builds your container images.** No desktop — you reach it by terminal, run `claude`, and it develops the image source, builds it, and hands it back as a change for you to approve. It's one of **three boxes**: this box **develops, builds, and is the fleet's sole *merge* box**; the host box operates + live-diagnoses; the desktop box builds its own knowledge-work tools. The other two only *propose* (open PRs) — **this box merges them, on your click.**
+A headless cloud **workshop where Claude builds your container images.** No desktop — you reach it by terminal, run `claude`, and it develops the image source, builds it, and hands it back as a change for you to approve. It's one of **two boxes**: this box **develops, builds, and is the fleet's sole *merge* box**; the host box operates + live-diagnoses. The other box only *proposes* (opens PRs) — **this box merges them, on your click.**
 
 - 🔑 **How you get in:** key-only SSH/Mosh (public), or keyless over Tailscale. Every login lands in a persistent `tmux` session, and `claude` drops you into Claude Code — which refreshes itself daily.
 - 🏗️ **What it does:** authors and test-builds container images in its *own* private engine (never your live machines). Daily-fresh Claude, monthly-fresh base image.
-- ✋ **How changes ship — the fleet rule:** every box (this one, the host box, the desktop box) **opens PRs; only this box merges.** It lists a repo's open PRs and presents them for your **one-click APPROVE** — per-PR, you see the diff, a typed "yes" doesn't count — then it merges (control-plane included) → CI builds. Propose → click → merge: safe, traceable, reversible.
+- ✋ **How changes ship — the fleet rule:** every box (this one and the host box) **opens PRs; only this box merges.** It lists a repo's open PRs and presents them for your **one-click APPROVE** — per-PR, you see the diff, a typed "yes" doesn't count — then it merges (control-plane included) → CI builds. Propose → click → merge: safe, traceable, reversible.
 - 🚧 **Where it stops:** it never deploys or runs containers on your live host — that's the host box's job. It builds + merges; it doesn't operate.
 - 🔒 **No passwords anywhere** — key-only doors; credentials only at run time.
 - 🖥️ **Headless by design (binding):** no monitor, GPU, or local seat is ever attached — the box and every image built on it run entirely over the network. A change that needs a physical display is a defect, not an option.
@@ -15,13 +15,12 @@ A headless Fedora container that hosts Claude Code (in an in-container Distrobox
 
 ## Where this sits — the fleet
 
-**This repo is the `fedora-dev` box** of a three-box swarm — **the build + sole merge box.** Full map: **[FLEET.md](FLEET.md)**.
+**This repo is the `fedora-dev` box** of a two-box pair — **the build + sole merge box.** Full map: **[FLEET.md](FLEET.md)**.
 
 | Box | Role | Builds? | Merges? | Operates host? | Spin up |
 |-----|------|:--:|:--:|:--:|---------|
 | **fedora-dev** *(this one)* | develop · build · **merge** | ✅ nested | ✅ **(sole merger)** | ❌ | `./spin-up.sh` |
 | **fedora-bootstrap** | operate host · live-diagnose → PR | ❌ (CI) | ❌ PR-only | ✅ incl. create/remove | `./day0.sh` (Day-0) |
-| **fedora-desktop** | knowledge-work + own toolset → PR | ❌ (CI) | ❌ PR-only | ❌ | `./spin-up.sh` |
 
 Everyone opens PRs; **only `fedora-dev` merges** — any PR (its own + control-plane) on Arthur's **clickable APPROVE**. See [FLEET.md](FLEET.md) for the handoff + boundaries.
 
@@ -94,7 +93,7 @@ podman secret create fedora-dev-ts-authkey -    # paste your tskey-... and Ctrl-
 ./spin-up.sh
 ```
 
-The fleet-consistent entry point (mirrors `fedora-desktop/spin-up.sh`): it **ASKS for a Tailscale auth key** (`tskey-…`) and the image ref, then hands off to `run.sh`. Give a key for an **unattended** tailnet join; leave it **blank** to fall back to the one-time `login.tailscale.com` **web-login** (URL in `podman logs -f fedora-dev`). Never hand-roll `podman run`.
+The fleet-consistent entry point (mirrors `fedora-bootstrap/spin-up.sh`): it **ASKS for a Tailscale auth key** (`tskey-…`) and the image ref, then hands off to `run.sh`. Give a key for an **unattended** tailnet join; leave it **blank** to fall back to the one-time `login.tailscale.com` **web-login** (URL in `podman logs -f fedora-dev`). Never hand-roll `podman run`.
 
 ### Credentials: the Tailscale auth key + an optional standing GitHub App
 

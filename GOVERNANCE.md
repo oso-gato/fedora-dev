@@ -90,9 +90,9 @@ real work, not ceremony).
 ## 4. The tiers (who merges, and whether a human touches it)
 
 **Merge authority — `fedora-dev` ONLY, always.** Every merge to `main`, in any repo, is executed by
-`fedora-dev` (the sole merge box). `fedora-bootstrap` + `fedora-desktop` are **propose-only** — their
-`gate-push.sh` **denies** any `main`-touching action (they have nothing to approve). A Tier B/C PR
-authored by bootstrap/desktop is still **merged by fedora-dev**, never the proposing box.
+`fedora-dev` (the sole merge box). `fedora-bootstrap` is **propose-only** — its
+`gate-push.sh` **denies** any `main`-touching action (it has nothing to approve). A Tier B/C PR
+authored by bootstrap is still **merged by fedora-dev**, never the proposing box.
 
 | Tier | What | Merge (always by fedora-dev) | Maintainer sees |
 |---|---|---|---|
@@ -183,11 +183,10 @@ defects caught: two rebuild-bricks, an overclaimed safety statement, a false ver
   > (re-confirming my #130 ZERO-GATE decision). The TIER ROUTING rewrite in this PR
   > correctly records my decision. I authorize amending GOVERNANCE.md §5/§6 to match,
   > via a PR citing this comment. Adversarial review continues inside the fitness gate,
-  > not as a pre-merge click. Also confirming: fedora-desktop is in the unshackle scope.
+  > not as a pre-merge click.
 - **What it supersedes:** the Tier-A→click routing (§4 table row A, §5 Stage 2), the pre-click Stage-3
   ritual (§5), and §6(a)'s "no merge authority" clause. The interactive gate-push hook + auto-classifier
-  are retired in fedora-dev (#137/#139) and fedora-bootstrap (#122, v1.2.59); the fedora-desktop port
-  (#114) is in flight, confirmed in scope by the comment above. The poller IS the merge authority, under
+  are retired in fedora-dev (#137/#139) and fedora-bootstrap (#122, v1.2.59). The poller IS the merge authority, under
   two independent gates (host live-gate App + fitness App). Recoverability is automatic (host
   health-gate digest rollback, git revert, fitness's standing preserve-recoverability rule), not a click.
 - **The chain of enactment (recorded as it actually happened):** #130 (ZERO-GATE poller, 2026-07-10) →

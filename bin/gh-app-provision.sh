@@ -6,7 +6,7 @@
 # at runtime — see the container side bin/gh-app-auth.sh (secret at /run/secrets/gh_app_key).
 #
 # CANONICAL copy lives in oso-gato/fedora-dev (the merge box); mirrored VERBATIM into
-# fedora-desktop + fedora-bootstrap, like sync-authorized-keys.sh. Keep in lockstep.
+# fedora-bootstrap, like sync-authorized-keys.sh. Keep in lockstep.
 #
 # SOURCEABLE function library (each container's wizard is the single source of truth
 # for ITS questions; day0 invokes that wizard rather than duplicating prompts):
