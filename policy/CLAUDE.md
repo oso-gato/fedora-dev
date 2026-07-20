@@ -105,16 +105,26 @@ edit ~/.local/share/fedora-dev/{distrobox.ini|policy/|*.sh}  (live git clone)
 
 Ad-hoc edits to `/etc`, `/usr`, `/usr/local/bin` inside the box do not persist past one rebuild. Live spec on home volume persists across both box rebuilds and fedora-dev recreations.
 
-## STOP-AND-SURFACE TRIGGERS
+## STOP-AND-SURFACE TRIGGERS — a direct host OPERATION only (a MODALITY, never a subject)
 
-Task mentions any of:
+This fires on what YOU would DIRECTLY DO to the host, NOT on what a task is ABOUT. A task whose SUBJECT is a
+host artifact (a `.container`/quadlet, a systemd-PID-1 image, a "deploy" you validate) is NORMAL dev work you
+drive through the bus — it is NOT a trigger. The trigger is you performing the host op yourself:
 
-- "deploy", "spin up", "recreate", "restart", "update the running"
-- the VPS / production host / Hostinger / `claudebox-on-the-host`
-- systemd, quadlets, `.container` files, host services, `systemctl --user start`
-- `podman` against anything other than `CONTAINER_HOST` here
+- ssh/mosh into the VPS / production host, or run a host shell command on it
+- `systemctl`/`podman`/deploy/recreate/restart/spin-up against ANY engine but this box's `CONTAINER_HOST`
+- mutate the running host or the fedora-dev/fedora-bootstrap running state outside the merge-and-deploy path
 
-→ STOP. Wrong agent. The host claudebox (in `fedora-bootstrap`) owns operate/deploy work. Surface what you would do; the human routes the task.
+→ STOP. Wrong actor. The host EXECUTES operate/deploy; you reach it ONLY through the ticket bus
+(`bin/host-ticket.sh`). Surface what you would do; the host/human routes it.
+
+**EXPLICITLY NOT A TRIGGER — this is YOUR loop; DRIVE it, do not hand it off:** labelling a PR
+`live-validate`; filing a `host-ticket.sh`; reading a host live-gate verdict; iterating RED→fix→re-push to
+GREEN; designing/building/iterating a host-GATED SPIKE over many rounds. **Host-GATED ≠ host-OWNED.** The
+live-gate round-trip is the DEV side's own two-tier loop (the host is the EXECUTOR of your ticket, never the
+OWNER of the work). Reaching "the edge of what I can build in-box" is NOT done and NOT a block — it is the
+point where you OWE the host a `live-validate` ticket and OWE yourself the iteration to GREEN. Calling
+host-gated work "another box's tier / not my remit" is a FALSE stop, a doctrine violation, not diligence.
 
 ## OPERATING SCOPE — R16 (BINDING; #167)
 
