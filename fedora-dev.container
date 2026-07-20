@@ -94,6 +94,13 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # Optional DEV-SIDE PR POLLER (Step 5 / #93) as a headless in-box service. OPT-IN + DISARMED:
 # reviews + routes open PRs but NEVER merges until armed. Uncomment to enable; add ` POLLER_ARMED=1`
 # only as the #96 Tier-A arming flip (autonomous Tier-B/C merges). See bin/poller-service.sh.
+# ARM HERE, in the DEPLOYED Quadlet — NOT via a live `podman exec` env injection: the arming env lives
+# ONLY in the container's runtime env, so a container RECREATE (R17 rebuild / monthly refresh / redeploy)
+# DROPS a live-injected POLLER_ENABLED, and the poller + its deadman (BOTH gated on it in entrypoint.sh)
+# come up dead and SILENT (incident 2026-07-19 #198: 1.5 h dark). Persisting it HERE is what makes both
+# survive a recreate. For MERGES (not just review) the line must ALSO carry the merge-anchor identities
+# auto-merge.sh checks (empty defaults ⇒ REFUSE, fail-closed):
+#   Environment=POLLER_ENABLED=1 POLLER_ARMED=1 FITNESS_SAME_IDENTITY=0 FITNESS_LOGIN=oso-gato-fitness-claudebox LG_HOST_LOGIN=<this-host's-live-gate-app>
 # Environment=POLLER_ENABLED=1
 
 # DEV-SIDE AUTONOMOUS AUTHORING loop (front-half of R3) as a headless in-box service — ARMED BY DEFAULT
