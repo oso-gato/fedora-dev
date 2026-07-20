@@ -71,6 +71,16 @@
                     }
                 ]
             }
+        ],
+        "Stop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "for D in fedora-dev fedora-bootstrap; do H=\"/home/core/.local/share/$D/bin/anti-stall-stop.sh\"; [ -x \"$H\" ] && exec \"$H\"; done; exit 0"
+                    }
+                ]
+            }
         ]
     }
 }
