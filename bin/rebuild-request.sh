@@ -206,6 +206,46 @@ dedup_by_sid(){
 SESSION_SOURCE="${SESSION_SOURCE:-enumerate_claude_procs}"
 manifest_block(){ "$SESSION_SOURCE" | dedup_by_sid | emit_manifest_lines | compose_manifest_block; }
 
+# ── manifest COMPLETENESS guard (fail-safe: never file a manifest that would silently WIPE sessions) ──
+# enumerate_claude_procs captures a session ONLY if it can `readlink /proc/<pid>/cwd` — a PTRACE-gated
+# read. Run in the WRONG context (root @ fedora-dev sits in the PARENT userns and reads NONE — an EMPTY
+# manifest; a claude Bash-tool shell is bubblewrap-sandboxed and reads only its own lineage) it drops the
+# rest SILENTLY. The executor treats an empty/partial manifest as "these are all the sessions" (rc=0,
+# restores only what is listed), so a rebuild on it KILLS every un-captured session and never brings it
+# back — with no error. So before a DESTRUCTIVE filing we cross-check: `/proc/<pid>/cmdline` is
+# WORLD-readable (NOT ptrace-gated, unlike cwd/environ), so the live tenant session-ids are knowable in
+# ANY context. `seen_sids` reads them with the SAME tenant filters enumerate uses (skip `-p` headless;
+# skip CLAUDE_CODE_CHILD_SESSION subagents where environ is readable) MINUS the cwd read; `missing_sids`
+# are the ones the composed manifest OMITS. `file_ticket` REFUSES when any is missing — turning a silent
+# session-wiping rebuild into a LOUD refusal. The fix is always the CONTEXT (run as core at the base
+# level — see the bin/rebuild-request.sh row in CLAUDE.md), never a weaker manifest. `SEEN_SIDS_SOURCE`
+# is the test seam.
+seen_sids(){
+  local pid cmd sid child
+  for pid in $("${PGREP_BIN:-pgrep}" -x claude 2>/dev/null); do
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+    [ -n "$cmd" ] || continue
+    case " $cmd " in *' -p '*|*' --print '*) continue ;; esac                       # headless, not a tenant
+    child="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^CLAUDE_CODE_CHILD_SESSION=//p' | head -1)"
+    [ "$child" = 1 ] && continue                                                     # subagent (only excludable when environ readable)
+    sid="$(sid_from_cmd "$cmd")"
+    [ -n "$sid" ] && valid_sid "$sid" && printf '%s\n' "$sid"
+  done | sort -u
+}
+SEEN_SIDS_SOURCE="${SEEN_SIDS_SOURCE:-seen_sids}"
+
+# missing_sids <manifest-text>: the live tenant session-ids (from SEEN_SIDS_SOURCE) the manifest does NOT
+# contain — sessions that EXIST but were dropped from capture. Sound ONLY when the manifest carries sids
+# (v2); file_ticket forces DEVBOX_MANIFEST_V2=1, so the destructive path is always checked. A no-sid /
+# invalid-sid tenant is never in seen_sids, so it can never raise a false positive.
+missing_sids(){ # <manifest-text>
+  local mb="${1:-}" s
+  "$SEEN_SIDS_SOURCE" | while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    printf '%s' "$mb" | grep -qF -- "$s" || printf '%s\n' "$s"
+  done
+}
+
 # compose_body: the full ticket body. LINE 1 is the machine op (exactly `host-op: rebuild-devbox
 # <workload>`); the manifest block rides below, prose between is ignored by both parsers. Mode `filed`
 # writes the APPROVAL-FLOW prose (the apparatus filed it; the maintainer's one tap authorizes — the
@@ -269,6 +309,13 @@ file_ticket(){
     return 0
   fi
   mb="$(manifest_block)"
+  if manifest_v2_enabled; then                                   # sid-completeness is a v2 property (a v1 line carries no sid to cross-check)
+    local missing; missing="$(missing_sids "$mb" | tr '\n' ' ')"
+    if [ -n "${missing// /}" ]; then
+      log "REFUSING to file rebuild-devbox: the captured manifest OMITS live session id(s) [ ${missing}] — a rebuild on it would KILL those sessions and NOT restore them. rebuild-request could not read all sessions' /proc: it MUST run as core at the fedora-dev BASE level (root is in the parent userns and reads NONE; a sandboxed shell reads only its own lineage). NOT filing; the flag is kept so the poller retries from the correct context."
+      return 1
+    fi
+  fi
   count="$(printf '%s\n' "$mb" | grep -c '^session ' || true)"
   [ "$count" -gt 0 ] || log "WARNING: zero sessions captured — the rebuild would restore nothing"
   body="$(printf '%s\n' "$mb" | compose_body filed)"
@@ -367,6 +414,12 @@ run_selftest(){
   # compose_body line 1 is the exact machine op the executor's parse_op reads
   out="$(echo x | compose_body | head -1)"
   ok "body line1 op"           '[ "$out" = "host-op: rebuild-devbox fedora-dev" ]'
+  # missing_sids — the COMPLETENESS cross-check (fail-safe against a lossy manifest; file-mode REFUSE)
+  _seen_present(){ printf '%s\n' aaaaaaaa-1111-2222-3333-444444444444; }
+  _seen_extra(){   printf '%s\n' aaaaaaaa-1111-2222-3333-444444444444 bbbbbbbb-5555-6666-7777-888888888888; }
+  local mf; mf="$(printf '%s\nsession s-aaa /home/core aaaaaaaa-1111-2222-3333-444444444444\n%s\n' "$MANIFEST_BEGIN" "$MANIFEST_END")"
+  ok "missing_sids none when captured" '[ -z "$(SEEN_SIDS_SOURCE=_seen_present missing_sids "$mf")" ]'
+  ok "missing_sids flags the omitted"  '[ "$(SEEN_SIDS_SOURCE=_seen_extra missing_sids "$mf")" = bbbbbbbb-5555-6666-7777-888888888888 ]'
   [ "$fail" = 0 ] && echo "rebuild-request --selftest: ALL PASS"
   return "$fail"
 }
@@ -382,6 +435,10 @@ case "${1:-}" in
 esac
 
 mb="$(manifest_block)"
+if manifest_v2_enabled; then
+  miss="$(missing_sids "$mb" | tr '\n' ' ')"
+  [ -n "${miss// /}" ] && log "WARNING: manifest is INCOMPLETE — omits live session id(s) [ ${miss}]. A rebuild would not restore them. Run rebuild-request as core at the fedora-dev base level (not root / not a sandboxed shell)."
+fi
 count="$(printf '%s\n' "$mb" | grep -c '^session ' || true)"
 body="$(printf '%s\n' "$mb" | compose_body)"
 
