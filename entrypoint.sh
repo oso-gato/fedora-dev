@@ -396,8 +396,44 @@ runuser -u core -- bash -c '
 # FITNESS_SAME_IDENTITY→1 = make-it-work — set 0 in the Quadlet to run strict SoD once the fitness
 # App secret exists; forwarding it is what lets the #96 arming config actually reach the poller).
 # The poller's other knobs (POLLER_REPO, POLL_INTERVAL) keep their correct in-box defaults.
-if [ "${POLLER_ENABLED:-0}" = 1 ]; then
-    echo "[poller] POLLER_ENABLED=1 — starting the dev-side poller in-box (armed=${POLLER_ARMED:-0})"
+# ---- G7: POLLER SELF-ARM + ARMING DURABILITY across a rebuild-to-spec --------------------------------
+# The poller's knobs are the operator's OUT-OF-BAND deploy env (run.sh -e / the Quadlet's commented
+# Environment=), NOT in the committed spec — so a purposeful R17 rebuild recreates the container to that spec
+# and the poller comes up UNSET: it never launches and would return DISARMED, silently killing the autonomous
+# merge loop (observed live 2026-07-21: the poller went down at the rebuild and never came back). TWO fixes,
+# MIRRORING the DEV_LOOP self-arm rationale (a host-set flag a self-refresh cannot reproduce would need a
+# MANUAL host arm, breaking self-arming):
+#   (1) POLLER_ENABLED DEFAULTS ON below (:-1) — the poller self-arms (sweeps/reviews/routes) with the
+#       apparatus, surviving any recreation. This is the SAFE half: it NEVER merges until POLLER_ARMED.
+#   (2) POLLER_ARMED + the fitness knobs (the MERGE-arming half — kept EXPLICIT, never a blanket default) are
+#       PERSISTED on the HOME VOLUME (survives recreation, like the live spec) whenever a deploy set them, and
+#       RESTORED when the env is absent — so the operator's ONE deliberate arming survives every later rebuild.
+# The persist file is PARSED, never sourced: it is core-writable and this runs as root, so sourcing would let
+# core inject code that root executes. Only the known keys, value-validated, are honoured.
+poller_persist=/home/core/.local/state/claudebox/poller.env
+if [ -n "${POLLER_ENABLED:-}" ]; then
+    # a deploy explicitly configured the poller THIS boot → capture its arming config durably (0600 core-owned)
+    mkdir -p /home/core/.local/state/claudebox 2>/dev/null || true
+    { printf 'POLLER_ARMED=%s\n'          "${POLLER_ARMED:-0}"
+      printf 'FITNESS_LOGIN=%s\n'         "${FITNESS_LOGIN:-}"
+      printf 'FITNESS_SAME_IDENTITY=%s\n' "${FITNESS_SAME_IDENTITY:-}"
+    } > "$poller_persist" 2>/dev/null \
+      && chmod 600 "$poller_persist" 2>/dev/null \
+      && chown core:core "$poller_persist" 2>/dev/null || true
+elif [ -r "$poller_persist" ]; then
+    # arming env absent (a rebuild-to-spec dropped it) → restore the operator's persisted arming. SAFE-PARSE
+    # (never `source` a core-writable file as root): honour only the known keys, each value-validated.
+    echo "[poller] arming env absent — restoring persisted arming from $poller_persist (rebuild-to-spec durability)"
+    while IFS='=' read -r _k _v; do
+        case "$_k" in
+            POLLER_ARMED)          case "$_v" in 0|1) POLLER_ARMED="$_v" ;; esac ;;
+            FITNESS_LOGIN)         case "$_v" in ''|*[!A-Za-z0-9._-]*) : ;; *) FITNESS_LOGIN="$_v" ;; esac ;;
+            FITNESS_SAME_IDENTITY) case "$_v" in 0|1) FITNESS_SAME_IDENTITY="$_v" ;; esac ;;
+        esac
+    done < "$poller_persist"
+fi
+if [ "${POLLER_ENABLED:-1}" = 1 ]; then
+    echo "[poller] POLLER_ENABLED (default-on self-arm) — starting the dev-side poller in-box (armed=${POLLER_ARMED:-0})"
     poller_env="POLLER_ARMED=${POLLER_ARMED:-0} FITNESS_LOGIN=${FITNESS_LOGIN:-} FITNESS_SAME_IDENTITY=${FITNESS_SAME_IDENTITY:-}"
     runuser -u core -- bash -c '
         st=/home/core/.local/state/claudebox
