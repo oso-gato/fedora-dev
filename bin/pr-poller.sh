@@ -56,7 +56,7 @@
 #   FITNESS_LOGIN     fitness bot login (passed through to fitness-review.sh + auto-merge.sh)
 #   POLLER_ARMED      1 → GREEN+B/C+PASS actually merges (auto-merge --commit). Default 0 (dry-run).
 #   POLL_INTERVAL     seconds between --watch sweeps (default 30 — a simple fixed cadence).
-#                     Cost at 10s (fetch-BATCHED sweep): steady state ≈ 360×(2+N)/h — the open-PR
+#                     Cost at 30s (fetch-BATCHED sweep): steady state ≈ 120×(2+N)/h — the open-PR
 #                     list (TSV: number+ref+sha in ONE call), the retire merged-list, and ONE
 #                     sha-bound comments call per open PR. A PARKED GREEN PR (already acted:
 #                     PRESENT posted / dry-run decided / merge attempted) is terminal-state-skipped
