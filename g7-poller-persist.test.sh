@@ -57,5 +57,9 @@ ck "entrypoint never sources poller_persist"        "$(grep -Ec '(^|[^[:alnum:]_
 ck "entrypoint case-validates POLLER_ARMED to 0|1"  "$(grep -Ec 'POLLER_ARMED\)[[:space:]]+case .* in 0\|1\)' "$EP")" 1
 ck "entrypoint validates FITNESS_LOGIN charset"     "$(grep -Fc '[!A-Za-z0-9._-]' "$EP")" 1
 ck "entrypoint defaults POLLER_ENABLED ON (:-1)"    "$(grep -Fc 'POLLER_ENABLED:-1' "$EP")" 1
+# armed-by-default (gate-free objective): the entrypoint forwards POLLER_ARMED default-ON and NEVER re-introduces
+# the retired :-0 disarmed default (a stale :-0 in the poller_env would force DISARMED past the poller's own :-1).
+ck "entrypoint forwards POLLER_ARMED default-ON"    "$(grep -Fc 'POLLER_ARMED=${POLLER_ARMED:-1}' "$EP")" 1
+ck "entrypoint has NO disarmed :-0 default left"    "$(grep -Fc 'POLLER_ARMED:-0' "$EP")" 0
 
 echo "-----"; echo "PASS=$pass FAIL=$fail"; [ "$fail" -eq 0 ]

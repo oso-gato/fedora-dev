@@ -91,15 +91,22 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # Secret=gh_app_key_fitness,type=mount,target=gh_app_key_fitness
 # Environment=GH_APP_FITNESS_ID=4241099 GH_APP_FITNESS_INSTALLATION_ID=145067591
 
-# DEV-SIDE PR POLLER (Step 5 / #93) as a headless in-box service — ENABLED BY DEFAULT (self-arms with the
-# apparatus; entrypoint `${POLLER_ENABLED:-1}`, G7): it sweeps/reviews/routes open PRs, surviving a
-# rebuild-to-spec (a host-set flag a self-refresh cannot reproduce would need a manual host arm — the
-# DEV_LOOP rationale). It NEVER merges until ARMED — the SAFE half is the default. To DISABLE, UNCOMMENT
-# `Environment=POLLER_ENABLED=0`. ARMING (the #96 Tier-A merge flip) stays EXPLICIT: set `POLLER_ARMED=1` at
-# a deploy (run.sh -e, or uncomment below) ONCE — the entrypoint PERSISTS it on the home volume so it
-# survives every later rebuild. See bin/poller-service.sh.
-# Environment=POLLER_ENABLED=0
-# Environment=POLLER_ARMED=1
+# DEV-SIDE PR POLLER (Step 5 / #93) as a headless in-box service — FULLY SELF-ARMING BY DEFAULT (entrypoint
+# `${POLLER_ENABLED:-1}` + `${POLLER_ARMED:-1}`, G7): it sweeps/reviews/routes AND MERGES open PRs
+# autonomously, surviving a rebuild-to-spec (a host-set flag a self-refresh cannot reproduce would need a
+# manual host arm, breaking self-arming — the DEV_LOOP rationale). This is the GATE-FREE objective: no human
+# approves the shipment (00-OBJECTIVES.md); the merge-TRUST boundary is the two DISTINCT App-identity gates
+# (host-GREEN + a distinct fitness-PASS), NOT a human arm — auto-merge.sh HARD-REFUSES --commit under
+# same-identity fitness, so a default-armed poller still cannot merge without the real independent fitness
+# App. The #96 explicit Tier-A arm is RETIRED (pre-ZERO-GATE). The two lines below set the flags EXPLICITLY
+# IN THE SPEC (not only the entrypoint default) — the DURABLE, HOST-DEPLOYABLE fix: (1) a rebuild-to-spec can
+# never drop them, they ARE the spec; (2) they are honored by ANY running image — an OLDER image whose
+# entrypoint predates the G7 `:-1` default still launches+arms the poller, because the entrypoint reads THIS
+# env — so the host pulls this Quadlet and restarts the container with NO image redeploy needed. To DISABLE,
+# set `POLLER_ENABLED=0`; for a DRY-RUN SOAK (review but do not merge), set `POLLER_ARMED=0`. See
+# bin/poller-service.sh.
+Environment=POLLER_ENABLED=1
+Environment=POLLER_ARMED=1
 
 # DEV-SIDE AUTONOMOUS AUTHORING loop (front-half of R3) as a headless in-box service — ARMED BY DEFAULT
 # (self-arms with the apparatus): the box autonomously AUTHORS a live-validate PR for every open
