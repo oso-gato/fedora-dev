@@ -24,16 +24,19 @@
 
 ## THE FLEET — roles · merge authority · merge gate
 
+**THE APPARATUS IS EXACTLY THE HOST/DEVBOX PAIR** (maintainer ruling 2026-07-20) — `fedora-dev` (devbox)
++ `fedora-bootstrap` (host). Nothing else is part of the apparatus; other repos (fedora-desktop, e2e-alpha)
+are separate workstreams that get per-objective TEMPORARY scope only when a confirmed objective needs them.
+
 **ROLES (no overlap):**
 - `fedora-dev` = develop · build · MERGE (the sole merge box).
 - `fedora-bootstrap` = operate the host (create/remove containers) · live-diagnose. PR-only.
-- `fedora-desktop` = own knowledge-work toolset. PR-only.
 
 **MERGE AUTHORITY:**
 - Only `fedora-dev` merges to `main` — any PR, its own included — and ONLY on Arthur's discrete
   clickable APPROVE (per-PR, diff shown). A free-text "yes" is NOT approval.
 - Control-plane PRs merge on the same click. Arthur may also merge on GitHub himself.
-- `fedora-bootstrap` + `fedora-desktop` MUST stop at the PR (propose-only).
+- `fedora-bootstrap` MUST stop at the PR (propose-only).
 
 **MERGE PATH (UNSHACKLED, 2026-07-11)** — merges are done by the headless **poller**, not an
 interactive gate. The `gate-push.sh` PreToolUse hook AND the `auto` classifier are REMOVED fleet-wide
@@ -199,7 +202,7 @@ NOT reasons to engage the human: status-confirmation, option-shopping, "which sh
 **TIER ROUTING — who merges a PASS** (ZERO-GATE, Arthur's decision #130 2026-07-10, RE-CONFIRMED by
 his adjudication of the 2026-07-11 fitness escalation: control-plane parity ports included — "zero-click,
 fix the law". Authoritative classifier = `bin/tier-classify.sh`, now REPORTING-ONLY):
-- Merge authority = the `fedora-dev` poller ONLY (`fedora-bootstrap` + `fedora-desktop` are propose-only).
+- Merge authority = the `fedora-dev` poller ONLY (`fedora-bootstrap` is propose-only).
 - EVERY tier — control-plane class included — auto-merges on host-GREEN + independent-fitness-PASS via
   the poller. There is NO Tier-A human click; tier labels the digest/report, it does not route.
 - Recoverability is AUTOMATIC, not human: host post-deploy health-gate + digest rollback, full

@@ -119,9 +119,12 @@ Task mentions any of:
 ## OPERATING SCOPE — R16 (BINDING; #167)
 
 The apparatus acts ONLY on the maintainer-confirmed repo set in `policy/scope.conf`, read via
-`bin/repo-scope.sh` (today: fedora-dev, fedora-bootstrap, fedora-desktop, e2e-alpha). Scope is
+`bin/repo-scope.sh`. **THE APPARATUS IS EXACTLY THE HOST/DEVBOX PAIR — `fedora-dev` + `fedora-bootstrap`**
+(maintainer ruling, 2026-07-20: "limited to the pair host/devbox, not anything else"). Scope is
 **per-objective, not permanent** (maintainer's ruling, 2026-07-13): the org holds repos that belong
-to other people and other workstreams; a repo off-limits today may be in scope tomorrow.
+to other people and other workstreams (fedora-desktop, e2e-alpha, knowledge-desktop are NOT in the
+apparatus — they get per-objective TEMPORARY scope only when a confirmed objective needs them); a
+repo off-limits today may be in scope tomorrow.
 
 - **Every actuator checks scope before acting** — poller sweep, fixer, fitness review, auto-merge,
   dev-plan/dev-loop/dev-author, host tickets/refresh. Out of scope ⇒ NO action, one loud log line.
