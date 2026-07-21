@@ -24,9 +24,11 @@
 
 ## THE FLEET — roles · merge authority · merge gate
 
-**THE APPARATUS IS EXACTLY THE HOST/DEVBOX PAIR** (maintainer ruling 2026-07-20) — `fedora-dev` (devbox)
-+ `fedora-bootstrap` (host). Nothing else is part of the apparatus; other repos (fedora-desktop, e2e-alpha)
-are separate workstreams that get per-objective TEMPORARY scope only when a confirmed objective needs them.
+**THE APPARATUS IS THE HOST/DEVBOX PAIR** — `fedora-dev` (devbox, *nox*) + `fedora-bootstrap` (host,
+*erebus*). "The pair" names the two BOXES, not a two-repo work ceiling: the pair's JOB is to develop
+EVERY repo its GitHub App is installed on — multi-tenant, unbounded, new repos included (see OPERATING
+SCOPE / R16: scope = the App installation, no allowlist). fedora-desktop, knowledge-desktop, e2e-alpha
+and the rest are WORKLOAD/tenant repos the pair develops for the maintainer, not peers of the apparatus.
 
 **ROLES (no overlap):**
 - `fedora-dev` = develop · build · MERGE (the sole merge box).

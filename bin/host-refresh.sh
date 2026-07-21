@@ -79,7 +79,7 @@
 #   host-refresh.sh --once       # one scan of all enrolled repos (what the poller runs)
 #   host-refresh.sh --selftest   # pure-helper self-checks (no network)
 #
-# ENV: HOST_REFRESH_ORG=oso-gato · HOST_REFRESH_WORKLOADS="fedora-dev" ("" disables
+# ENV: HOST_REFRESH_ORG=oso-gato · HOST_REFRESH_WORKLOADS="fedora-dev fedora-desktop" ("" disables
 #   the workload arm) · HOST_REFRESH_CONTROL_REPO=fedora-bootstrap ("" disables the control arm) ·
 #   HOST_REFRESH_LOOKBACK=15 · HOST_REFRESH_MAX_AGE=172800 (s) · HOST_REFRESH_WORKFLOW=build.yml ·
 #   HOST_REFRESH_IMAGE_RE / HOST_REFRESH_INERT_RE (the two classifiers) ·
@@ -155,7 +155,7 @@ fi
 ORG="${HOST_REFRESH_ORG:-oso-gato}"
 # `-` (not `:-`) expansions: an EXPLICITLY EMPTY value disables that arm (the documented contract);
 # only an unset one takes the fleet default.
-WORKLOADS="${HOST_REFRESH_WORKLOADS-fedora-dev}"
+WORKLOADS="${HOST_REFRESH_WORKLOADS-fedora-dev fedora-desktop}"
 CONTROL_REPO="${HOST_REFRESH_CONTROL_REPO-fedora-bootstrap}"
 LOOKBACK="${HOST_REFRESH_LOOKBACK:-15}"
 MAX_AGE="${HOST_REFRESH_MAX_AGE:-172800}"
