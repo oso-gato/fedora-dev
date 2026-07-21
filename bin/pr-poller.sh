@@ -55,8 +55,10 @@
 #   LG_HOST_LOGIN     host bot login whose verdict is trusted (default: oso-gato-erebus-claudebox[bot])
 #   FITNESS_LOGIN     fitness bot login (passed through to fitness-review.sh + auto-merge.sh)
 #   POLLER_ARMED      1 → GREEN+B/C+PASS actually merges (auto-merge --commit). Default 0 (dry-run).
-#   POLL_INTERVAL     seconds between --watch sweeps (default 10, matching the host watcher cadence).
-#                     Cost at 10s (fetch-BATCHED sweep): steady state ≈ 360×(2+N)/h — the open-PR
+#   POLL_INTERVAL     BASE seconds between --watch sweeps (default 30). The actual sleep grows LONGER
+#                     (interval_for) as the SHARED GraphQL budget falls — see ADAPTIVE RATE-LIMIT
+#                     PACING below; POLL_INTERVAL is the floor the sweep starts from when budget is ample.
+#                     Cost at 30s (fetch-BATCHED sweep): steady state ≈ 120×(2+N)/h — the open-PR
 #                     list (TSV: number+ref+sha in ONE call), the retire merged-list, and ONE
 #                     sha-bound comments call per open PR. A PARKED GREEN PR (already acted:
 #                     PRESENT posted / dry-run decided / merge attempted) is terminal-state-skipped
@@ -198,7 +200,7 @@ plan(){
 
 # R18 IDLE-WITH-WORK-PENDING (audit 2026-07-18, CAT-42/01; the kd#23 six-hour silent stall). The poller's
 # process-liveness is watched (the apparatus-deadman: is it sweeping?) but its WORK progress is NOT: a
-# poller that NOOPs on `host=NONE` every 10s is "healthy" by construction while the workstream is dead.
+# poller that NOOPs on `host=NONE` every sweep is "healthy" by construction while the workstream is dead.
 # stall_verdict is the missing WORK-level clock: a live-validate-LABELLED open head that has sat at
 # host=NONE (no host verdict produced) past a bound is a STALL to SURFACE, not a NOOP to repeat forever.
 # The age is derived from GitHub truth (the head commit's committer date), never a local first-seen marker
@@ -376,6 +378,30 @@ fitness_login_default(){ # <same_identity> <current_login>
   else printf 'oso-gato-fitness-claudebox'; fi
 }
 
+# interval_for <graphql_remaining> <base> — PURE: the adaptive --watch sweep interval for the live
+# GraphQL budget remaining (see ADAPTIVE RATE-LIMIT PACING in the env block). The GitHub API budget is
+# SHARED per-installation across the poller, the host watcher and every live interactive/tenant session;
+# gh pr list/view are GraphQL, so a fixed fast cadence competing with N live tenants can exhaust it
+# (observed 2026-07-20: graphql remaining 0/5000, the fitness reviewer + every sweep failing). So the
+# sweep BACKS OFF as the shared remaining falls, leaving headroom for the human-driven sessions:
+#   remaining >= AMPLE                 ⇒ base cadence (plenty of budget)
+#   LOW <= remaining < AMPLE           ⇒ base * SLOW_MULT (back off; spare the tenants)
+#   remaining < LOW  (near-exhaustion) ⇒ PAUSE_INTERVAL (a long sleep that rides toward the hourly reset)
+# FAIL-SAFE toward progress: a non-numeric/empty remaining ⇒ base — the read is FREE and re-run every
+# sweep, so a single unreadable read self-corrects next sweep; and a genuinely broken credential fails
+# the sweep's real gh calls too, consuming nothing regardless of the interval. Thresholds carry inline
+# ${:-} defaults so --selftest (which runs BEFORE the env block) exercises this without them set; an env
+# override still wins (the env block below is their doc home).
+interval_for(){ # <graphql_remaining> <base>
+  local rem="$1" base="$2"
+  local ample="${POLL_GRAPHQL_AMPLE:-2000}" low="${POLL_GRAPHQL_LOW:-500}"
+  local mult="${POLL_SLOW_MULT:-4}" pause="${POLL_PAUSE_INTERVAL:-300}"
+  case "$rem" in (''|*[!0-9]*) printf '%s' "$base"; return 0;; esac   # non-numeric/empty ⇒ base
+  if   [ "$rem" -ge "$ample" ]; then printf '%s' "$base"
+  elif [ "$rem" -ge "$low"   ]; then printf '%s' "$(( base * mult ))"
+  else                               printf '%s' "$pause"; fi
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -433,6 +459,20 @@ if [ "${1:-}" = "--selftest" ]; then
   fld "make-it-work → dev identity"  1 ""                         oso-gato-nox-claudebox
   fld "explicit login wins (SoD)"    0 oso-gato-fitness-claudebox oso-gato-fitness-claudebox
   fld "explicit login wins (miw)"    1 someone-else               someone-else
+  # ADAPTIVE RATE-LIMIT PACING — interval_for backs the sweep off as the SHARED GraphQL budget falls, so
+  # the poller never exhausts the pool the live interactive/tenant sessions also draw from. Defaults:
+  # AMPLE=2000 LOW=500 SLOW_MULT=4 PAUSE=300; base 30 here so the throttled values are unambiguous.
+  iv(){ local got; got="$(interval_for "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — interval_for($2,$3)=$got want $4"; fail=1; }; }
+  iv "ample → base"           5000 30 30
+  iv "at AMPLE → base"        2000 30 30
+  iv "just below AMPLE → 4x"  1999 30 120
+  iv "in LOW band → 4x"        800 30 120
+  iv "at LOW → 4x"             500 30 120
+  iv "just below LOW → pause"  499 30 300
+  iv "critical → pause"          0 30 300
+  iv "empty (unreadable) → base" "" 30 30
+  iv "non-numeric → base"      abc 30 30
+  iv "base honoured (10) → 4x"  800 10 40
   # #152 — the fixer's outcome is DETERMINED, never assumed. The landing is verified against ORIGIN, so
   # rc-0-but-nothing-landed ("push lied") and origin-unreadable are FAILURES, not silent successes.
   fo(){ local got; got="$(fix_outcome "$2" "$3" "$4" "$5" "$6")"; [ "$got" = "$7" ] && echo "ok: $1" || { echo "FAIL: $1 — fix_outcome($2,$3,$4,$5,$6)=$got want $7"; fail=1; }; }
@@ -553,7 +593,23 @@ LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
 export FITNESS_SAME_IDENTITY="${FITNESS_SAME_IDENTITY:-1}"
 FITNESS_LOGIN="$(fitness_login_default "$FITNESS_SAME_IDENTITY" "${FITNESS_LOGIN:-}")"; export FITNESS_LOGIN
 POLLER_ARMED="${POLLER_ARMED:-0}"
-POLL_INTERVAL="${POLL_INTERVAL:-10}"
+POLL_INTERVAL="${POLL_INTERVAL:-30}"   # BASE sweep cadence; adapts UP under low budget (interval_for)
+# ── ADAPTIVE RATE-LIMIT PACING (2026-07-20) ─────────────────────────────────────────────────────────
+# The GitHub API budget (5000/hr GraphQL, per-INSTALLATION) is a SHARED pool: the poller, the host
+# watcher and every live interactive/tenant session draw from the SAME 5000. gh pr list/view are
+# GraphQL, so a fixed fast cadence competing with N live tenants exhausts it (observed 2026-07-20:
+# graphql remaining 0/5000 — the fitness reviewer + every sweep failing). Two mitigations here (the
+# third, the git-protocol-monitor discipline, is a doc rule — see CLAUDE.md): the base cadence bumped
+# 10s→30s, AND the sweep interval ADAPTS to the live remaining budget. At each --watch boundary the
+# poller reads the FREE `gh api rate_limit` — that endpoint does NOT count against any budget — and
+# interval_for (pure, selftested) scales the sleep: ample ⇒ base, low ⇒ back off, critical ⇒ a long
+# pause riding toward the hourly reset. The thresholds' doc home (interval_for carries the inline
+# ${:-} defaults so --selftest works before this block; an env override wins):
+POLL_GRAPHQL_AMPLE="${POLL_GRAPHQL_AMPLE:-2000}"    # remaining ≥ this ⇒ base cadence
+POLL_GRAPHQL_LOW="${POLL_GRAPHQL_LOW:-500}"         # LOW ≤ remaining < AMPLE ⇒ base × SLOW_MULT
+POLL_SLOW_MULT="${POLL_SLOW_MULT:-4}"               # the LOW-band back-off multiplier
+POLL_PAUSE_INTERVAL="${POLL_PAUSE_INTERVAL:-300}"   # remaining < LOW ⇒ this long pause (ride the reset)
+POLL_RL_TIMEOUT="${POLL_RL_TIMEOUT:-15}"            # bound the (free) rate_limit read so a hung API can't wedge the loop
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
 FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
@@ -630,7 +686,7 @@ RECONCILE_TICKS=0
 # =1 — the test/catch-up seam, since each --once is a fresh process whose counter starts at 0).
 DEV_LOOP_SERVICE="${DEV_LOOP_SERVICE:-$HERE/dev-loop-service.sh}"
 DEV_LOOP_SERVICE_LOG="${DEV_LOOP_SERVICE_LOG:-$HOME/.local/state/dev-loop/service.log}"
-DEV_LOOP_LAUNCH_EVERY="${DEV_LOOP_LAUNCH_EVERY:-6}"   # ~1 min at the 10s cadence — arm authoring promptly after a self-refresh
+DEV_LOOP_LAUNCH_EVERY="${DEV_LOOP_LAUNCH_EVERY:-6}"   # ~3 min at the 30s base cadence — arm authoring promptly after a self-refresh
 DEV_LOOP_LAUNCH_TICKS=0
 # ── REBUILD-REQUEST (R17 approval flow, 2026-07-19) — flag-fired ONE-SHOT filing of the rebuild-devbox
 # APPROVAL ticket. Anything in-box may request a purposeful rebuild by touching the FLAG file (a LOCAL
@@ -647,6 +703,12 @@ REBUILD_REQUEST_TICKS=0
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
+
+# graphql_remaining — the live GraphQL budget remaining, from the FREE rate_limit endpoint (this call
+# does NOT itself count against any budget). Echoes an integer, or '' when unreadable — interval_for
+# treats '' as base (fail-safe toward progress: the read is re-run every sweep and self-corrects, and a
+# broken credential fails the sweep's real gh calls too). Timeout-bounded so a hung API can't wedge the loop.
+graphql_remaining(){ timeout "$POLL_RL_TIMEOUT" gh api rate_limit -q '.resources.graphql.remaining' 2>/dev/null || :; }
 
 # ── LOCK LIVENESS (#173): the flock singleton must survive a box recreate ───────────────────────────
 # The --watch lock lives on the HOME VOLUME, which outlives the poller process. A claudebox-rebuild
@@ -1470,7 +1532,7 @@ case "${1:-}" in
     # no-op, 2026-07-13). lock_acquire returns holding fd 9, or exits via lock_defer.
     lock_acquire
     trap 'log "poller stopping (signal)"; exit 0' TERM INT HUP
-    log "pr-poller --watch up (repo=$SLUG interval=${POLL_INTERVAL}s armed=$POLLER_ARMED self-refresh=$SELF_REFRESH every=${SELF_REFRESH_EVERY} sweeps running=${LAUNCH_HEAD:0:7})"
+    log "pr-poller --watch up (repo=$SLUG base-interval=${POLL_INTERVAL}s adaptive-budget=AMPLE${POLL_GRAPHQL_AMPLE}/LOW${POLL_GRAPHQL_LOW} armed=$POLLER_ARMED self-refresh=$SELF_REFRESH every=${SELF_REFRESH_EVERY} sweeps running=${LAUNCH_HEAD:0:7})"
     sweeps=0
     while :; do
       # SELF-REFRESH (#162) AT A SAFE POINT. This check sits at the TOP of the loop, OUTSIDE sweep(), so
@@ -1489,7 +1551,12 @@ case "${1:-}" in
         fi
       fi
       sweep || log "sweep error (continuing)"
-      sleep "$POLL_INTERVAL"
+      # ADAPTIVE PACING: back the sweep off as the SHARED GraphQL budget falls (see interval_for). The
+      # rate_limit read is FREE. Only LOG when actually throttling — no per-sweep noise at base cadence.
+      rem="$(graphql_remaining)"
+      nap="$(interval_for "$rem" "$POLL_INTERVAL")"
+      [ "$nap" != "$POLL_INTERVAL" ] && log "adaptive pacing: graphql remaining=${rem:-?} → sleeping ${nap}s (base ${POLL_INTERVAL}s) to spare the shared budget"
+      sleep "$nap"
     done
     ;;
   *) echo "usage: pr-poller.sh --once | --watch | --self-refresh-check | --selftest" >&2; exit 2;;
