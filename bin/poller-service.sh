@@ -8,7 +8,9 @@
 # WHY A PLAIN-SHELL SERVICE (not the interactive agent): here there is no Claude Code → no gate-push
 # hook, no permission classifier → the deterministic auto-merge path (POLLER_ARMED=1) actually executes.
 # The interactive agent is deliberately gated FROM these actions; the dumb, gate-checked service is the
-# sanctioned autonomous-merge path. DISARMED by default — arming (POLLER_ARMED=1) is the #96 Tier-A flip.
+# sanctioned autonomous-merge path. ARMED by default (gate-free objective — no human approves the shipment);
+# the merge-trust boundary is the two distinct App-identity gates, not a human arm. POLLER_ARMED=0 is a
+# deliberate dry-run soak (the #96 explicit Tier-A arm is retired, pre-ZERO-GATE).
 #
 # Env: this wrapper passes its whole environment through to pr-poller.sh. entrypoint.sh forwards
 # POLLER_ARMED + FITNESS_LOGIN into the box across the distrobox boundary (`distrobox enter` does not
@@ -87,7 +89,7 @@ until [ -e "$STATE/.assembled" ]; do sleep 10; done
 log "waiting for the standing GitHub credential…"
 until gh auth status >/dev/null 2>&1 || [ -s "$HOME/.git-credentials" ]; do sleep 10; done
 
-log "up — repo=${POLLER_REPO:-fedora-dev} armed=${POLLER_ARMED:-0} interval=${POLL_INTERVAL:-10}s same-identity=${FITNESS_SAME_IDENTITY:-1} self-refresh-clone=$SELF_REFRESH_CLONE"
+log "up — repo=${POLLER_REPO:-fedora-dev} armed=${POLLER_ARMED:-1} interval=${POLL_INTERVAL:-10}s same-identity=${FITNESS_SAME_IDENTITY:-1} self-refresh-clone=$SELF_REFRESH_CLONE"
 
 # 3) Run the watch loop (pr-poller.sh holds its own flock singleton).
 #    - A SELF-REFRESH exit (#162, POLLER_RELOAD_RC) means "ff-pull my clone + relaunch me on the new
