@@ -9,6 +9,45 @@
 # — a git clone seeded from the baked-image copy and persisted on the home volume.
 # Idempotent: re-running re-pulls, re-installs, re-applies bridges + policy.
 set -euo pipefail
+
+# --- REASSEMBLE-ON-IMAGE-CHANGE (the R17-rebuild / redeploy freshness gate) ------------------
+# A purposeful rebuild (R17 `rebuild-devbox`), a monthly base refresh, or any workload redeploy
+# RECREATES the fedora-dev CONTAINER onto a new image — but the claudebox Distrobox + its
+# `.assembled` marker live on the HOME VOLUME and OUTLIVE the container, so the new image's baked
+# seed / policy stamp / claude-code would stay FROZEN at the last assembly (the entrypoint's
+# first-boot assemble skips because `.assembled` is present). So compare the RUNNING fedora-dev
+# image id (base `/run/.containerenv`, readable at the base level where this script + the entrypoint
+# run) to the id recorded at the last assembly; a change forces a fresh assemble. Pure decision so
+# `--selftest` can prove it; the caller reads the live markers + image id.
+_fd_current_imageid(){ # → the running container's image id (empty if unreadable; the seam is FD_CONTAINERENV)
+    local f="${FD_CONTAINERENV:-/run/.containerenv}" line=''
+    line="$(grep -m1 '^imageid=' "$f" 2>/dev/null || true)"
+    line="${line#imageid=}"; line="${line%\"}"; line="${line#\"}"
+    printf '%s' "$line"
+}
+reassemble_needed(){ # <assembled 0|1> <failed 0|1> <cur_img> <prev_img> → prints reason; rc 0 = reassemble
+    local a="$1" f="$2" cur="$3" prev="$4"
+    if [ "$a" != 1 ]; then echo absent; return 0; fi          # never assembled
+    if [ "$f" = 1 ]; then echo failed; return 0; fi           # a prior assemble FAILED (#115)
+    if [ -n "$cur" ] && [ "$cur" != "$prev" ]; then echo image-changed; return 0; fi   # container recreated on a new image
+    echo fresh; return 1                                      # already assembled for THIS image
+}
+
+if [ "${1:-}" = --selftest ]; then
+    fail=0
+    _c(){ local want_rc="$1" want_reason="$2"; shift 2; local reason rc=0
+          reason="$(reassemble_needed "$@" || true)"; reassemble_needed "$@" >/dev/null 2>&1 || rc=$?
+          if [ "$reason" = "$want_reason" ] && [ "$rc" = "$want_rc" ]; then printf '  ok   reassemble_needed(%s)=%s\n' "$*" "$reason"
+          else printf '  FAIL reassemble_needed(%s): got %s/rc%s want %s/rc%s\n' "$*" "$reason" "$rc" "$want_reason" "$want_rc"; fail=1; fi; }
+    _c 0 absent        0 0 img new             # never assembled → reassemble
+    _c 0 failed        1 1 img img             # prior failure (even same image) → reassemble
+    _c 0 image-changed 1 0 new old             # recreated on a different image → reassemble
+    _c 1 fresh         1 0 img img             # assembled for the current image → skip
+    _c 1 fresh         1 0 '' old              # UNREADABLE current image → never a spurious reassemble (empty ≠ trigger)
+    [ "$fail" = 0 ] && echo "claudebox-assemble --selftest: PASS" || echo "claudebox-assemble --selftest: FAIL"
+    exit "$fail"
+fi
+
 [ "$(id -u)" = "1000" ] || {
     echo "claudebox-assemble.sh must run as core (uid 1000)" >&2; exit 1
 }
@@ -33,6 +72,26 @@ cd "$LIVE"
 # healthy off a stale success marker — the failure marker cannot.
 STATE="$HOME/.local/state/claudebox"
 mkdir -p "$STATE"
+
+# --if-stale (the entrypoint's every-boot call): (re)assemble ONLY when the box is not already
+# assembled for the CURRENT image. A `fresh` box short-circuits here (before the EXIT trap is even
+# set, so a healthy skip has zero teardown side effects); an `image-changed` box additionally CLEARS
+# `.assembled` first so the R17 box-ready gate WAITS for the fresh assembly rather than restoring
+# sessions onto the stale box. box-rebuild.sh calls WITHOUT --if-stale (a forced, unconditional
+# rebuild), so its behaviour is unchanged.
+if [ "${1:-}" = --if-stale ]; then
+    _a=0; [ -e "$STATE/.assembled" ] && _a=1
+    _f=0; [ -e "$STATE/.assemble-failed" ] && _f=1
+    _cur="$(_fd_current_imageid)"; _prev="$(cat "$STATE/.assembled-image" 2>/dev/null || true)"
+    _reason="$(reassemble_needed "$_a" "$_f" "$_cur" "$_prev" || true)"
+    if [ "$_reason" = fresh ]; then
+        echo "claudebox already assembled for image ${_cur:-?} — skipping (--if-stale)"
+        exit 0
+    fi
+    echo "claudebox (re)assemble needed: $_reason (image ${_cur:-?}, last-assembled ${_prev:-none})"
+    [ "$_reason" = image-changed ] && rm -f "$STATE/.assembled"   # gate the R17 box-ready wait on the FRESH assembly
+fi
+
 _assemble_finish() {
     local rc=$?
     if [ "$rc" -eq 0 ]; then
@@ -205,6 +264,11 @@ podman exec claudebox rm -rf /etc/claude-code/hooks
 # Mark assembled — entrypoint's first-boot guard checks this. The _assemble_finish
 # EXIT trap clears any .assemble-failed on this clean exit (health reads healthy).
 touch "$STATE/.assembled"
+# Record the fedora-dev image this box was assembled against, so the entrypoint's --if-stale gate
+# reassembles after a container recreate onto a DIFFERENT image (R17 rebuild / monthly refresh /
+# redeploy). Written ONLY when the image id is actually readable — an empty file would read back as
+# "prev=<empty>" and make every later boot's non-empty cur look image-changed (a reassemble loop).
+_img="$(_fd_current_imageid)"; [ -n "$_img" ] && printf '%s\n' "$_img" > "$STATE/.assembled-image"
 
 echo "==== claudebox READY: claude-code on latest channel + bridges + policy ===="
 echo "   Run 'claude' from a tmux shell to start working."
