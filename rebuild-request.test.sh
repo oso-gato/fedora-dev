@@ -255,6 +255,30 @@ SESSION_SOURCE="$STUB" SEEN_SIDS_SOURCE="$SEEN_EXTRA" REPO_SCOPE="$FBIN/repo-sco
   bash "$TMPD/mut-incomplete.sh" file >"$TMPD/file-out" 2>"$TMPD/file-err"; FRC=$?
 check "mutation: incomplete now FILES (guard neutralized)" '[ "$FRC" = 0 ] && [ -s "$FILE_REC" ]'
 
+echo "── file: AMBIGUITY (#226) — a NO-SID session sharing a cwd with another ⇒ REFUSE (rc 1, no create) ──"
+fixture "s-ebcfa847\t/home/core\t$UUID\ns-p2128\t/home/core\t\n"
+run_file
+check "file: ambiguous rc 1"                    '[ "$FRC" = 1 ]'
+check "file: ambiguous did NOT create"          '[ ! -s "$FILE_REC" ]'
+check "file: ambiguous names the shared cwd"    'grep -q "/home/core" "$TMPD/file-err"'
+check "file: ambiguous says REFUSING"           'grep -qi "REFUSING to file" "$TMPD/file-err"'
+check "file: ambiguous cites --continue"        'grep -q -- "--continue" "$TMPD/file-err"'
+
+echo "── file: a LONE no-sid session on a UNIQUE cwd is NOT ambiguous ⇒ FILES (guard does not over-refuse) ──"
+fixture "main\t/home/core\t$UUID\ns-p9\t/root\t\n"
+run_file
+check "file: lone-nosid rc 0"                   '[ "$FRC" = 0 ]'
+check "file: lone-nosid created"                '[ -s "$FILE_REC" ]'
+
+echo "── MUTATION: neutralize the ambiguity guard ⇒ the SAME shared-cwd manifest FILES (proves the guard bites) ──"
+sed 's|if \[ -n "${ambig// /}" \]; then|if false; then|' "$SUT" > "$TMPD/mut-ambig.sh"
+check "ambig-mutation applied (non-vacuous)"    '! cmp -s "$SUT" "$TMPD/mut-ambig.sh"'
+fixture "s-ebcfa847\t/home/core\t$UUID\ns-p2128\t/home/core\t\n"
+FILE_REC="$TMPD/file-rec"; : > "$FILE_REC"; export FILE_REC
+SESSION_SOURCE="$STUB" SEEN_SIDS_SOURCE="$SEEN_STUB" REPO_SCOPE="$FBIN/repo-scope-stub" PATH="$FBIN:$PATH" \
+  bash "$TMPD/mut-ambig.sh" file >"$TMPD/file-out" 2>"$TMPD/file-err"; FRC=$?
+check "ambig-mutation: shared-cwd now FILES (guard neutralized)" '[ "$FRC" = 0 ] && [ -s "$FILE_REC" ]'
+
 # ═══ POLLER WIRING — rebuild_request_tick (flag-fired one-shot, R9-gated) ════════════════════════════
 POLLER="$HERE/bin/pr-poller.sh"
 if [ -f "$POLLER" ]; then
