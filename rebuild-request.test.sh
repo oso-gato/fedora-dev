@@ -48,6 +48,21 @@ cat > "$STUB" <<'STUBEOF'
 cat "${SESSION_FIXTURE:?}"
 STUBEOF
 chmod +x "$STUB"
+# ── stub SEEN_SIDS_SOURCE: the completeness cross-check's "what live sessions EXIST" set. Emits the
+#    fixture's distinct non-empty sids (3rd col) — consistent with SESSION_SOURCE when nothing was dropped.
+SEEN_STUB="$TMPD/seen"
+cat > "$SEEN_STUB" <<'SEENEOF'
+#!/usr/bin/env bash
+awk -F'\t' '$3!="" && !seen[$3]++ {print $3}' "${SESSION_FIXTURE:?}"
+SEENEOF
+chmod +x "$SEEN_STUB"
+# a SEEN source reporting an EXTRA live session the manifest will NOT contain (the incomplete case)
+SEEN_EXTRA="$TMPD/seen-extra"
+cat > "$SEEN_EXTRA" <<SEENXEOF
+#!/usr/bin/env bash
+printf '%s\n' $UUID ffffffff-0000-0000-0000-000000000000
+SEENXEOF
+chmod +x "$SEEN_EXTRA"
 fixture(){ printf '%b' "$1" > "$TMPD/fix"; export SESSION_FIXTURE="$TMPD/fix"; }
 # run_manifest drives the producer with the v2 rollout gate ENABLED (the feature under test). A separate
 # runner leaves it at its safe default (OFF) to prove a valid sid still degrades to v1 then.
@@ -185,7 +200,7 @@ run_file(){ # extra env…  — deliberately does NOT set DEVBOX_MANIFEST_V2: th
             # ON itself (incident 2026-07-19: env-dependent v2 filed a v1 cwd-scoped manifest live — a
             # multi-tenant collapse for sessions sharing one cwd; the sid row below proves the default)
   FILE_REC="$TMPD/file-rec"; : > "$FILE_REC"; export FILE_REC
-  SESSION_SOURCE="$STUB" REPO_SCOPE="$FBIN/repo-scope-stub" PATH="$FBIN:$PATH" \
+  SESSION_SOURCE="$STUB" SEEN_SIDS_SOURCE="$SEEN_STUB" REPO_SCOPE="$FBIN/repo-scope-stub" PATH="$FBIN:$PATH" \
     env "$@" bash "$SUT" file >"$TMPD/file-out" 2>"$TMPD/file-err"; FRC=$?
 }
 body_rec(){ sed -n '/^TITLE:/,$p' "$FILE_REC" | sed 1d; }   # the created body (after the TITLE line)
@@ -224,6 +239,47 @@ check "file: scope refuse did NOT create"       '[ ! -s "$FILE_REC" ]'
 echo "── file: a failed create ⇒ rc 1 (the poller keeps the flag + retries) ──"
 run_file FAKE_CREATE_FAIL=1
 check "file: create-failure rc 1"               '[ "$FRC" = 1 ]'
+
+echo "── file: COMPLETENESS — a live session the manifest OMITS ⇒ REFUSE (rc 1, no create), names the omitted sid ──"
+fixture "main\t/home/core\t$UUID\n"
+run_file SEEN_SIDS_SOURCE="$SEEN_EXTRA"
+check "file: incomplete rc 1"                   '[ "$FRC" = 1 ]'
+check "file: incomplete did NOT create"         '[ ! -s "$FILE_REC" ]'
+check "file: incomplete names the omitted sid"  'grep -q "ffffffff-0000-0000-0000-000000000000" "$TMPD/file-err"'
+check "file: incomplete says REFUSING"          'grep -qi "REFUSING to file" "$TMPD/file-err"'
+
+echo "── MUTATION: neutralize the completeness guard ⇒ the SAME omission FILES (proves the guard bites) ──"
+sed 's|if \[ -n "${missing// /}" \]; then|if false; then|' "$SUT" > "$TMPD/mut-incomplete.sh"
+check "mutation applied (non-vacuous)"          '! cmp -s "$SUT" "$TMPD/mut-incomplete.sh"'
+fixture "main\t/home/core\t$UUID\n"
+FILE_REC="$TMPD/file-rec"; : > "$FILE_REC"; export FILE_REC
+SESSION_SOURCE="$STUB" SEEN_SIDS_SOURCE="$SEEN_EXTRA" REPO_SCOPE="$FBIN/repo-scope-stub" PATH="$FBIN:$PATH" \
+  bash "$TMPD/mut-incomplete.sh" file >"$TMPD/file-out" 2>"$TMPD/file-err"; FRC=$?
+check "mutation: incomplete now FILES (guard neutralized)" '[ "$FRC" = 0 ] && [ -s "$FILE_REC" ]'
+
+echo "── file: AMBIGUITY (#226) — a NO-SID session sharing a cwd with another ⇒ REFUSE (rc 1, no create) ──"
+fixture "s-ebcfa847\t/home/core\t$UUID\ns-p2128\t/home/core\t\n"
+run_file
+check "file: ambiguous rc 1"                    '[ "$FRC" = 1 ]'
+check "file: ambiguous did NOT create"          '[ ! -s "$FILE_REC" ]'
+check "file: ambiguous names the shared cwd"    'grep -q "/home/core" "$TMPD/file-err"'
+check "file: ambiguous says REFUSING"           'grep -qi "REFUSING to file" "$TMPD/file-err"'
+check "file: ambiguous cites --continue"        'grep -q -- "--continue" "$TMPD/file-err"'
+
+echo "── file: a LONE no-sid session on a UNIQUE cwd is NOT ambiguous ⇒ FILES (guard does not over-refuse) ──"
+fixture "main\t/home/core\t$UUID\ns-p9\t/root\t\n"
+run_file
+check "file: lone-nosid rc 0"                   '[ "$FRC" = 0 ]'
+check "file: lone-nosid created"                '[ -s "$FILE_REC" ]'
+
+echo "── MUTATION: neutralize the ambiguity guard ⇒ the SAME shared-cwd manifest FILES (proves the guard bites) ──"
+sed 's|if \[ -n "${ambig// /}" \]; then|if false; then|' "$SUT" > "$TMPD/mut-ambig.sh"
+check "ambig-mutation applied (non-vacuous)"    '! cmp -s "$SUT" "$TMPD/mut-ambig.sh"'
+fixture "s-ebcfa847\t/home/core\t$UUID\ns-p2128\t/home/core\t\n"
+FILE_REC="$TMPD/file-rec"; : > "$FILE_REC"; export FILE_REC
+SESSION_SOURCE="$STUB" SEEN_SIDS_SOURCE="$SEEN_STUB" REPO_SCOPE="$FBIN/repo-scope-stub" PATH="$FBIN:$PATH" \
+  bash "$TMPD/mut-ambig.sh" file >"$TMPD/file-out" 2>"$TMPD/file-err"; FRC=$?
+check "ambig-mutation: shared-cwd now FILES (guard neutralized)" '[ "$FRC" = 0 ] && [ -s "$FILE_REC" ]'
 
 # ═══ POLLER WIRING — rebuild_request_tick (flag-fired one-shot, R9-gated) ════════════════════════════
 POLLER="$HERE/bin/pr-poller.sh"
