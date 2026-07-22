@@ -57,6 +57,7 @@ TICKET_LABEL="${HOST_TICKET_LABEL:-host-task}"
 TMUX_BIN="${TMUX_BIN:-tmux}"                            # test seam: a stub tmux drives the real logic
 # ── `file` mode (R17 approval flow, 2026-07-19 — pairs with fedora-bootstrap v1.2.69) ────────────────
 APPROVAL_LABEL="${APPROVAL_LABEL:-rebuild-approval}"    # the maintainer's mobile-filter label on the filed ticket
+APPROVE_LABEL="${APPROVE_LABEL:-approved}"             # the AUTHORIZATION tap: the executor's v1.2.69 gate fires when a maintainer applies THIS label. NOT applied at filing (that would self-authorize) — only CREATED so it exists in the repo's label set for the one-tap apply (mobile has no label-create UI; live 2026-07-19 the tap was impossible until this label was hand-created)
 REBUILD_APPROVER_MENTION="${REBUILD_APPROVER_MENTION:-@oso-gato}"   # @mentioned in the ticket body → GitHub-app push; AUTHORIZATION is the role-checked `approved` label, never this string
 HERE_RR="$(dirname "$(readlink -f "$0")")"
 REPO_SCOPE="${REPO_SCOPE:-$HERE_RR/repo-scope.sh}"      # R16: filing targets the control repo — scope-checked
@@ -349,6 +350,7 @@ file_ticket(){
   printf '%s\n' "$body" > "$tmp"
   gh label create "$TICKET_LABEL"   --repo "$slug" --color 5319e7 >/dev/null 2>&1 || true   # create-on-use
   gh label create "$APPROVAL_LABEL" --repo "$slug" --color d93f0b >/dev/null 2>&1 || true
+  gh label create "$APPROVE_LABEL"  --repo "$slug" --color 0e8a16 >/dev/null 2>&1 || true   # the authorization tap must EXIST to be tappable; NOT applied here (self-authorize)
   if url="$(gh issue create --repo "$slug" \
         --title "🔴 APPROVAL REQUIRED: rebuild-devbox $REBUILD_WORKLOAD ($count session(s)) — tap the approved label" \
         --label "$TICKET_LABEL" --label "$APPROVAL_LABEL" --body-file "$tmp" 2>&1)"; then

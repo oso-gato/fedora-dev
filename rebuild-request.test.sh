@@ -188,7 +188,7 @@ case "$1 $2" in
     { printf 'TITLE:%s\n' "$title"; cat "$bodyf"; } >> "${FILE_REC:?}"
     [ "${FAKE_CREATE_FAIL:-0}" = 1 ] && { echo boom; exit 1; }
     echo "https://github.com/oso-gato/fedora-bootstrap/issues/99" ;;
-  "label create") : ;;
+  "label create") printf 'LABELCREATE:%s\n' "$3" >> "${FILE_REC:?}" ;;   # record create-on-use attempts
   *) : ;;
 esac
 exit 0
@@ -212,6 +212,8 @@ check "file: rc 0"                              '[ "$FRC" = 0 ]'
 check "file: title is APPROVAL REQUIRED"        'grep -q "^TITLE:🔴 APPROVAL REQUIRED: rebuild-devbox fedora-dev" "$FILE_REC"'
 check "file: host-task label"                   'grep -q "^LABEL:host-task$" "$FILE_REC"'
 check "file: rebuild-approval label"            'grep -q "^LABEL:rebuild-approval$" "$FILE_REC"'
+check "file: approved label CREATED (tappable)" 'grep -q "^LABELCREATE:approved$" "$FILE_REC"'
+check "file: approved NOT applied at filing"    '! grep -q "^LABEL:approved$" "$FILE_REC"'
 check "file: body line-1 is the exact op"       '[ "$(body_rec | head -1)" = "host-op: rebuild-devbox fedora-dev" ]'
 check "file: @mention present (phone push)"     'body_rec | grep -q -- "@oso-gato"'
 check "file: approved-label one-tap instruction" 'body_rec | grep -q "approved.*label"'
