@@ -189,84 +189,13 @@ diff="$(gh pr diff "$PR" --repo "$SLUG" 2>/dev/null)"
 [ -n "$diff" ] || die "empty/unreadable diff for $SLUG#$PR (fail-closed)"
 diff_note=""; trunc_note=""
 
-# ---- R16 OPERATING-SCOPE GATE (#167) — deterministic, harness-owned, runs on the FULL diff ---------
-# Unauthorized scope EXPANSION is (b) UNSAFE — a BLOCKER, never a NOTE: the exact hole #165 sailed
-# through (nothing in Q1/Q2/Q3 encoded WHICH repos the apparatus may act on, so a one-line PR
-# re-targeted the whole apparatus and every gate passed it). The AUTHORITY is the versioned config
-# (policy/scope.conf); a PR that NET-ADDS a repo to it (repo-scope.sh diff-adds: added minus removed,
-# so a moved/reordered line or a pure removal never trips — narrowing needs no ceremony; the parser
-# is HUNK-STATEFUL, so a crafted added line that mimics a `+++ b/…` header can neither hide the adds
-# behind it nor forge an entry — see scope_diff_adds) merges ONLY with a maintainer's recorded,
-# NAME-BOUND confirmation ON THIS PR — the dev-plan R1 discipline plus the G2 binding lesson: a
-# comment whose FIRST line is exactly `CONFIRMED <repo> [<repo>…]` (repo-scope.sh confirm-names:
-# strict, all-or-nothing — a bare CONFIRMED or any prose on line 1 confirms NOTHING), its author
-# role-checked admin|maintain via the permission API (App identities hold write and can confirm
-# NOTHING; label presence proves nothing). The confirmation covers exactly the NAMES it lists —
-# maintainer confirmations UNION, and EVERY net-added name must be covered — so the empty-commit
-# remediation flow survives (new heads keep passing while their net-adds stay within the confirmed
-# names) but a post-confirmation head that SWAPS or EXTENDS the adds re-gates UNCONFIRMED on the
-# uncovered names ("a fresh, ungated head never inherits a prior verdict"). Uncovered ⇒ the HARNESS
-# composes the RETURN itself and the model is NOT consulted: a structural blocker needs no judgment,
-# and no judgment could unblock it (a model cannot be talked into waiving R16 because it never gets
-# to speak). Detection runs BEFORE the diff cap — a truncated diff must never hide a scope hunk.
-# Fail direction: an unreadable comment stream or role reads as UNCONFIRMED ⇒ RETURN.
-# Cost: zero extra API calls unless an expansion is actually detected (names are parsed locally
-# BEFORE the per-author role call, so only a comment that actually names repos costs a role read).
+# ---- R16 OPERATING SCOPE — the ONLY scope gate is the in-scope CHECK above (the App-install
+# enumeration; an out-of-scope repo is refused before any review is even attempted). The former
+# confirm-to-add gate (a net-add to policy/scope.conf / the objective repo-list required a maintainer
+# `CONFIRMED <repo>` comment) is REMOVED with the allowlist itself (R16 rebuild 2026-07-21): there is
+# no allowlist to add to — the App installation IS the operating scope, gated by the maintainer
+# creating the repo + installing the App on it, never by software. -------------------------------
 verdict=""; rationale=""
-# The AUTHORITY moved from policy/scope.conf to the confirmed-objective repo-list in 00-OBJECTIVES.md
-# (R16, 2026-07-16). Gate BOTH during the transition so "the agent never authorizes" is NEVER
-# unenforced: a net-add to the objective table (objective-adds — the primary authority) OR to the
-# transitional scope.conf (diff-adds) must be maintainer-confirmed by name. scope.conf's arm is dropped
-# only at the STEP-10 cutover, strictly AFTER this objective-adds gate is live.
-scope_added="$( { printf '%s' "$diff" | "$REPO_SCOPE" objective-adds 2>/dev/null; printf '%s' "$diff" | "$REPO_SCOPE" diff-adds 2>/dev/null; } | grep . | sort -u )" || scope_added=""
-if [ -n "$scope_added" ]; then
-  scope_confirmed=""; scope_conf_by=""
-  scope_bus="$(gh api "repos/$SLUG/issues/$PR/comments" --paginate \
-      -q '.[] | [((.user.login // "") | rtrimstr("[bot]")), ((.body // "") | split("\n")[0])] | @tsv' 2>/dev/null)" \
-    || scope_bus=""
-  while IFS=$'\t' read -r sc_who sc_line1; do
-    [ -n "$sc_who" ] || continue
-    printf '%s' "$sc_line1" | grep -qE '^CONFIRMED\b' || continue
-    sc_names="$("$REPO_SCOPE" confirm-names "$sc_line1" 2>/dev/null)" || sc_names=""
-    if [ -z "$sc_names" ]; then
-      log "R16: line-1 CONFIRMED from @$sc_who names NO repos (strict grammar: line 1 is 'CONFIRMED <repo> [<repo>…]' and nothing else) — it confirms nothing"
-      continue
-    fi
-    sc_role="$(gh api "repos/$SLUG/collaborators/$sc_who/permission" -q .role_name 2>/dev/null)"
-    case "$sc_role" in
-      admin|maintain)
-        scope_confirmed="${scope_confirmed}${sc_names}"$'\n'; scope_conf_by="$sc_who"
-        log "R16: @$sc_who (maintainer) confirmed by name: $(printf '%s' "$sc_names" | tr '\n' ' ')";;
-      *) log "R16: ignoring line-1 CONFIRMED from @$sc_who (role: ${sc_role:-unfetchable} — not a maintainer)";;
-    esac
-  done <<<"$scope_bus"
-  scope_missing="$(printf '%s\n' "$scope_added" | while IFS= read -r _a; do
-    [ -n "$_a" ] || continue
-    printf '%s\n' "$scope_confirmed" | grep -qxF -- "$_a" || printf '%s\n' "$_a"
-  done)"
-  if [ -z "$scope_missing" ]; then
-    log "R16: scope expansion (+ $(printf '%s' "$scope_added" | tr '\n' ' ')) is maintainer-confirmed by @$scope_conf_by — every added name covered; proceeding to the model review"
-  else
-    log "R16: this PR NET-ADDS repo(s) to the operating scope with NO maintainer confirmation NAMING them ($(printf '%s' "$scope_missing" | tr '\n' ' ')) — deterministic RETURN (UNSAFE (b)); the reviewer model is not consulted"
-    verdict="RETURN"
-    scope_paste="CONFIRMED $(printf '%s' "$scope_added" | tr '\n' ' ' | sed 's/ $//')"
-    rationale="**R16 OPERATING SCOPE (#167) — BLOCKER, category (b) UNSAFE — determined by the fitness HARNESS (deterministic; no model judgment involved, and none could unblock it).**
-
-This PR NET-ADDS the following repo(s) to the apparatus's operating scope — the confirmed-objective repo-list in \`00-OBJECTIVES.md\` (or the transitional \`policy/scope.conf\`):
-$(printf '%s\n' "$scope_added" | sed 's/^/- `/;s/$/`/')
-
-Not covered by any maintainer confirmation on this PR:
-$(printf '%s\n' "$scope_missing" | sed 's/^/- `/;s/$/`/')
-
-Scope EXPANSION takes effect only with a MAINTAINER's recorded, NAME-BOUND confirmation on THIS PR (R16 rule 2 — the dev-plan R1 discipline): a PR comment whose FIRST line is exactly \`CONFIRMED <repo> [<repo>…]\` — nothing else on line 1 (prose goes on later lines; a bare \`CONFIRMED\` confirms nothing) — authored by an identity holding admin|maintain on this repo (role-checked via the permission API; fleet App identities hold write and can confirm nothing, and label presence proves nothing). The confirmation covers EXACTLY the repos it names: a later head re-gates under it only while its net-adds stay within the confirmed names, so a post-confirmation push can never swap in a different repo. An unreadable comment stream or role also reads as unconfirmed (fail-closed).
-
-Remediation — exactly one of:
-- a repo MAINTAINER comments on this PR with first line exactly: \`$scope_paste\` — then a NEW head is pushed (e.g. an empty commit), so the new head re-gates and re-reviews under that confirmation; or
-- drop the scope addition (narrowing or leaving the scope unchanged needs no ceremony).
-
-This closes the hole #165 sailed through: a one-line PR must never re-target the apparatus autonomously."
-  fi
-fi
 
 # The model review runs ONLY when the R16 gate above has not already decided (verdict still empty).
 # NB: the guard body below deliberately stays at column 0 — it carries the PROMPT heredoc, whose
@@ -307,15 +236,16 @@ A finding BLOCKS only if it makes the change INCORRECT, UNSAFE, or UNTRUE:
   (a) INCORRECT — it does not actually do what it claims; the stated feature is broken or does not work.
   (b) UNSAFE    — it weakens or deletes a guard, exposes a credential, enables an unsafe or unreviewed
                   merge, breaks the fail-closed posture or the merge-trust boundary (G1/G2, author≠judge),
-                  removes recoverability/rollback, or EXPANDS THE APPARATUS'S OPERATING SCOPE without a
-                  maintainer's recorded confirmation (R16/#167): adding a repo to ANY repo-set the
-                  apparatus acts on — a sweep list, an enrolment default, a workload list, a hardcoded
-                  fallback in a script — is UNSAFE unless maintainer-confirmed on the PR. (A
-                  deterministic harness gate screens the authoritative config, policy/scope.conf,
-                  before you run — treat it as a FIRST layer, never a reason to stand down: judge any
-                  change touching policy/scope.conf, the scope reader, or the machinery around them
-                  YOURSELF as well, and an expansion smuggled ANYWHERE ELSE — a script default, an env
-                  fallback — has no other gate at all. Removing/narrowing scope is always fine.)
+                  removes recoverability/rollback, or WEAKENS THE OPERATING-SCOPE BOUNDARY (R16,
+                  rebuilt 2026-07-21): the scope IS the App installation — the apparatus acts on exactly
+                  the repos its GitHub App is installed on, gated by the maintainer's repo-creation +
+                  App-install, never by software. So a change that REINTRODUCES a hardcoded repo
+                  allowlist/denylist or a scope.conf-style config (there is none by design — do not let
+                  one back in), lets an actuator act on a repo the App is NOT installed on, or removes the
+                  fail-closed-to-OWN floor ({fedora-dev, fedora-bootstrap}), is UNSAFE. There is no
+                  confirm-to-add gate to lean on — it was removed WITH the allowlist; judge any change to
+                  the scope reader, the App-install enumeration, or the credential/identity boundary
+                  YOURSELF. Narrowing scope (or the App install) is always fine.
   (c) UNTRUE    — it ships a claim that is false: a doc row, code comment, log line or test that asserts
                   behaviour the code does not have. (This fleet's dominant defect. A test that passes
                   against the pre-fix code is untrue. Hold this line hard.)

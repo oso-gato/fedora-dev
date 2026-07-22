@@ -65,7 +65,7 @@ if cmp -s "$AM" "$MUT"; then bad "mutation VACUOUS (sed changed nothing)"; else
 fi
 
 echo "== POLLER routing drift-guard: rc 2 → 'rebase', rc 3 → 'merge-failed' (NO park), rc 1/other → 'refused' =="
-grep -qE '2\) surface .* "rebase"' "$POLLER" && ok "poller routes auto-merge rc 2 → a 'rebase' surface" || bad "poller lost the rc-2 rebase arm"
+grep -qF 'surface "$pr" "$sha" "rebase"' "$POLLER" && ok "poller routes auto-merge rc 2 → a 'rebase' surface" || bad "poller lost the rc-2 rebase arm"
 grep -qE '\*\) surface .* "refused"' "$POLLER" && ok "poller keeps rc-1/other → the 'refused' trust-boundary surface" || bad "poller lost the refused arm"
 grep -qF 'amrc=${PIPESTATUS[0]}' "$POLLER" && ok "poller captures auto-merge's real exit code (PIPESTATUS)" || bad "poller does not capture the distinct rc"
 # rc 3 must NOT write the acted marker: that marker is the MERGE arm's terminal-state skip, so parking
