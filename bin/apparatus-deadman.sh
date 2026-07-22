@@ -39,7 +39,7 @@
 # (surfaces loudly that auto-recovery was attempted and did not clear it). Never loop-acts. Every
 # recovery action is logged AND noted on the surfaced/updated alarm issue (audit).
 #
-# THE FOUR ANOMALIES (the DECISION is the pure, --selftest-covered deadman_verdict; the facts are
+# THE FIVE ANOMALIES (the DECISION is the pure, --selftest-covered deadman_verdict; the facts are
 # gathered separately by the I/O layer):
 #   1. MERGED-NOT-LIVE  — the clone HEAD trails origin/main by >=1 for longer than DEADMAN_LAG_MAX checks
 #                         (a clean clone lagging past the transient post-merge window).
@@ -49,6 +49,14 @@
 #   3. POLLER FROZEN    — a poller process EXISTS but its log mtime has not advanced within DEADMAN_SWEEP_MAX
 #                         (alive but not sweeping).
 #   4. POLLER DOWN      — no `pr-poller.sh --watch` process at all, while one is expected (DEADMAN_EXPECT_POLLER).
+#   5. FITNESS TOKEN STALE — the ferried fitness token ($DEADMAN_FITNESS_ENV) has not re-minted past
+#                         DEADMAN_FITNESS_STALE_MAX: the entrypoint ferry has stalled, so fitness-review
+#                         cannot post as the DISTINCT fitness App and auto-merge refuses every PR — a
+#                         SILENT merge stall no other check catches (the poller keeps sweeping, so
+#                         POLLER-FROZEN never fires). ABSENT is NOT alarmed (a make-it-work box legitimately
+#                         has none). Its verdict is the separate pure `fitness_token_verdict` (appended to
+#                         the deadman_verdict token stream); it SURFACEs (no in-box fix — the fitness KEY
+#                         never enters the box).
 #
 # FAIL DIRECTION — BIAS TOWARD SURFACING. A signal that cannot be READ (git/gh/timeout failure) is itself
 # suspicious: after DEADMAN_UNREADABLE_MAX consecutive unreadable checks the deadman surfaces
@@ -73,7 +81,7 @@
 #                                    unless DEADMAN_RESPOND=1 is set (the test seam).
 #   apparatus-deadman.sh --watch     loop every DEADMAN_INTERVAL, RESPONDING to + surfacing/clearing
 #                                    anomalies as it goes (the autonomous responder is active here).
-#   apparatus-deadman.sh --selftest  exercise the pure core (streak_next, deadman_verdict, dirty_class,
+#   apparatus-deadman.sh --selftest  exercise the pure core (streak_next, deadman_verdict, fitness_token_verdict, dirty_class,
 #                                    respond_plan); no git/gh/net.
 #
 # ENV (all defaulted): DEADMAN_REPO (oso-gato/fedora-bootstrap) · DEADMAN_TITLE ("APPARATUS LIVENESS
@@ -97,6 +105,13 @@ DEADMAN_CLONE="${DEADMAN_CLONE:-$(dirname "$HERE")}"   # bin/ sits inside the li
 DEADMAN_REMOTE="${DEADMAN_REMOTE:-origin}"
 DEADMAN_BRANCH="${DEADMAN_BRANCH:-main}"
 DEADMAN_POLLER_LOG="${DEADMAN_POLLER_LOG:-$HOME/.local/state/pr-poller/poller.log}"
+# The FITNESS token ferry writes ~/.config/fitness/env and RE-MINTS every 40 min; if its mtime goes
+# STALE the entrypoint ferry has stalled (a dropped secret / a dead tick), so fitness-review can no
+# longer post as the DISTINCT fitness App and auto-merge refuses EVERY PR — the exact SILENT stall that
+# blocked the merge pipeline for a day (2026-07-21). 90 min = past two 40-min ticks, so a single missed
+# mint is not an alarm. ABSENT is NOT alarmed (a legitimate make-it-work box never provisioned it).
+DEADMAN_FITNESS_ENV="${DEADMAN_FITNESS_ENV:-$HOME/.config/fitness/env}"
+DEADMAN_FITNESS_STALE_MAX="${DEADMAN_FITNESS_STALE_MAX:-5400}"   # seconds the fitness token may age before STALE
 DEADMAN_STATE="${DEADMAN_STATE:-$HOME/.local/state/apparatus-deadman}"
 DEADMAN_GIT_TIMEOUT="${DEADMAN_GIT_TIMEOUT:-30}"
 DEADMAN_GH_TIMEOUT="${DEADMAN_GH_TIMEOUT:-30}"
@@ -154,6 +169,20 @@ deadman_verdict(){
     elif [ "$log_age" -ge 0 ] && [ "$log_age" -gt "$sweep_max" ]; then
       printf 'POLLER_FROZEN|poller alive but not sweeping (log frozen ~%s min, > %ss) — the sweep loop is wedged\n' "$(( log_age / 60 ))" "$sweep_max"
     fi
+  fi
+}
+
+# fitness_token_verdict <env_age_secs> <stale_max> -> a "FITNESS_TOKEN_STALE|reason" line, or nothing.
+# PURE (--selftest-covered). An INDEPENDENT axis (not git, not poller): the ferried fitness token's
+# freshness. age<0 = ABSENT ⇒ SILENT (a make-it-work box legitimately never provisioned it — never a
+# false alarm); age>max ⇒ STALE (the ferry ran then STOPPED re-minting — the merge-blocking silent stall
+# that no other check catches: the poller keeps sweeping, so POLLER_FROZEN never fires, yet nothing merges).
+fitness_token_verdict(){
+  local age="$1" max="$2"
+  case "$age" in ''|*[!0-9-]*) return 0;; esac          # unparseable ⇒ silent (fail-safe: no false alarm)
+  [ "$age" -lt 0 ] && return 0                           # ABSENT ⇒ not alarmed (never-provisioned is legitimate)
+  if [ "$age" -gt "$max" ]; then
+    printf 'FITNESS_TOKEN_STALE|fitness token stale: %s not re-minted in ~%s min (>%ss) — the entrypoint ferry has stalled, so fitness-review cannot post as the DISTINCT fitness App and auto-merge REFUSES every PR (the silent merge stall). Host fix: re-mount the gh_app_key_fitness secret + recreate the box.\n' "$DEADMAN_FITNESS_ENV" "$(( age / 60 ))" "$max"
   fi
 }
 
@@ -259,6 +288,14 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "combined: cannot-verify + poller-down" \
                              "$(tok -1 0 0  ''      0 10   1 3  1 3 300 3)" "CANNOT_VERIFY,POLLER_DOWN,"
 
+  echo "== fitness_token_verdict (fitness env age → FITNESS_TOKEN_STALE; the silent-stall axis) =="
+  ftok(){ fitness_token_verdict "$@" | cut -d'|' -f1 | tr '\n' ',' ; }
+  ck "fresh (age<max) → none"              "$(ftok 100 5400)"  ""
+  ck "stale (age>max) → FITNESS_TOKEN_STALE" "$(ftok 6000 5400)" "FITNESS_TOKEN_STALE,"
+  ck "exactly at bound → none"             "$(ftok 5400 5400)" ""
+  ck "ABSENT (age -1) → none (make-it-work box is legit)" "$(ftok -1 5400)" ""
+  ck "unparseable age → none (fail-safe, no false alarm)" "$(ftok xx 5400)" ""
+
   echo "== dirty_class (porcelain → classification; the load-bearing untracked-only guard) =="
   ck "clean → EMPTY"                    "$(dirty_class "")" EMPTY
   ck "only ?? → UNTRACKED_ONLY"         "$(dirty_class '?? a.txt
@@ -284,6 +321,7 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "FROZEN + NO target → SURFACE (never signal a stranger)" "$(respond_plan POLLER_FROZEN 0 - 0)" SURFACE
   ck "DOWN first sighting → WAIT (grace)"    "$(respond_plan POLLER_DOWN 0 - 0)" WAIT
   ck "DOWN still down → SURFACE"             "$(respond_plan POLLER_DOWN 1 - 0)" SURFACE
+  ck "FITNESS_TOKEN_STALE → SURFACE (no in-box fix)" "$(respond_plan FITNESS_TOKEN_STALE 0 - 0)" SURFACE
   ck "MERGED_NOT_LIVE → SURFACE (never pull)" "$(respond_plan MERGED_NOT_LIVE 0 - 1)" SURFACE
   ck "CANNOT_VERIFY → SURFACE"               "$(respond_plan CANNOT_VERIFY 0 - 1)" SURFACE
 
@@ -364,6 +402,16 @@ poller_log_age(){
   printf '%s' "$(( now - m ))"
 }
 
+# fitness_env_age -> seconds since $DEADMAN_FITNESS_ENV mtime, or -1 if ABSENT/unreadable (the ferry
+# never wrote it). Mirrors poller_log_age; the freshness fact for the fitness-token silent-stall check.
+fitness_env_age(){
+  local m now
+  m="$(stat -c %Y "$DEADMAN_FITNESS_ENV" 2>/dev/null)" || { printf -- '-1'; return; }
+  case "$m" in ''|*[!0-9]*) printf -- '-1'; return;; esac
+  now="$(date +%s)"
+  printf '%s' "$(( now - m ))"
+}
+
 # ── AUTONOMOUS RESPONDER (the recovery arm; only reached under --watch or DEADMAN_RESPOND=1) ───────────
 # Design law: respond_plan() (pure, above) DECIDES; these functions PERFORM. Every action is deterministic,
 # idempotent, and never destructive — quarantining an untracked stray touches neither HEAD, the index, nor
@@ -433,6 +481,7 @@ respond_act(){
         MERGED_NOT_LIVE)      printf '%s|auto-recovery not applicable — the clone is clean; only the poller self-refresh (the single writer) may pull it, and the responder must not. Surfacing as unexplained.' "$token" ;;
         POLLER_FROZEN)        printf '%s|auto-recovery could NOT identify a safe poller pid (self-match-safe detection found none) — surfacing rather than signalling a stranger.' "$token" ;;
         POLLER_DOWN)          printf '%s|auto-recovery DECLINED — the responder does not launch supervision and the grace window has elapsed with the poller still down. Surfacing for a human.' "$token" ;;
+        FITNESS_TOKEN_STALE)  printf '%s|auto-recovery not possible in-box — the fitness KEY never enters the box (only the token is ferried) and core cannot re-mint it. HOST fix: re-mount the gh_app_key_fitness podman secret + recreate fedora-dev; then re-run fitness-review --post on the parked host-GREEN PRs.' "$token" ;;
         *)                    printf '%s|auto-recovery not applicable; surfacing for a human.' "$token" ;;
       esac
       ;;
@@ -573,6 +622,10 @@ run_check(){
   reasons="$(deadman_verdict "$behind" "$lag_streak" "$lag_min" "$dirty" "$alive" "$lage" \
              "$unreadable_now" "$unread_streak" "$DEADMAN_EXPECT_POLLER" \
              "$DEADMAN_LAG_MAX" "$DEADMAN_SWEEP_MAX" "$DEADMAN_UNREADABLE_MAX")"
+  # The fitness-token freshness axis is INDEPENDENT of git-readability and the poller — evaluate + append
+  # it here so a stale token surfaces even during a git blip (empty git-axis) or a healthy sweep.
+  local freason; freason="$(fitness_token_verdict "$(fitness_env_age)" "$DEADMAN_FITNESS_STALE_MAX")"
+  [ -n "$freason" ] && reasons="${reasons:+$reasons$'\n'}$freason"
 
   if [ -z "$reasons" ]; then
     if [ "$unreadable_now" = 1 ]; then

@@ -28,10 +28,13 @@
 #           it didn't create (run-003 lesson b), so this deterministic verb is the sanctioned
 #           retirement path.
 #
-# SAFE BY DEFAULT — DISARMED: the GREEN→merge path calls auto-merge.sh in --dry-run (prints the
-# DECISION, merges nothing) UNLESS POLLER_ARMED=1. Arming (flipping to --commit) is the LAST step and a
-# Tier-A change gated on Arthur's click (#96) — disarmed, the MERGE boundary stays untouched. And
-# auto-merge.sh itself re-checks all three gates fail-closed, so a stale plan can never mis-merge.
+# ARMED BY DEFAULT (gate-free objective): the GREEN→merge path calls auto-merge.sh with --commit so the loop
+# merges autonomously (no human approves the shipment — 00-OBJECTIVES.md). POLLER_ARMED=0 is a deliberate
+# dry-run SOAK (prints the DECISION, merges nothing — the design-doc use). The #96 Tier-A "arm on Arthur's
+# click" is RETIRED (pre-ZERO-GATE). The MERGE boundary is NOT this flag: auto-merge.sh re-checks the two
+# DISTINCT App-identity gates fail-closed (host-GREEN + a distinct fitness-PASS) and HARD-REFUSES --commit
+# under same-identity fitness, so a stale plan can never mis-merge and a default-armed poller cannot merge
+# without the real independent fitness App.
 #
 # The poller has NO merge credential of its own: it OBSERVES, spawns a feature-branch fixer, retires
 # superseded PRs (a reversible close — see RETIRE above; the one non-merge write it performs even
@@ -55,8 +58,8 @@
 #   LG_HOST_LOGIN     host bot login whose verdict is trusted (default: oso-gato-erebus-claudebox[bot])
 #   FITNESS_LOGIN     fitness bot login (passed through to fitness-review.sh + auto-merge.sh)
 #   POLLER_ARMED      1 → GREEN+B/C+PASS actually merges (auto-merge --commit). Default 0 (dry-run).
-#   POLL_INTERVAL     seconds between --watch sweeps (default 10, matching the host watcher cadence).
-#                     Cost at 10s (fetch-BATCHED sweep): steady state ≈ 360×(2+N)/h — the open-PR
+#   POLL_INTERVAL     seconds between --watch sweeps (default 30 — a simple fixed cadence).
+#                     Cost at 30s (fetch-BATCHED sweep): steady state ≈ 120×(2+N)/h — the open-PR
 #                     list (TSV: number+ref+sha in ONE call), the retire merged-list, and ONE
 #                     sha-bound comments call per open PR. A PARKED GREEN PR (already acted:
 #                     PRESENT posted / dry-run decided / merge attempted) is terminal-state-skipped
@@ -198,7 +201,7 @@ plan(){
 
 # R18 IDLE-WITH-WORK-PENDING (audit 2026-07-18, CAT-42/01; the kd#23 six-hour silent stall). The poller's
 # process-liveness is watched (the apparatus-deadman: is it sweeping?) but its WORK progress is NOT: a
-# poller that NOOPs on `host=NONE` every 10s is "healthy" by construction while the workstream is dead.
+# poller that NOOPs on `host=NONE` every sweep is "healthy" by construction while the workstream is dead.
 # stall_verdict is the missing WORK-level clock: a live-validate-LABELLED open head that has sat at
 # host=NONE (no host verdict produced) past a bound is a STALL to SURFACE, not a NOOP to repeat forever.
 # The age is derived from GitHub truth (the head commit's committer date), never a local first-seen marker
@@ -281,6 +284,51 @@ review_due(){
   [ "$n" -ge "$max" ] && { printf 'PARKED'; return; }   # tries exhausted → the question is asked; never re-run
   [ "$n" -le 0 ] && { printf 'RUN'; return; }           # no failure on this head yet → run
   [ "$since" -ge "$backoff" ] && printf 'RUN' || printf 'WAIT'
+}
+
+# infra_healthy <rc> <probe-output> → 0 (UP) iff the probe GENUINELY SUCCEEDED: exit 0 AND the reply
+# carries the requested token. NON-EMPTY OUTPUT IS NOT ENOUGH — a real `claude -p` AUTH failure (the
+# common fitness-credential / login-expiry outage) prints "Not logged in · Please run /login" to STDOUT
+# and exits 1; a bare non-empty check would misread THAT global outage as UP and re-open the parking
+# incident this gate exists to prevent. So the probe is trusted only when it exits 0 AND actually followed
+# the trivial instruction (echoed the token). PURE + selftested.
+infra_healthy(){
+  [ "$1" = 0 ] || return 1
+  printf '%s' "$2" | grep -qi "${FITNESS_INFRA_TOKEN:-OK}"   # :-default: --selftest runs before the env block
+}
+# review_infra_ok — is the reviewer infrastructure (`claude -p`) working RIGHT NOW? A CHEAP liveness probe,
+# run AT MOST ONCE per sweep (cached in $REVIEW_INFRA) and only ON A REVIEW FAILURE (a success needs no
+# probe — it IS the health signal), so a healthy sweep pays nothing. 0 = up (⇒ a per-head failure), 1 =
+# down (⇒ a GLOBAL outage — pause the arm). FAIL DIRECTION: the probe mirrors the real review's own
+# `claude -p`, so a probe that does not return a valid reply IS the "it does not work" signal; disabled
+# (FITNESS_INFRA_CHECK=0) ⇒ always "up" (the pre-2026-07-20 behaviour). Overridable ($FITNESS_INFRA_PROBE).
+review_infra_ok(){
+  case "$REVIEW_INFRA" in up) return 0;; down) return 1;; esac
+  [ "$FITNESS_INFRA_CHECK" = 1 ] || { REVIEW_INFRA=up; return 0; }
+  local out rc
+  out="$(printf '%s' "$FITNESS_INFRA_PROMPT" | timeout "$FITNESS_INFRA_TIMEOUT" $FITNESS_INFRA_PROBE 2>/dev/null)"; rc=$?
+  if infra_healthy "$rc" "$out"; then REVIEW_INFRA=up; return 0; fi
+  REVIEW_INFRA=down
+  log "REVIEW INFRA DOWN: the cheap \`claude -p\` liveness probe did not return a valid reply (rc=$rc) — the reviewer infrastructure is unavailable (an API outage, or an expired credential). PAUSING all fitness reviews this sweep (NO per-head strikes, NO questions); they resume automatically the moment it recovers."
+  return 1
+}
+# infra_recovered — a review SUCCEEDED (or a probe passed): the reviewer infra is up. Clear any
+# down-streak so a later real outage starts its "persistent?" clock fresh (no sticky state).
+infra_recovered(){ rm -f "$STATE/review-infra-down.since" "$STATE/review-infra-down.asked" 2>/dev/null; }
+# infra_down_note — record/observe the GLOBAL-outage down-streak and, ONLY once it PERSISTS past
+# FITNESS_INFRA_PAUSE_SURFACE seconds, surface exactly ONE question (marker-gated) so a never-recovering
+# break is never a SILENT stall. The arm keeps auto-resuming regardless — no human action is required.
+infra_down_note(){ # <pr> <sha>
+  local f="$STATE/review-infra-down.since" now since
+  now="$(date +%s)"; since="$now"                          # ALWAYS set (an unwritable $STATE must not set -u abort)
+  [ -f "$f" ] || printf '%s\n' "$now" > "$f"
+  read -r since < "$f" 2>/dev/null || since="$now"; case "$since" in ''|*[!0-9]*) since="$now";; esac
+  if [ $(( now - since )) -ge "$FITNESS_INFRA_PAUSE_SURFACE" ] && [ ! -f "$STATE/review-infra-down.asked" ]; then
+    # Mark "asked" ONLY if the post SUCCEEDED (surface returns non-zero on a failed gh post) — else a
+    # throttled comment during a broad outage would permanently swallow the escalation (retry next sweep).
+    surface "$1" "$2" "review-infra-down" "the independent fitness reviewer's infrastructure (\`claude -p\`) has been unavailable for ~$(( (now-since)/60 )) min, so ALL fitness reviews are PAUSED (fail-closed: no verdict ⇒ no merge). The poller keeps probing cheaply and SELF-HEALS the instant \`claude -p\` recovers — no action is required unless it stays down, in which case investigate the reviewer model availability / credential." \
+      && : > "$STATE/review-infra-down.asked"
+  fi
 }
 
 # refresh_decision <clean:0|1> <running-sha> <origin-sha> <origin-is-descendant-of-running:0|1>
@@ -452,6 +500,16 @@ if [ "${1:-}" = "--selftest" ]; then
   rd "exhausted → parked"           3 99999 3 300 PARKED
   rd "parked stays parked"          9 99999 3 300 PARKED
   rd "tries=1 parks after one"      1 99999 1 0   PARKED
+  # REVIEW-INFRA health classifier (2026-07-20) — NON-EMPTY OUTPUT IS NOT ENOUGH: a claude -p auth failure
+  # prints its error to STDOUT and exits 1, and must classify DOWN (else the global outage re-opens the
+  # parking incident). Trusted only on exit 0 AND the reply token.
+  ih(){ local got=up; infra_healthy "$2" "$3" || got=down; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — infra_healthy($2,<$3>)=$got want $4"; fail=1; }; }
+  ih "rc0 + OK token → up"                  0 "OK"                                up
+  ih "rc0 + OK mid-sentence → up"           0 "Sure — OK."                        up
+  ih "auth error (rc1 + stdout msg) → down" 1 "Not logged in · Please run /login" down
+  ih "rc0 but empty → down"                 0 ""                                  down
+  ih "rc0 but no token (garbage) → down"    0 "unexpected model output"           down
+  ih "timeout/killed (rc124, empty) → down" 124 ""                                down
   # #162 — the self-refresh decision. Only a CLEAN, strictly-fast-forward clone reloads; every other
   # verdict leaves the poller running unchanged (fail-safe toward progress). Removing the reload path
   # (restoring the no-refresh behaviour) makes the RELOAD row fail. The <run> input is the LAUNCH head
@@ -552,8 +610,8 @@ LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
 # still wins. EXPORTED so fitness-review.sh + auto-merge.sh (which BOTH need the non-empty login) see it.
 export FITNESS_SAME_IDENTITY="${FITNESS_SAME_IDENTITY:-1}"
 FITNESS_LOGIN="$(fitness_login_default "$FITNESS_SAME_IDENTITY" "${FITNESS_LOGIN:-}")"; export FITNESS_LOGIN
-POLLER_ARMED="${POLLER_ARMED:-0}"
-POLL_INTERVAL="${POLL_INTERVAL:-10}"
+POLLER_ARMED="${POLLER_ARMED:-1}"   # ARMED BY DEFAULT (gate-free objective; #96 explicit-arm retired) — the merge-trust boundary is the distinct-App gates + auto-merge's fail-closed re-check, not this flag; POLLER_ARMED=0 is a deliberate dry-run soak
+POLL_INTERVAL="${POLL_INTERVAL:-30}"   # fixed sweep cadence (a gentler 30s; no adaptive machinery)
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
 FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
@@ -568,10 +626,29 @@ POLLER_HALTED=0
 FITNESS_REVIEW="${FITNESS_REVIEW:-$HERE/fitness-review.sh}"
 # THE BOUNDED RETRY BEHIND rc 3 (#156 — see review_due). A no-verdict review is retried at most
 # FITNESS_REVIEW_TRIES times per head, spaced by FITNESS_RETRY_BACKOFF seconds; only a failure that
-# SURVIVES them becomes a question. Defaults: 3 attempts over ≥10 min — long enough to ride out a model
-# API 5xx / rate-limit window, short enough that a genuinely broken reviewer reaches a human promptly.
+# SURVIVES them becomes a question. This is now the PER-HEAD path — CORRECT only because a GLOBAL reviewer
+# outage is caught first by the infra health gate below (2026-07-20). A per-head rc-3 (infra confirmed UP)
+# is a genuinely-broken PR, so bounded-retry-then-surface is right; a new commit or a fix recovers it.
 FITNESS_REVIEW_TRIES="${FITNESS_REVIEW_TRIES:-3}"
 FITNESS_RETRY_BACKOFF="${FITNESS_RETRY_BACKOFF:-300}"
+# ── REVIEW-INFRA HEALTH GATE (2026-07-20): the MISSING GLOBAL SIGNAL. ────────────────────────────────
+# rc 3 alone cannot say whether the whole reviewer infra (`claude -p`) is DOWN (a global outage — out for
+# EVERY PR) or THIS one head is broken. Without the distinction, a >15-min claude -p outage on 2026-07-20
+# was absorbed as N per-head failures and PARKED EVERY PR permanently (the incident). The gate adds the
+# distinction the cheapest way: when a review FAILS (rc 3), a tiny `claude -p` liveness PROBE disambiguates
+# — DOWN ⇒ this is global, so DON'T strike the head; PAUSE the arm for the sweep (no strikes, no questions)
+# and skip the remaining reviews; it SELF-HEALS the next sweep once the probe passes (the fleet-halt PAUSE
+# pattern). UP ⇒ genuinely per-head ⇒ the bounded retry above. Probe-ON-FAILURE, so a sweep whose reviews
+# all SUCCEED pays NOTHING (a success IS the health signal). Disable with FITNESS_INFRA_CHECK=0 (⇒ the old
+# behaviour). A persistent outage past FITNESS_INFRA_PAUSE_SURFACE seconds surfaces ONE question (so a
+# never-recovering break is never a SILENT stall) — but the arm keeps auto-resuming, no human required.
+FITNESS_INFRA_CHECK="${FITNESS_INFRA_CHECK:-1}"
+FITNESS_INFRA_PROBE="${FITNESS_INFRA_PROBE:-claude -p}"
+FITNESS_INFRA_TIMEOUT="${FITNESS_INFRA_TIMEOUT:-45}"
+FITNESS_INFRA_PROMPT="${FITNESS_INFRA_PROMPT:-Reply with the single word: OK}"
+FITNESS_INFRA_TOKEN="${FITNESS_INFRA_TOKEN:-OK}"   # the probe reply must carry this to count as healthy (rc 0 alone is not enough)
+FITNESS_INFRA_PAUSE_SURFACE="${FITNESS_INFRA_PAUSE_SURFACE:-3600}"
+REVIEW_INFRA=""   # per-SWEEP cache (reset at the top of sweep()): ''=unknown, up, down
 # ── SELF-REFRESH (#162): the running poller deploys its OWN merged code, no human pull + bounce ──────
 # At a SAFE POINT (the top of a sweep cycle — no fixer/review/merge in flight; they ALL run synchronously
 # INSIDE sweep()), the poller fetches and, if origin/<branch> has fast-forwarded past the code it runs on
@@ -630,7 +707,7 @@ RECONCILE_TICKS=0
 # =1 — the test/catch-up seam, since each --once is a fresh process whose counter starts at 0).
 DEV_LOOP_SERVICE="${DEV_LOOP_SERVICE:-$HERE/dev-loop-service.sh}"
 DEV_LOOP_SERVICE_LOG="${DEV_LOOP_SERVICE_LOG:-$HOME/.local/state/dev-loop/service.log}"
-DEV_LOOP_LAUNCH_EVERY="${DEV_LOOP_LAUNCH_EVERY:-6}"   # ~1 min at the 10s cadence — arm authoring promptly after a self-refresh
+DEV_LOOP_LAUNCH_EVERY="${DEV_LOOP_LAUNCH_EVERY:-6}"   # ~3 min at the 30s cadence — arm authoring promptly after a self-refresh
 DEV_LOOP_LAUNCH_TICKS=0
 # ── REBUILD-REQUEST (R17 approval flow, 2026-07-19) — flag-fired ONE-SHOT filing of the rebuild-devbox
 # APPROVAL ticket. Anything in-box may request a purposeful rebuild by touching the FLAG file (a LOCAL
@@ -1146,6 +1223,7 @@ rebuild_request_tick(){
 # maintainer removing the label resumes action on the very next sweep — no restart, no re-arm.
 sweep(){
   local _r _hmsg
+  REVIEW_INFRA=""   # reviewer-infra health is a per-SWEEP fact (global across all repos) — re-probed lazily on the first review failure this sweep
   if _hmsg="$("$FLEET_HALT" 2>>"$LOG")"; then
     POLLER_HALTED=0
   else
@@ -1307,6 +1385,13 @@ sweep_repo(){
         ;;
       REVIEW)
         [ -f "$done" ] && continue
+        # GLOBAL REVIEW-INFRA GATE (2026-07-20): once this sweep has found the reviewer infra DOWN (a
+        # global `claude -p` outage), skip WITHOUT running the expensive, doomed review — no strike, no
+        # question. It self-heals next sweep the moment the probe passes (see review_infra_ok).
+        if [ "$REVIEW_INFRA" = down ]; then
+          log "#$pr fitness review SKIPPED @ ${sha:0:7} — reviewer infra is down this sweep (paused; auto-resumes when \`claude -p\` recovers)"
+          continue
+        fi
         # BOUNDED RETRY, THEN A QUESTION (#156). rc 3 says "no verdict for this head" and CANNOT say
         # whether the cause is permanent or transient (see review_due), so we do neither of the two
         # wrong things: we do not re-spin every sweep, and we do not park a host-GREEN PR forever on one
@@ -1337,18 +1422,26 @@ sweep_repo(){
         ferr="$(FITNESS_LOGIN="$FITNESS_LOGIN" LG_HOST_LOGIN="$LG_HOST_LOGIN" \
                 "$FITNESS_REVIEW" --post "$POLLER_REPO" "$pr" 2>&1 >>"$LOG")"; frc=$?
         case "$frc" in
-          0) rm -f "$nf" "$ef"; log "#$pr fitness posted — next sweep routes on it" ;;
+          0) rm -f "$nf" "$ef"; infra_recovered; log "#$pr fitness posted — next sweep routes on it" ;;
           3)
-            # NEVER SPIN SILENTLY (#155 R4 — the silent-spin class of #150), and NEVER STRAND ON ONE BLIP
-            # (#156). Count this failure, keep its REAL cause, and let review_due decide: retry after the
-            # backoff while tries remain; ask the human — once, with the cause — when they run out.
+            # DISAMBIGUATE GLOBAL vs PER-HEAD (2026-07-20). rc 3 = "no verdict for this head". A CHEAP probe
+            # tells which: infra DOWN ⇒ this is a GLOBAL outage — do NOT strike this head, PAUSE the arm
+            # (the rest of this sweep's reviews skip; it self-heals next sweep), surface only if it
+            # persists; infra UP ⇒ genuinely PER-HEAD ⇒ the bounded retry + surface (#156), now correct.
+            if ! review_infra_ok; then
+              infra_down_note "$pr" "$sha"     # global: track the down-streak, surface ONCE only if persistent
+              continue                          # NO strike — the head re-reviews once claude -p is back
+            fi
+            infra_recovered                     # the probe passed ⇒ infra is up; clear any down-streak
+            # PER-HEAD: infra is up but THIS review failed. NEVER SPIN SILENTLY (#155 R4), NEVER STRAND ON
+            # ONE BLIP (#156): count it, keep the cause, retry while tries remain, ask ONCE when they run out.
             n=$((n+1)); printf '%s %s\n' "$n" "$now" > "$nf"; printf '%s' "$ferr" > "$ef"
             printf '%s\n' "$ferr" >> "$LOG"
             if [ "$n" -ge "$FITNESS_REVIEW_TRIES" ]; then
-              log "#$pr fitness reviewer COULD NOT PRODUCE A VERDICT @ ${sha:0:7} (rc=3, attempt $n/$FITNESS_REVIEW_TRIES — EXHAUSTED) — surfacing the real cause; no further attempts on this head"
+              log "#$pr fitness reviewer COULD NOT PRODUCE A VERDICT @ ${sha:0:7} (rc=3, attempt $n/$FITNESS_REVIEW_TRIES — EXHAUSTED; infra UP ⇒ per-head) — surfacing the real cause; a new commit or a fix recovers it"
               review_question "$pr" "$sha" "$n" "$ferr"
             else
-              log "#$pr fitness reviewer produced no verdict @ ${sha:0:7} (rc=3, attempt $n/$FITNESS_REVIEW_TRIES) — retrying in ≥${FITNESS_RETRY_BACKOFF}s (a transient model/API failure self-heals; only a PERSISTENT one is a question for a human)"
+              log "#$pr fitness reviewer produced no verdict @ ${sha:0:7} (rc=3, attempt $n/$FITNESS_REVIEW_TRIES; infra UP ⇒ per-head) — retrying in ≥${FITNESS_RETRY_BACKOFF}s"
             fi ;;
           *)
             # RETRYABLE — but NOT SILENT. Capturing the harness's stderr and then DROPPING it makes the

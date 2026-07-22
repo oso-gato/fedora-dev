@@ -225,10 +225,23 @@ podman exec claudebox chmod 644 \
 
 echo "==== post-assemble: verify the stamp is loadable by the session user (#175) ===="
 # 'Stamped' means READABLE AND CURRENT as the uid that loads it — not 'a file exists'.
-# Read the law back AS core and compare it byte-for-byte against what was just
-# assembled; any failure (permission denied, truncation, stale content) aborts BEFORE
-# the .assembled marker, and the EXIT trap surfaces it as .assemble-failed (#11).
-if ! podman exec --user core claudebox cat /etc/claude-code/CLAUDE.md | cmp -s - "$_law"; then
+# Read the law back AS core and compare it against what was just assembled; a
+# permission-denied read (a 0600 stamp), truncation or stale content each abort BEFORE the
+# .assembled marker, and the EXIT trap surfaces it as .assemble-failed (#11).
+# Compare by SHA-256, NOT cmp/diff: this script runs at the fedora-dev BASE level, where
+# diffutils is NOT installed (only the claudebox ships it) — a base-level `cmp` is
+# "command not found", so the verify FATALs and EVERY rebuild froze the box .assemble-failed
+# AND tore down live sessions (observed live 2026-07-21; #175 shipped the cmp). sha256sum is
+# coreutils (present at base like the cat/mktemp already used here); the hash is sliced with a
+# shell expansion (no awk/cut — same base-availability trap). The read+compare rides an `if`
+# CONDITION, where `set -e` is suppressed: an unreadable-as-core stamp makes the piped read
+# empty (its hash never matches $_want) and flows to THIS FATAL — a bare command-substitution
+# assignment would instead errexit on the failed read, skipping both this message and the
+# temp-law reap (caught by assemble-stamp.test.sh's DROP-CHMOD row). A missing base sha256sum
+# leaves $_want empty ⇒ FATAL. Either way the verify fails closed, never silently.
+_want="$(sha256sum "$_law")"; _want="${_want%% *}"
+if [ -z "$_want" ] || ! podman exec --user core claudebox cat /etc/claude-code/CLAUDE.md 2>/dev/null \
+     | sha256sum | grep -q "^${_want} "; then
     echo "FATAL: /etc/claude-code/CLAUDE.md is unreadable as core or does not match" \
          "the assembled law — the stamp would be INERT (#175)." >&2
     rm -f "$_law"
