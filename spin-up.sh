@@ -111,13 +111,52 @@ if [ -z "${GH_APP_ID:-}" ] && [ "$(ask "Provision the DEV BOX ('$BOX_HOSTNAME') 
     || echo "spin-up: warning — could not persist ids to $GH_APP_DEV_ENV (a later re-run will re-prompt)" >&2
 fi
 
+# --- optional FITNESS-REVIEW App credential (the fleet-wide INDEPENDENT reviewer identity) ---
+# The DISTINCT THIRD identity the merge-TRUST boundary requires: auto-merge.sh REFUSES a
+# same-identity fitness verdict (a self-review is forgeable), so WITHOUT this the autonomous loop
+# REVIEWS but never MERGES (the entrypoint ferry no-ops on an unset GH_APP_FITNESS_ID, and
+# fitness-review fails closed). Fleet-CONSTANT App — the public ids default below, so the operator
+# pastes ONLY the PEM. Honors env-supplied ids/secret (scripted). Reuse if already provisioned
+# (mirrors the dev-App guard) so a setup.sh re-run never re-pastes. Provisioning it also arms
+# FITNESS_SAME_IDENTITY=0 (strict separation-of-duties) so the loop actually auto-merges — declined,
+# the whole fitness env is cleared (make-it-work: review, do NOT merge — the safe no-op).
+GH_APP_FITNESS_ID="${GH_APP_FITNESS_ID:-4241099}"                             # fleet constant (public)
+GH_APP_FITNESS_INSTALLATION_ID="${GH_APP_FITNESS_INSTALLATION_ID:-145067591}" # fleet constant (public)
+GH_APP_FITNESS_SECRET="${GH_APP_FITNESS_SECRET:-}"
+FITNESS_SAME_IDENTITY="${FITNESS_SAME_IDENTITY:-}"
+echo "── FITNESS-review App credential for '$BOX_HOSTNAME' (the INDEPENDENT reviewer) ─────" >&2
+echo "   The DISTINCT third identity (oso-gato-fitness-claudebox). WITHOUT it the loop REVIEWS but" >&2
+echo "   auto-merge REFUSES every PR (a self-review is forgeable). Fleet App — paste ONLY the PEM." >&2
+if [ -z "${GH_APP_FITNESS_SECRET:-}" ] && command -v podman >/dev/null 2>&1 \
+   && podman secret exists gh_app_key_fitness 2>/dev/null; then
+  GH_APP_FITNESS_SECRET=gh_app_key_fitness
+  echo "  -> FITNESS App credential already provisioned (podman secret 'gh_app_key_fitness'); reusing — NOT re-pasting." >&2
+fi
+# The tty guard sits BEFORE the ask: fitness is OPTIONAL (unlike the required dev App), so a scripted
+# NO-TTY path that did not env-supply a secret must gracefully SKIP (→ make-it-work), never FATAL — and
+# `ask` on an unreadable tty LOUDLY takes the default 'y', so gating the ask on the tty is what stops a
+# headless run from entering provisioning it cannot complete. An interactive 'n' declines cleanly.
+if [ -z "${GH_APP_FITNESS_SECRET:-}" ] && { : <"$SPINUP_TTY"; } 2>/dev/null \
+   && [ "$(ask "Provision the FITNESS reviewer App credential now (paste the key)? — DEFAULT y: autonomous MERGE needs it; \"n\" = the loop reviews but will NOT auto-merge (y/n)" y)" = y ]; then
+  read_pem_to_secret gh_app_key_fitness || { echo "spin-up: FITNESS App provisioning failed" >&2; exit 1; }
+  GH_APP_FITNESS_SECRET=gh_app_key_fitness
+fi
+# Strict separation-of-duties auto-arms ONLY when the distinct reviewer is actually wired; else clear
+# the fitness env entirely so run.sh carries nothing fitness-related (a clean make-it-work no-op). An
+# explicit FITNESS_SAME_IDENTITY=1 (a deliberate dry-run soak) is honored even with the App wired.
+if [ -n "${GH_APP_FITNESS_SECRET:-}" ]; then
+  FITNESS_SAME_IDENTITY="${FITNESS_SAME_IDENTITY:-0}"
+else
+  GH_APP_FITNESS_ID=""; GH_APP_FITNESS_INSTALLATION_ID=""; FITNESS_SAME_IDENTITY=""
+fi
+
 # COLLECT-ONLY: a host orchestrator (day0.sh) drives this wizard to gather fedora-dev's OWN
 # answers + create its podman secret (as the invoking rootless user) WITHOUT launching — so
 # day0 never duplicates fedora-dev's questions. Emit the resolved env as `export` lines for
 # the caller to capture (eval), then stop.
 if [ "${COLLECT_ONLY:-0}" = 1 ]; then
-  printf 'export TS_AUTHKEY=%q IMAGE=%q BOX_HOSTNAME=%q GH_APP_ID=%q GH_APP_INSTALLATION_ID=%q GH_APP_SECRET=%q\n' \
-    "${TS_AUTHKEY:-}" "$IMAGE" "$BOX_HOSTNAME" "${GH_APP_ID:-}" "${GH_APP_INSTALLATION_ID:-}" "${GH_APP_SECRET:-}"
+  printf 'export TS_AUTHKEY=%q IMAGE=%q BOX_HOSTNAME=%q GH_APP_ID=%q GH_APP_INSTALLATION_ID=%q GH_APP_SECRET=%q GH_APP_FITNESS_ID=%q GH_APP_FITNESS_INSTALLATION_ID=%q GH_APP_FITNESS_SECRET=%q FITNESS_SAME_IDENTITY=%q\n' \
+    "${TS_AUTHKEY:-}" "$IMAGE" "$BOX_HOSTNAME" "${GH_APP_ID:-}" "${GH_APP_INSTALLATION_ID:-}" "${GH_APP_SECRET:-}" "${GH_APP_FITNESS_ID:-}" "${GH_APP_FITNESS_INSTALLATION_ID:-}" "${GH_APP_FITNESS_SECRET:-}" "${FITNESS_SAME_IDENTITY:-}"
   echo "spin-up: collect-only — answers gathered, secret '${GH_APP_SECRET:-<none>}' ready; NOT launching." >&2
   exit 0
 fi
@@ -131,4 +170,5 @@ fi
 [ "$(ask 'Spin up fedora-dev now? (y/n)' y)" = y ] || { echo "aborted (nothing launched)" >&2; exit 0; }
 
 export TS_AUTHKEY IMAGE BOX_HOSTNAME GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_SECRET
+export GH_APP_FITNESS_ID GH_APP_FITNESS_INSTALLATION_ID GH_APP_FITNESS_SECRET FITNESS_SAME_IDENTITY
 exec ./run.sh

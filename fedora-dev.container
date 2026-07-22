@@ -86,10 +86,16 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # (oso-gato-fitness-claudebox; DISTINCT from the dev App — auto-merge.sh rejects self-authored
 # verdicts). Key as a podman secret; the entrypoint mints a <=1h token and ferries ONLY
 # the token to the home volume (the key never enters the claudebox). The IDs below are
-# the fleet constants (public, not secrets); uncomment the two lines to enable:
+# the fleet constants (public, not secrets); uncomment the THREE lines to enable (setup-user.sh
+# uncomments them automatically when a fitness PEM is provisioned at commission):
 #   podman secret create gh_app_key_fitness ./fitness-app-private-key.pem
 # Secret=gh_app_key_fitness,type=mount,target=gh_app_key_fitness
 # Environment=GH_APP_FITNESS_ID=4241099 GH_APP_FITNESS_INSTALLATION_ID=145067591
+# FITNESS_SAME_IDENTITY=0 selects STRICT separation-of-duties — the poller auto-MERGES on a distinct
+# fitness-App PASS (auto-merge.sh refuses a same-identity verdict). Uncomment ONLY WITH the secret above
+# (strict + no fitness credential = fail-closed: reviews but merges nothing). Absent ⇒ the poller defaults
+# to 1 (make-it-work: review, do not merge) — the safe state for a deploy without the fitness App.
+# Environment=FITNESS_SAME_IDENTITY=0
 
 # DEV-SIDE PR POLLER (Step 5 / #93) as a headless in-box service — FULLY SELF-ARMING BY DEFAULT (entrypoint
 # `${POLLER_ENABLED:-1}` + `${POLLER_ARMED:-1}`, G7): it sweeps/reviews/routes AND MERGES open PRs
@@ -114,8 +120,10 @@ Environment=POLLER_ARMED=1
 # host live-gate + the INDEPENDENT fitness review before the poller can merge it, and stoppable via the R9
 # fleet HALT (no redeploy needed). The entrypoint defaults the gate ON precisely because a host-set flag is
 # a deploy-CONFIG the self-refresh cannot set — a default-off flag would need a MANUAL host arm, breaking
-# self-arming. To DISABLE, UNCOMMENT the line below (Environment=DEV_LOOP_ENABLED=0). See bin/dev-loop-service.sh.
-# Environment=DEV_LOOP_ENABLED=0
+# self-arming. PINNED ON in the spec (below) — belt-and-suspenders with the entrypoint code default
+# (`${DEV_LOOP_ENABLED:-1}`), so a future code-default flip can't silently disarm the authoring loop with
+# nothing in the spec to anchor it (parity with the POLLER pins above). To DISABLE, set it to 0 here.
+Environment=DEV_LOOP_ENABLED=1
 
 # R17 RESUME-BY-ID default ON (self-sustaining multi-tenancy): bin/rebuild-request.sh emits the v2
 # 4-field manifest so every session — incl. N tenants sharing a cwd — restores BY SESSION-ID, not by
