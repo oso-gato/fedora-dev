@@ -57,6 +57,7 @@ podman run -d --name fedora-dev \
     -e POLLER_ARMED="${POLLER_ARMED:-}" \
     -e DEV_LOOP_ENABLED="${DEV_LOOP_ENABLED:-}" \
     -e DEVBOX_MANIFEST_V2="${DEVBOX_MANIFEST_V2:-1}" \
+    -e FITNESS_SAME_IDENTITY="${FITNESS_SAME_IDENTITY:-}" \
     "${gh_args[@]}" \
     -v fedora-dev-home:/home/core \
     -v fedora-dev-state:/var/lib/tailscale \

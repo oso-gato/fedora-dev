@@ -86,10 +86,16 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # (oso-gato-fitness-claudebox; DISTINCT from the dev App — auto-merge.sh rejects self-authored
 # verdicts). Key as a podman secret; the entrypoint mints a <=1h token and ferries ONLY
 # the token to the home volume (the key never enters the claudebox). The IDs below are
-# the fleet constants (public, not secrets); uncomment the two lines to enable:
+# the fleet constants (public, not secrets); uncomment the THREE lines to enable (setup-user.sh
+# uncomments them automatically when a fitness PEM is provisioned at commission):
 #   podman secret create gh_app_key_fitness ./fitness-app-private-key.pem
 # Secret=gh_app_key_fitness,type=mount,target=gh_app_key_fitness
 # Environment=GH_APP_FITNESS_ID=4241099 GH_APP_FITNESS_INSTALLATION_ID=145067591
+# FITNESS_SAME_IDENTITY=0 selects STRICT separation-of-duties — the poller auto-MERGES on a distinct
+# fitness-App PASS (auto-merge.sh refuses a same-identity verdict). Uncomment ONLY WITH the secret above
+# (strict + no fitness credential = fail-closed: reviews but merges nothing). Absent ⇒ the poller defaults
+# to 1 (make-it-work: review, do not merge) — the safe state for a deploy without the fitness App.
+# Environment=FITNESS_SAME_IDENTITY=0
 
 # DEV-SIDE PR POLLER (Step 5 / #93) as a headless in-box service — FULLY SELF-ARMING BY DEFAULT (entrypoint
 # `${POLLER_ENABLED:-1}` + `${POLLER_ARMED:-1}`, G7): it sweeps/reviews/routes AND MERGES open PRs
