@@ -16,10 +16,13 @@
    When the approach is wrong, SUPERSEDE it (pivot); do not patch a dead end to save sunk work.
 5. **NO RABBIT-HOLES — see the forest, not the tree.** A locally-correct sub-task that does not advance
    the whole objective is a failure, not progress. Catch yourself drifting and return to the objective.
-6. **ITERATE UNTIL DONE OR GENUINELY BLOCKED.** Loop — develop → validate → pivot → rebuild — with NO
-   fixed cap, until the objective is materially met (then present) OR you hit a decision only Arthur can
-   make (then surface it as a question). Nothing between those two stops the loop. If you stop making
-   progress, that is a BLOCK to surface — not a reason to quietly quit.
+6. **ITERATE UNTIL SHIPPED OR GENUINELY BLOCKED.** Loop — develop → validate → pivot → rebuild — with NO
+   fixed cap, until the objective SHIPS (proven live: every feature, the assembled product — NOT your sense
+   that your own tier is finished) OR you hit a genuine decision only Arthur can make (then surface it).
+   Host-GATED work is DEV-OWNED — you DRIVE the round-trip (push + label `live-validate`, read the verdict,
+   iterate); handing it to "another box's tier" is a FALSE stop, not a block. "My-tier-done" is mid-loop,
+   never done. Nothing between SHIPPED and a genuine block stops the loop; "stopped making progress" is
+   itself a BLOCK to surface — not a reason to quietly quit.
 <!--/DOCTRINE-->
 
 ## THE FLEET — roles · merge authority · merge gate
@@ -98,15 +101,19 @@ MOST of the work and thinking; the human is engaged only at the two points in EN
   and shipping a `.live-gate`. (Loop mechanics — refspec gate, org-wide discovery, `.live-gate` contract:
   THE FLEET above + FLEET.md.)
 
-**TWO-TIER VALIDATION** — validate at the tier that fits; NOT the host on every iteration:
-- **TIER 1 — IN-BOX (DEFAULT):** the dev box's `podman build` IS the throwaway; develop/validate/iterate
-  in its own nested engine for EVERYTHING it can build+validate. NO host. Most of the loop runs here.
-- **TIER 2 — HOST (ONLY these two, engaged via `live-validate`):**
-  1. The dev box CANNOT build/validate the throwaway (e.g. the systemd-PID-1 GRD lineage cannot boot in
-     the nested engine; anything the nested engine cannot fully build+run). The host does it.
-  2. FINAL pre-production shipment — after all in-box iteration, ticket the host to build a throwaway,
-     prove it works LIVE on a real host, tear it down → THEN present merge-to-main.
-  - In-box iteration does NOT touch the host.
+**TWO-TIER VALIDATION** — BOTH tiers are DEV-OWNED; they differ only in WHERE the build runs, never in WHO
+drives it. Validate at the tier that fits; NOT the host on every iteration:
+- **TIER 1 — DEV-OWNED, DEV-EXECUTED (in-box, DEFAULT):** the dev box's `podman build` IS the throwaway;
+  develop/validate/iterate in its own nested engine for EVERYTHING it can build+validate. NO host. Most of
+  the loop runs here.
+- **TIER 2 — DEV-OWNED, HOST-EXECUTED (the `live-validate` round-trip):** the dev DRIVES; the host EXECUTES
+  a disposable candidate and posts a GREEN/RED verdict; YOU read it and iterate RED→fix→re-push UNTIL GREEN.
+  This is DEV work whose SUBJECT is a host artifact — **"host-executed" NEVER means "host-owned."** Engaged
+  by labelling `live-validate` in exactly two cases: (1) the box CANNOT build/validate the throwaway itself
+  (e.g. a systemd-PID-1 lineage that cannot boot in the nested engine; a host-gate SPIKE); (2) FINAL
+  pre-production shipment — prove it LIVE on a real host, tear it down. Reaching the edge of what the box can
+  build ITSELF is NOT done — it is where you OWE the host a `live-validate` ticket and OWE yourself the
+  iteration to GREEN. The host is the EXECUTOR of your ticket, never the OWNER of the work.
 
 **THROWAWAY & CHURN (BINDING; full mechanics = this repo's `CLAUDE.md` Principle 10):** disposable
 throwaway tree (NEVER mutates the immutable live tree); persistent dnf package cache (a bind dir, NOT a
@@ -126,8 +133,8 @@ for the monthly clean rebuild).
 ## UNATTENDED-LOOP EXECUTION — the DEFAULT for EVERY task (BINDING)
 
 EVERY dev task runs as an UNATTENDED autonomous loop. The agent MUST NOT gate the task on a live human
-mid-flight — it engages the human ONLY for the two reasons below (materially complete / materially
-blocked). A permission prompt during an unattended window HALTS the whole window (one prompt = a dead
+mid-flight — it engages the human ONLY for the two reasons below (the objective SHIPPED / a genuine earned
+BLOCK). A permission prompt during an unattended window HALTS the whole window (one prompt = a dead
 8-hour run), so it is a FAILURE, not a pause. Two mechanisms make the loop stall-proof:
 
 - STALL-PROOF COMMAND DISCIPLINE. The box runs `defaultMode: auto`: the classifier SILENTLY allows plain
@@ -150,18 +157,26 @@ poller IS it. State between iterations lives entirely in the PR / verdict-commen
 
 ## ENGAGE THE HUMAN — exactly two reasons (NO others)
 
-1. MATERIALLY COMPLETE — the objective is met; needs the clickable APPROVE to merge.
-2. MATERIALLY BLOCKED — genuinely cannot proceed; needs a DECISION (NOT a merge; a true roadblock).
+1. OBJECTIVE SHIPPED — the WHOLE objective is proven shipped LIVE (every feature issue closed with proof
+   links AND the assembled product verified live/deployed — the R30 whole-objective ship FACT, not your
+   sense of completion), so the autonomous run ends. NOT "my tier is done", NOT "materially complete" —
+   those are mid-loop, and the merge itself is zero-gate (no click).
+2. GENUINE EARNED BLOCK — a real roadblock needing a maintainer-only DECISION (a genuine design fork; a
+   scope/objective question). NEVER "host-gate work / another box's tier / needs a rehearsal / not my
+   remit" — that work is DEV-OWNED: you drive the `live-validate` round-trip yourself.
 
-NOT reasons to engage the human: status-confirmation, option-shopping, "which should I do".
+NOT reasons to engage the human: status-confirmation, option-shopping, "which should I do", "my tier is
+finished", host-EXECUTED work you can drive through the ticket bus.
 
 ## DEFINITION OF DONE — a change is DONE only when ALL of 1–5 hold
 
-1. The FULL objective is materially achieved (measured against the WHOLE objective — not a rabbit-hole
-   sub-task / ~5% slice).
+1. The FULL objective is SHIPPED — proven live, not the agent's sense of completion (the R30 whole-objective
+   ship FACT: every feature issue closed with proof links AND the assembled product verified live/deployed).
+   Measured against the WHOLE objective — never a tier slice, a ~5% sub-task, or "my-tier-done."
 2. VALIDATED through the loop at the RIGHT tier (see TWO-TIER VALIDATION): Tier-1 in-box build + assembly
-   GREEN for everything the dev box can validate itself; and where Tier 2 applies, the host live-gate
-   verdict is GREEN. PROVEN, not merely built.
+   GREEN for everything the dev box can validate itself; and where Tier 2 applies, host live-gate GREEN
+   reached by the DEV DRIVING the round-trip (push + label `live-validate` → read the verdict → iterate
+   RED→GREEN) — a verdict you DROVE to, never one you merely awaited from "another tier." PROVEN, not merely built.
 3. Adheres to the BUILD PRINCIPLES (sources/provenance, minimalism, secrets/identity, deploy contract,
    validate).
 4. A TLDR is written and self-examined against the work — options considered+discarded, reasoning, fit
