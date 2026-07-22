@@ -268,6 +268,28 @@ ambiguous_v1_cwds(){ # <manifest-text>
     END{ for (c in v1) if (count[c] > 1) print c }'
 }
 
+# ── shared ticket IDENTITY (the `file` path and the presented `request` command MUST agree) ───────────
+# ticket_title: the ONE approval-ticket title. `file_ticket` files it; the `request`-mode presentation
+# shows the SAME string in its prefilled URL + gh command — so a maintainer sees ONE consistent
+# 🔴 APPROVAL REQUIRED ticket whichever way it is filed. WHY THIS EXISTS: the two paths had DRIFTED —
+# `file` mode emitted this 🔴 title (as does the host's own increment-2 `file_recreate_ticket`), but
+# `request` mode emitted a plain `host-task: rebuild-devbox <wl>`; a maintainer who hand-filed from the
+# request command therefore got a DIFFERENT-looking, un-`rebuild-approval`-labelled ticket (incident
+# 2026-07-22: #243, hand-filed from the request command, looked nothing like the apparatus's own #242).
+# $1 = session count.
+ticket_title(){ printf '🔴 APPROVAL REQUIRED: rebuild-devbox %s (%s session(s)) — tap the approved label' "$REBUILD_WORKLOAD" "${1:-0}"; }
+
+# existing_open_ticket: the number of an already-OPEN rebuild-devbox ticket for this workload (a line-1
+# op match on open host-task issues), or empty. BOTH paths consult it so neither FILES nor PRESENTS a
+# DUPLICATE: the apparatus auto-files this ticket itself (the poller's rebuild_request_tick and the
+# host's increment-2 `file_recreate_ticket`), so a second hand-filed one is redundant — incident
+# 2026-07-22: #243 duplicated the apparatus's own #242, filed 65 min earlier. A closed/rejected ticket
+# never blocks a re-file (only `--state open` is read).
+existing_open_ticket(){
+  gh issue list --repo "$TICKET_ORG/$TICKET_REPO" --state open --label "$TICKET_LABEL" --limit 50 \
+    --json number,body -q '.[] | select(.body | startswith("host-op: rebuild-devbox '"$REBUILD_WORKLOAD"'")) | .number' 2>/dev/null | head -n1
+}
+
 # compose_body: the full ticket body. LINE 1 is the machine op (exactly `host-op: rebuild-devbox
 # <workload>`); the manifest block rides below, prose between is ignored by both parsers. Mode `filed`
 # writes the APPROVAL-FLOW prose (the apparatus filed it; the maintainer's one tap authorizes — the
@@ -324,8 +346,7 @@ file_ticket(){
   export DEVBOX_MANIFEST_V2="${DEVBOX_MANIFEST_V2:-1}"
   "$REPO_SCOPE" check "$TICKET_REPO" 2>/dev/null \
     || { log "R16: control repo '$TICKET_REPO' is not in the operating scope (or the reader is unavailable) — refusing to file"; return 1; }
-  existing="$(gh issue list --repo "$slug" --state open --label "$TICKET_LABEL" --limit 50 \
-              --json number,body -q '.[] | select(.body | startswith("host-op: rebuild-devbox '"$REBUILD_WORKLOAD"'")) | .number' 2>/dev/null | head -n1)" || existing=''
+  existing="$(existing_open_ticket)" || existing=''
   if [ -n "$existing" ]; then
     log "an OPEN rebuild ticket already exists (#$existing) — not filing a duplicate (idempotent)"
     return 0
@@ -352,7 +373,7 @@ file_ticket(){
   gh label create "$APPROVAL_LABEL" --repo "$slug" --color d93f0b >/dev/null 2>&1 || true
   gh label create "$APPROVE_LABEL"  --repo "$slug" --color 0e8a16 >/dev/null 2>&1 || true   # the authorization tap must EXIST to be tappable; NOT applied here (self-authorize)
   if url="$(gh issue create --repo "$slug" \
-        --title "🔴 APPROVAL REQUIRED: rebuild-devbox $REBUILD_WORKLOAD ($count session(s)) — tap the approved label" \
+        --title "$(ticket_title "$count")" \
         --label "$TICKET_LABEL" --label "$APPROVAL_LABEL" --body-file "$tmp" 2>&1)"; then
     rm -f "$tmp"
     log "FILED $url ($count session(s)) — awaiting the maintainer's one-tap \`approved\` label"
@@ -442,6 +463,8 @@ run_selftest(){
   # compose_body line 1 is the exact machine op the executor's parse_op reads
   out="$(echo x | compose_body | head -1)"
   ok "body line1 op"           '[ "$out" = "host-op: rebuild-devbox fedora-dev" ]'
+  # ticket_title: the ONE 🔴 approval title shared by file-mode + the presented request command (no drift)
+  ok "ticket_title 🔴 format"  '[ "$(ticket_title 2)" = "🔴 APPROVAL REQUIRED: rebuild-devbox fedora-dev (2 session(s)) — tap the approved label" ]'
   # missing_sids — the COMPLETENESS cross-check (fail-safe against a lossy manifest; file-mode REFUSE)
   _seen_present(){ printf '%s\n' aaaaaaaa-1111-2222-3333-444444444444; }
   _seen_extra(){   printf '%s\n' aaaaaaaa-1111-2222-3333-444444444444 bbbbbbbb-5555-6666-7777-888888888888; }
@@ -488,21 +511,41 @@ printf '%s\n' "$body" > "$OUT"
 log "captured $count session(s) → ticket body at $OUT"
 [ "$count" -gt 0 ] || log "WARNING: zero sessions captured — is tmux running at the fedora-dev level? The rebuild will restore nothing."
 
-title="host-task: rebuild-devbox $REBUILD_WORKLOAD"
-url="https://github.com/$TICKET_ORG/$TICKET_REPO/issues/new?labels=$(urlencode "$TICKET_LABEL")&title=$(urlencode "$title")&body=$(urlencode "$body")"
+# DEDUP: the apparatus auto-files this ticket itself (poller / host increment-2), so if an approval-ready
+# one is already OPEN, point at THAT instead of presenting a new-issue URL — hand-filing a second is the
+# #243/#242 duplicate. (The fresh manifest is still written to $OUT for reference; the host self-captures
+# the live manifest at fire time anyway, so the existing ticket's body is never stale in practice.)
+existing="$(existing_open_ticket)" || existing=''
+if [ -n "$existing" ]; then
+  cat <<EOF
+
+  An approval-ready rebuild-devbox ticket for '$REBUILD_WORKLOAD' ALREADY EXISTS — do NOT file another:
+     https://github.com/$TICKET_ORG/$TICKET_REPO/issues/$existing
+
+  The apparatus files this ticket itself (the poller's rebuild-request tick / the host's increment-2
+  recreate). To rebuild, apply the \`$APPROVE_LABEL\` label to #$existing. (A fresh manifest was still
+  written to $OUT for reference; the host re-captures the live manifest at fire time regardless.)
+EOF
+  exit 0
+fi
+
+title="$(ticket_title "$count")"
+url="https://github.com/$TICKET_ORG/$TICKET_REPO/issues/new?labels=$(urlencode "$TICKET_LABEL,$APPROVAL_LABEL")&title=$(urlencode "$title")&body=$(urlencode "$body")"
 
 cat <<EOF
 
   R17 rebuild-devbox request prepared ($count session(s) captured).
 
   A purposeful rebuild is destructive (it kills the box + all sessions), so the host executor requires
-  a MAINTAINER to author the ticket. Two ways to file it:
+  a MAINTAINER's explicit act. Two ways — BOTH produce the identical 🔴 \`rebuild-approval\`-labelled
+  ticket the apparatus's own filer uses:
 
-  1. Open this prefilled issue and click "Submit" (authors it as you):
+  1. Open this prefilled issue and click "Submit" (authors it as you — fires on your authorship):
 $(printf '     %s\n' "$url")
 
-  2. Or file it from a shell where gh is authed as you:
-       gh issue create --repo $TICKET_ORG/$TICKET_REPO --label $TICKET_LABEL \\
+  2. Or file it from a shell where gh is authed as you, then tap the \`$APPROVE_LABEL\` label:
+       gh issue create --repo $TICKET_ORG/$TICKET_REPO \\
+         --label $TICKET_LABEL --label $APPROVAL_LABEL \\
          --title "$title" --body-file $OUT
 
   Ticket body (also written to $OUT):
