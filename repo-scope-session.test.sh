@@ -49,7 +49,7 @@ trap 'kill $HOLDERS >/dev/null 2>&1 || true; rm -rf "$TMP"' EXIT
 
 # the CEILING: a readable scope of {repo-a, repo-b} (repo-z is deliberately OUTSIDE it).
 FIX="$TMP/scope.conf"
-{ printf '# fixture ceiling\n'; printf 'repo-a\n'; printf 'repo-b\n'; } > "$FIX"
+{ printf 'repo-a\n'; printf 'repo-b\n'; } > "$FIX"   # ceiling = App-install enum, pre-seeded into the cache (read_scope cats it raw)
 
 # a REAL git clone holding per-repo-set objective docs, each with the exact "## Repositories this
 # objective operates on" table the reader parses; ONE commit → a known sha the backings pin.
@@ -82,13 +82,13 @@ back_session(){ SESSION_HOLDER_PID="$2" bash "$SCOPE" transcribe --backing "fedo
 
 check_rc(){ # <sess-or-empty> <repo> → sets RC + ERR
   local sess="$1" repo="$2"
-  if [ -n "$sess" ]; then ERR="$(SCOPE_SESSION="$sess" SCOPE_FILE="$FIX" bash "$SCOPE" check "$repo" 2>&1 >/dev/null)"; RC=$?
-  else                    ERR="$(SCOPE_FILE="$FIX" bash "$SCOPE" check "$repo" 2>&1 >/dev/null)"; RC=$?; fi
+  if [ -n "$sess" ]; then ERR="$(SCOPE_SESSION="$sess" SCOPE_CACHE="$FIX" SCOPE_CACHE_TTL=9999 bash "$SCOPE" check "$repo" 2>&1 >/dev/null)"; RC=$?
+  else                    ERR="$(SCOPE_CACHE="$FIX" SCOPE_CACHE_TTL=9999 bash "$SCOPE" check "$repo" 2>&1 >/dev/null)"; RC=$?; fi
 }
 list_out(){ # <sess-or-empty> → sets OUT
   local sess="$1"
-  if [ -n "$sess" ]; then OUT="$(SCOPE_SESSION="$sess" SCOPE_FILE="$FIX" bash "$SCOPE" list 2>/dev/null)"
-  else                    OUT="$(SCOPE_FILE="$FIX" bash "$SCOPE" list 2>/dev/null)"; fi
+  if [ -n "$sess" ]; then OUT="$(SCOPE_SESSION="$sess" SCOPE_CACHE="$FIX" SCOPE_CACHE_TTL=9999 bash "$SCOPE" list 2>/dev/null)"
+  else                    OUT="$(SCOPE_CACHE="$FIX" SCOPE_CACHE_TTL=9999 bash "$SCOPE" list 2>/dev/null)"; fi
 }
 
 # ===================================================================================================
@@ -189,9 +189,9 @@ if [ "$(cat "$HERE/bin/repo-scope.sh")" = "$(cat "$MUT/repo-scope.sh")" ]; then
 else
   ok "mutation1: session-narrowing line neutralized in the copy"
   reset_reg mut1; HPM="$(live_holder)"; back_session sessM "$HPM" obj-a.md
-  RC=0; SCOPE_SESSION=sessM SCOPE_FILE="$FIX" bash "$SCOPE" check repo-b >/dev/null 2>&1 || RC=$?
+  RC=0; SCOPE_SESSION=sessM SCOPE_CACHE="$FIX" SCOPE_CACHE_TTL=9999 bash "$SCOPE" check repo-b >/dev/null 2>&1 || RC=$?
   [ "$RC" = 3 ] && ok "real script: sessM{a} check repo-b → DENY rc 3 (narrowing bites)" || bad "real: check repo-b rc=$RC (want 3)"
-  RC=0; SCOPE_SESSION=sessM SCOPE_FILE="$FIX" bash "$MUT/repo-scope.sh" check repo-b >/dev/null 2>&1 || RC=$?
+  RC=0; SCOPE_SESSION=sessM SCOPE_CACHE="$FIX" SCOPE_CACHE_TTL=9999 bash "$MUT/repo-scope.sh" check repo-b >/dev/null 2>&1 || RC=$?
   [ "$RC" = 0 ] && ok "mutant: with the narrowing gone, check repo-b WRONGLY ALLOWs rc 0 (the row bites)" \
     || bad "mutant: check repo-b rc=$RC (want a wrongful 0)"
 fi
@@ -207,9 +207,9 @@ else
   ok "mutation2: backing-verify (verified_ok) neutralized in the copy"
   reset_reg mut2; HPF="$(live_holder)"; back_session sessF "$HPF" obj-a.md      # {repo-a}, backed
   sed -i '3s/$/ repo-b/' "$(entry_of sessF)"                                    # FORGE line-3 → {repo-a repo-b}
-  RC=0; SCOPE_SESSION=sessF SCOPE_FILE="$FIX" bash "$SCOPE" check repo-b >/dev/null 2>&1 || RC=$?
+  RC=0; SCOPE_SESSION=sessF SCOPE_CACHE="$FIX" SCOPE_CACHE_TTL=9999 bash "$SCOPE" check repo-b >/dev/null 2>&1 || RC=$?
   [ "$RC" = 3 ] && ok "real script: forged sessF check repo-b → DENY rc 3 (verify catches the forgery)" || bad "real: forged check repo-b rc=$RC (want 3)"
-  RC=0; SCOPE_SESSION=sessF SCOPE_FILE="$FIX" bash "$MUT2/repo-scope.sh" check repo-b >/dev/null 2>&1 || RC=$?
+  RC=0; SCOPE_SESSION=sessF SCOPE_CACHE="$FIX" SCOPE_CACHE_TTL=9999 bash "$MUT2/repo-scope.sh" check repo-b >/dev/null 2>&1 || RC=$?
   [ "$RC" = 0 ] && ok "mutant: with the verify gone, the forged repo-b WRONGLY ALLOWs rc 0 (the verify IS the boundary)" \
     || bad "mutant: forged check repo-b rc=$RC (want a wrongful 0)"
 fi
@@ -225,9 +225,9 @@ else
   ok "mutation3: objective_sha_gated ancestor check neutralized in the copy"
   reset_reg mut3; HPMG="$(live_holder)"
   { printf '%s\n' sessMG; printf '%s\n' "$(SESSION_HOLDER_PID="$HPMG" session_coords)"; printf '%s\n' repo-a; printf '%s\n' "fedora-dev obj-offmain.md $OFFSHA"; } > "$(entry_of sessMG)"
-  RC=0; SCOPE_SESSION=sessMG SCOPE_FILE="$FIX" bash "$SCOPE" check repo-a >/dev/null 2>&1 || RC=$?
+  RC=0; SCOPE_SESSION=sessMG SCOPE_CACHE="$FIX" SCOPE_CACHE_TTL=9999 bash "$SCOPE" check repo-a >/dev/null 2>&1 || RC=$?
   [ "$RC" = 3 ] && ok "real script: off-main sessMG check repo-a → DENY rc 3 (ancestor gate bites)" || bad "real: off-main check repo-a rc=$RC (want 3)"
-  RC=0; SCOPE_SESSION=sessMG SCOPE_FILE="$FIX" bash "$MUT3/repo-scope.sh" check repo-a >/dev/null 2>&1 || RC=$?
+  RC=0; SCOPE_SESSION=sessMG SCOPE_CACHE="$FIX" SCOPE_CACHE_TTL=9999 bash "$MUT3/repo-scope.sh" check repo-a >/dev/null 2>&1 || RC=$?
   [ "$RC" = 0 ] && ok "mutant: with the gate gone, the off-main sha WRONGLY ALLOWs rc 0 (the ancestor gate IS the boundary)" \
     || bad "mutant: off-main check repo-a rc=$RC (want a wrongful 0)"
 fi
