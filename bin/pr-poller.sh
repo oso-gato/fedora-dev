@@ -28,10 +28,13 @@
 #           it didn't create (run-003 lesson b), so this deterministic verb is the sanctioned
 #           retirement path.
 #
-# SAFE BY DEFAULT — DISARMED: the GREEN→merge path calls auto-merge.sh in --dry-run (prints the
-# DECISION, merges nothing) UNLESS POLLER_ARMED=1. Arming (flipping to --commit) is the LAST step and a
-# Tier-A change gated on Arthur's click (#96) — disarmed, the MERGE boundary stays untouched. And
-# auto-merge.sh itself re-checks all three gates fail-closed, so a stale plan can never mis-merge.
+# ARMED BY DEFAULT (gate-free objective): the GREEN→merge path calls auto-merge.sh with --commit so the loop
+# merges autonomously (no human approves the shipment — 00-OBJECTIVES.md). POLLER_ARMED=0 is a deliberate
+# dry-run SOAK (prints the DECISION, merges nothing — the design-doc use). The #96 Tier-A "arm on Arthur's
+# click" is RETIRED (pre-ZERO-GATE). The MERGE boundary is NOT this flag: auto-merge.sh re-checks the two
+# DISTINCT App-identity gates fail-closed (host-GREEN + a distinct fitness-PASS) and HARD-REFUSES --commit
+# under same-identity fitness, so a stale plan can never mis-merge and a default-armed poller cannot merge
+# without the real independent fitness App.
 #
 # The poller has NO merge credential of its own: it OBSERVES, spawns a feature-branch fixer, retires
 # superseded PRs (a reversible close — see RETIRE above; the one non-merge write it performs even
@@ -55,8 +58,8 @@
 #   LG_HOST_LOGIN     host bot login whose verdict is trusted (default: oso-gato-erebus-claudebox[bot])
 #   FITNESS_LOGIN     fitness bot login (passed through to fitness-review.sh + auto-merge.sh)
 #   POLLER_ARMED      1 → GREEN+B/C+PASS actually merges (auto-merge --commit). Default 0 (dry-run).
-#   POLL_INTERVAL     seconds between --watch sweeps (default 10, matching the host watcher cadence).
-#                     Cost at 10s (fetch-BATCHED sweep): steady state ≈ 360×(2+N)/h — the open-PR
+#   POLL_INTERVAL     seconds between --watch sweeps (default 30 — a simple fixed cadence).
+#                     Cost at 30s (fetch-BATCHED sweep): steady state ≈ 120×(2+N)/h — the open-PR
 #                     list (TSV: number+ref+sha in ONE call), the retire merged-list, and ONE
 #                     sha-bound comments call per open PR. A PARKED GREEN PR (already acted:
 #                     PRESENT posted / dry-run decided / merge attempted) is terminal-state-skipped
@@ -198,7 +201,7 @@ plan(){
 
 # R18 IDLE-WITH-WORK-PENDING (audit 2026-07-18, CAT-42/01; the kd#23 six-hour silent stall). The poller's
 # process-liveness is watched (the apparatus-deadman: is it sweeping?) but its WORK progress is NOT: a
-# poller that NOOPs on `host=NONE` every 10s is "healthy" by construction while the workstream is dead.
+# poller that NOOPs on `host=NONE` every sweep is "healthy" by construction while the workstream is dead.
 # stall_verdict is the missing WORK-level clock: a live-validate-LABELLED open head that has sat at
 # host=NONE (no host verdict produced) past a bound is a STALL to SURFACE, not a NOOP to repeat forever.
 # The age is derived from GitHub truth (the head commit's committer date), never a local first-seen marker
@@ -552,8 +555,8 @@ LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
 # still wins. EXPORTED so fitness-review.sh + auto-merge.sh (which BOTH need the non-empty login) see it.
 export FITNESS_SAME_IDENTITY="${FITNESS_SAME_IDENTITY:-1}"
 FITNESS_LOGIN="$(fitness_login_default "$FITNESS_SAME_IDENTITY" "${FITNESS_LOGIN:-}")"; export FITNESS_LOGIN
-POLLER_ARMED="${POLLER_ARMED:-0}"
-POLL_INTERVAL="${POLL_INTERVAL:-10}"
+POLLER_ARMED="${POLLER_ARMED:-1}"   # ARMED BY DEFAULT (gate-free objective; #96 explicit-arm retired) — the merge-trust boundary is the distinct-App gates + auto-merge's fail-closed re-check, not this flag; POLLER_ARMED=0 is a deliberate dry-run soak
+POLL_INTERVAL="${POLL_INTERVAL:-30}"   # fixed sweep cadence (a gentler 30s; no adaptive machinery)
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
 FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
@@ -630,8 +633,20 @@ RECONCILE_TICKS=0
 # =1 — the test/catch-up seam, since each --once is a fresh process whose counter starts at 0).
 DEV_LOOP_SERVICE="${DEV_LOOP_SERVICE:-$HERE/dev-loop-service.sh}"
 DEV_LOOP_SERVICE_LOG="${DEV_LOOP_SERVICE_LOG:-$HOME/.local/state/dev-loop/service.log}"
-DEV_LOOP_LAUNCH_EVERY="${DEV_LOOP_LAUNCH_EVERY:-6}"   # ~1 min at the 10s cadence — arm authoring promptly after a self-refresh
+DEV_LOOP_LAUNCH_EVERY="${DEV_LOOP_LAUNCH_EVERY:-6}"   # ~3 min at the 30s cadence — arm authoring promptly after a self-refresh
 DEV_LOOP_LAUNCH_TICKS=0
+# ── REBUILD-REQUEST (R17 approval flow, 2026-07-19) — flag-fired ONE-SHOT filing of the rebuild-devbox
+# APPROVAL ticket. Anything in-box may request a purposeful rebuild by touching the FLAG file (a LOCAL
+# write, not a bus write); THIS tick — the sanctioned headless bus-writer, the host-refresh/host-ticket
+# precedent — then runs `rebuild-request.sh file`, which captures a FRESH session manifest and files the
+# ticket AS the App (🔴 APPROVAL REQUIRED title + `rebuild-approval` label + @mention → the maintainer's
+# phone). The maintainer's ENTIRE act is one `approved`-label tap; the host executor (fedora-bootstrap
+# v1.2.69 approval gate) fires on it. ONE-SHOT: the flag is consumed on rc 0 (filed OR already-open —
+# file_ticket is idempotent); a failure KEEPS the flag for a retry next firing. 0 disables.
+REBUILD_REQUEST_SCRIPT="${REBUILD_REQUEST_SCRIPT:-$HERE/rebuild-request.sh}"
+REBUILD_REQUEST_FLAG="${REBUILD_REQUEST_FLAG:-$HOME/.local/state/rebuild-request/requested}"
+REBUILD_REQUEST_EVERY="${REBUILD_REQUEST_EVERY:-6}"
+REBUILD_REQUEST_TICKS=0
 STATE="$HOME/.local/state/pr-poller"; mkdir -p "$STATE"
 LOG="$STATE/poller.log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG" >&2; }
@@ -1094,6 +1109,31 @@ dev_loop_launch_tick(){
   return 0
 }
 
+# REBUILD-REQUEST tick (R17 approval flow, 2026-07-19) — see the REBUILD_REQUEST config block above.
+# Same discipline as host_refresh_tick: END of a tick, R9-halt-gated (filing a ticket is an ACTION),
+# rate-limited. Fires ONLY while the FLAG file exists; the flag is consumed on a successful filing (rc 0
+# = filed or already-open) and KEPT on failure so the next firing retries. FAIL-SAFE: a filing failure
+# logs and never stops the loop.
+rebuild_request_tick(){
+  [ "${REBUILD_REQUEST_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
+  REBUILD_REQUEST_TICKS=$((REBUILD_REQUEST_TICKS+1))
+  [ "$REBUILD_REQUEST_TICKS" -ge "$REBUILD_REQUEST_EVERY" ] || return 0
+  REBUILD_REQUEST_TICKS=0
+  [ -e "$REBUILD_REQUEST_FLAG" ] || return 0
+  if [ "${POLLER_HALTED:-0}" = 1 ]; then
+    log "rebuild-request: R9 HALT — not filing the approval ticket this tick (flag kept; resumes when the halt clears)"
+    return 0
+  fi
+  [ -x "$REBUILD_REQUEST_SCRIPT" ] || { log "rebuild-request: $REBUILD_REQUEST_SCRIPT not executable — skipping (flag kept)"; return 0; }
+  if "$REBUILD_REQUEST_SCRIPT" file 2>&1 | tee -a "$LOG" >&2; then
+    rm -f "$REBUILD_REQUEST_FLAG" 2>/dev/null || :
+    log "rebuild-request: approval ticket filed (or already open) — flag consumed; awaiting the maintainer's approved-label tap"
+  else
+    log "rebuild-request: filing FAILED — flag kept, retrying next firing"
+  fi
+  return 0
+}
+
 # ORG-WIDE wrapper (P0 uniform loop): one tick sweeps EVERY apparatus repo through the SAME harness,
 # re-setting POLLER_REPO/SLUG per repo. sweep_repo() is the original single-repo body unchanged.
 #
@@ -1130,6 +1170,7 @@ sweep(){
   host_refresh_tick
   reconcile_tick
   dev_loop_launch_tick
+  rebuild_request_tick
 }
 sweep_repo(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"

@@ -23,8 +23,10 @@
 # locally. All fleet repos are PUBLIC → raw fetch, no auth, built-in token only.
 set -uo pipefail
 
-# fedora-dev is the CANONICAL anchor (the develop·build·merge hub); the others must match it.
-REPOS=(fedora-dev fedora-bootstrap fedora-desktop)
+# fedora-dev is the CANONICAL anchor (the develop·build·merge hub); the other pair box must match it.
+# THE APPARATUS IS EXACTLY THE HOST/DEVBOX PAIR (maintainer ruling 2026-07-20) — fedora-desktop is a
+# separate workstream, no longer part of the apparatus fleet, so its guard payload is not checked here.
+REPOS=(fedora-dev fedora-bootstrap)
 RAW="https://raw.githubusercontent.com/oso-gato"
 REF="${PARITY_REF:-main}"
 # PRE-MERGE self-overlay: on `pull_request` the CI checks out the PR HEAD, but every repo (including

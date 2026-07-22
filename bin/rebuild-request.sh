@@ -38,6 +38,9 @@
 # USAGE:
 #   rebuild-request.sh                 # enumerate → compose ticket body → present for a maintainer to file
 #   rebuild-request.sh manifest        # print ONLY the manifest block (BEGIN…session…END) to stdout
+#   rebuild-request.sh file            # FILE the approval ticket as the apparatus (R17 approval flow —
+#                                      #   the maintainer's whole act is ONE `approved`-label tap; invoked
+#                                      #   by the poller's rebuild_request_tick, not the interactive agent)
 #   rebuild-request.sh --selftest      # pure-helper self-checks (no tmux, no network)
 #   rebuild-request.sh --help
 set -uo pipefail
@@ -52,6 +55,11 @@ TICKET_ORG="${HOST_TICKET_ORG:-oso-gato}"
 TICKET_REPO="${HOST_TICKET_REPO:-fedora-bootstrap}"
 TICKET_LABEL="${HOST_TICKET_LABEL:-host-task}"
 TMUX_BIN="${TMUX_BIN:-tmux}"                            # test seam: a stub tmux drives the real logic
+# ── `file` mode (R17 approval flow, 2026-07-19 — pairs with fedora-bootstrap v1.2.69) ────────────────
+APPROVAL_LABEL="${APPROVAL_LABEL:-rebuild-approval}"    # the maintainer's mobile-filter label on the filed ticket
+REBUILD_APPROVER_MENTION="${REBUILD_APPROVER_MENTION:-@oso-gato}"   # @mentioned in the ticket body → GitHub-app push; AUTHORIZATION is the role-checked `approved` label, never this string
+HERE_RR="$(dirname "$(readlink -f "$0")")"
+REPO_SCOPE="${REPO_SCOPE:-$HERE_RR/repo-scope.sh}"      # R16: filing targets the control repo — scope-checked
 
 log(){ echo "rebuild-request: $*" >&2; }
 die(){ log "$*"; exit 1; }
@@ -171,32 +179,187 @@ enumerate_claude_procs(){
     [ "$child" = 1 ] && continue                                                     # subagent, not a tenant
     cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)" || continue
     sid="$(sid_from_cmd "$cmd")"                                                     # --session-id OR --resume/-r
-    if [ -n "$sid" ]; then name="s-${sid%%-*}"; else name="s-p$pid"; fi             # unique, allowlist-safe
+    if [ -n "$sid" ]; then name="s-${sid%%-*}"; else name="s-p$pid"; fi             # collision-unlikely (first 8 hex of the sid), allowlist-safe
     printf '%s\t%s\t%s\n' "$name" "$cwd" "$sid"
   done
 }
 
-# manifest_block: the whole enumerate→validate→wrap pipeline (the testable core). SESSION_SOURCE is the
-# seam (default: the live-process scan; the test injects a fixture emitter). enumerate_tmux is kept as
+# dedup_by_sid: collapse the raw session source to ONE line per interactive session. A single tenant can
+# have MULTIPLE live `claude` processes ALL carrying the SAME resumable id (observed 2026-07-19: TWO
+# `/usr/bin/claude --resume <sid>` procs per tenant — a per-proc source therefore double-counts the SAME
+# session). Left uncollapsed, the manifest lists N sessions for N/2 real tenants, and the executor's FINISH
+# tally then reports "restored N/N" for N/2 real sessions — an UNTRUE count (and it redundantly recreates
+# each tmux name: restore_session kills the same-name session first, so the duplicate just churns). A sid
+# is UNIQUE per session (a session UUID), so two lines bearing the same non-empty sid ARE one tenant: the
+# FIRST wins, later same-sid lines drop. A NO-SID (degraded/old-wrapper) line has no dedup key and always
+# passes through — we cannot prove two keyless procs are one session, and each yields a distinct s-p<pid>
+# name. Emits the input line VERBATIM (`print` = print $0, tabs intact — never re-split with OFS). Placed
+# in the testable pipeline (not in enumerate_claude_procs) so the SESSION_SOURCE seam exercises it.
+dedup_by_sid(){
+  awk -F'\t' '{ if ($3=="") { print; next } if (!($3 in seen)) { seen[$3]=1; print } }'
+}
+
+# manifest_block: the whole enumerate→dedup→validate→wrap pipeline (the testable core). SESSION_SOURCE is
+# the seam (default: the live-process scan; the test injects a fixture emitter). enumerate_tmux is kept as
 # an alternative source but is no longer the default — it cannot carry a sid (tmux knows the pane, not
 # the claude session-id), so it can only ever produce v1 lines.
 SESSION_SOURCE="${SESSION_SOURCE:-enumerate_claude_procs}"
-manifest_block(){ "$SESSION_SOURCE" | emit_manifest_lines | compose_manifest_block; }
+manifest_block(){ "$SESSION_SOURCE" | dedup_by_sid | emit_manifest_lines | compose_manifest_block; }
+
+# ── manifest COMPLETENESS guard (fail-safe: never file a manifest that would silently WIPE sessions) ──
+# enumerate_claude_procs captures a session ONLY if it can `readlink /proc/<pid>/cwd` — a PTRACE-gated
+# read. Run in the WRONG context (root @ fedora-dev sits in the PARENT userns and reads NONE — an EMPTY
+# manifest; a claude Bash-tool shell is bubblewrap-sandboxed and reads only its own lineage) it drops the
+# rest SILENTLY. The executor treats an empty/partial manifest as "these are all the sessions" (rc=0,
+# restores only what is listed), so a rebuild on it KILLS every un-captured session and never brings it
+# back — with no error. So before a DESTRUCTIVE filing we cross-check: `/proc/<pid>/cmdline` is
+# WORLD-readable (NOT ptrace-gated, unlike cwd/environ), so the live tenant session-ids are knowable in
+# ANY context. `seen_sids` reads them with the SAME tenant filters enumerate uses (skip `-p` headless;
+# skip CLAUDE_CODE_CHILD_SESSION subagents where environ is readable) MINUS the cwd read; `missing_sids`
+# are the ones the composed manifest OMITS. `file_ticket` REFUSES when any is missing — turning a silent
+# session-wiping rebuild into a LOUD refusal. The fix is always the CONTEXT (run as core at the base
+# level — see the bin/rebuild-request.sh row in CLAUDE.md), never a weaker manifest. `SEEN_SIDS_SOURCE`
+# is the test seam.
+seen_sids(){
+  local pid cmd sid child
+  for pid in $("${PGREP_BIN:-pgrep}" -x claude 2>/dev/null); do
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+    [ -n "$cmd" ] || continue
+    case " $cmd " in *' -p '*|*' --print '*) continue ;; esac                       # headless, not a tenant
+    child="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^CLAUDE_CODE_CHILD_SESSION=//p' | head -1)"
+    [ "$child" = 1 ] && continue                                                     # subagent (only excludable when environ readable)
+    sid="$(sid_from_cmd "$cmd")"
+    [ -n "$sid" ] && valid_sid "$sid" && printf '%s\n' "$sid"
+  done | sort -u
+}
+SEEN_SIDS_SOURCE="${SEEN_SIDS_SOURCE:-seen_sids}"
+
+# missing_sids <manifest-text>: the live tenant session-ids (from SEEN_SIDS_SOURCE) the manifest does NOT
+# contain — sessions that EXIST but were dropped from capture. Sound ONLY when the manifest carries sids
+# (v2); file_ticket forces DEVBOX_MANIFEST_V2=1, so the destructive path is always checked. A no-sid /
+# invalid-sid tenant is never in seen_sids, so it can never raise a false positive.
+missing_sids(){ # <manifest-text>
+  local mb="${1:-}" s
+  "$SEEN_SIDS_SOURCE" | while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    printf '%s' "$mb" | grep -qF -- "$s" || printf '%s\n' "$s"
+  done
+}
+
+# ── manifest AMBIGUITY guard (fail-safe: never file a manifest whose v1 line would MIS-RESTORE) ──
+# A v1 (NO-SID, 3-field) line restores via `claude --continue <cwd>`, which resolves to the MOST-RECENT
+# session in <cwd> — unambiguous ONLY when <cwd> hosts exactly one session. When ANOTHER manifest line
+# (v1 OR v2) shares that cwd, `--continue` cannot target the v1 line's INTENDED session: it grabs whichever
+# is most-recent, so N sessions on one cwd collapse to ONE restore — the OTHERS are killed and never brought
+# back. Observed live 2026-07-21 (#226): a v2 line `s-ebcfa847 /home/core <sid>` + a NO-SID line
+# `s-p2128 /home/core` → the rebuild resumed ONE session twice and DROPPED the other (this very session).
+# `missing_sids` does NOT catch it: a no-sid line's session has no readable sid, so it is absent from
+# seen_sids and can never be "missing" — a distinct blind spot. `ambiguous_v1_cwds` names the SHARED cwds
+# of any no-sid line so file_ticket can REFUSE (turning a silent mis-restore into a loud refusal). The FIX
+# is the CONTEXT (capture as CORE at the fedora-dev base level so EVERY live session carries its
+# `--session-id` → a v2 by-id restore, never `--continue`; a session stuck on a cwd-scoped `--continue`
+# launch is re-launched with its id) — never a weaker manifest. A LONE no-sid line on a UNIQUE cwd stays
+# valid (the legitimate old-wrapper v1 fallback — `--continue` there is unambiguous). cwds carry no spaces
+# (valid_cwd), so awk's whitespace fields are exact: a session line is NF≥3, cwd=$3, and NF==3 marks v1.
+ambiguous_v1_cwds(){ # <manifest-text>
+  printf '%s' "${1:-}" | awk '
+    $1=="session"{ cwd=$3; count[cwd]++; if (NF==3) v1[cwd]=1 }
+    END{ for (c in v1) if (count[c] > 1) print c }'
+}
 
 # compose_body: the full ticket body. LINE 1 is the machine op (exactly `host-op: rebuild-devbox
-# <workload>`); the manifest block rides below, prose between is ignored by both parsers.
-compose_body(){
-  local manifest; manifest="$(cat)"
-  cat <<EOF
+# <workload>`); the manifest block rides below, prose between is ignored by both parsers. Mode `filed`
+# writes the APPROVAL-FLOW prose (the apparatus filed it; the maintainer's one tap authorizes — the
+# fedora-bootstrap v1.2.69 approval gate); default = the present-to-a-maintainer prose (authorship path).
+compose_body(){ # [filed]
+  local manifest mode="${1:-present}"; manifest="$(cat)"
+  if [ "$mode" = filed ]; then
+    cat <<EOF
+host-op: rebuild-devbox $REBUILD_WORKLOAD
+
+$REBUILD_APPROVER_MENTION — **ONE-TAP APPROVAL NEEDED**: apply the **\`approved\` label** to this issue to
+authorize a purposeful **R17 rebuild** of the \`$REBUILD_WORKLOAD\` dev box (KILL → REBUILD → RESTORE →
+RESUME → VERIFY; every session in the manifest below is restored + resumed + nudged back to work). Filed
+by the apparatus (\`bin/rebuild-request.sh file\`); the host fires ONLY on a maintainer's act — the label
+APPLIER is role-checked admin|maintain from the label's own timeline (an App-applied label is inert). The
+host re-checks every ~10s and fires the moment the label lands. To REJECT: close this issue. The session
+manifest was captured live at filing time.
+
+$manifest
+EOF
+  else
+    cat <<EOF
 host-op: rebuild-devbox $REBUILD_WORKLOAD
 
 Purposeful **R17 rebuild** of the \`$REBUILD_WORKLOAD\` dev box — the host executes
 KILL → REBUILD → RESTORE → RESUME → VERIFY (\`rebuild-devbox\` verb). The session manifest below was
-captured on the dev box by \`bin/rebuild-request.sh\`. This ticket must be authored by a maintainer:
-the executor author-gates this destructive verb to admin|maintain and refuses a bot author.
+captured on the dev box by \`bin/rebuild-request.sh\`. Authorization is a MAINTAINER'S explicit act:
+author this ticket yourself, OR (the one-tap path) any maintainer may apply the \`approved\` label.
 
 $manifest
 EOF
+  fi
+}
+
+# file_ticket: FILE the approval ticket AS THE APPARATUS (the R17 approval flow — the executor half is
+# fedora-bootstrap v1.2.69: a bot-filed ticket fires once a maintainer taps the `approved` label, so
+# filing needs NO human; the maintainer's ENTIRE act is the one tap). Meant to be invoked by the POLLER's
+# rebuild_request_tick (the sanctioned headless bus-writer — the host-refresh/host-ticket precedent),
+# not the interactive agent. IDEMPOTENT: skips when an OPEN ticket for this workload already exists
+# (line-1 op match on open host-task issues — a closed/rejected ticket never blocks a re-file). R16:
+# refuses when the control repo is out of the operating scope (fail-closed; a missing reader is never a
+# go). Labels: $TICKET_LABEL (host discovery) + $APPROVAL_LABEL (the maintainer's mobile notification
+# filter), both create-on-use. The manifest is captured FRESH at filing time (it is a snapshot — a stale
+# one strands sessions started since). rc 0 = filed (URL on stdout) or already-open; non-zero = not filed.
+file_ticket(){
+  local slug="$TICKET_ORG/$TICKET_REPO" existing mb count body tmp url
+  # v2 BY-ID manifest is DEFAULT-ON for the FILING path (incident 2026-07-19: the running container's env
+  # predated the deploy-env DEVBOX_MANIFEST_V2 flip, so the first live filing went out v1 cwd-scoped — a
+  # MULTI-TENANT COLLAPSE for sessions sharing one cwd; caught in the poller log, the ticket body was
+  # edit-corrected by hand). Depending on deploy env for CORRECTNESS was the bug; the code default for the
+  # OTHER modes stays OFF (grammar safety for foreign deployments), but the filing path exists only in
+  # THIS apparatus, whose deployed executor has understood v2 since fedora-bootstrap#143 (2026-07-15) —
+  # and a pre-#143 executor fail-safe REFUSES a 4-field manifest BEFORE any kill. Explicit =0 forces v1.
+  export DEVBOX_MANIFEST_V2="${DEVBOX_MANIFEST_V2:-1}"
+  "$REPO_SCOPE" check "$TICKET_REPO" 2>/dev/null \
+    || { log "R16: control repo '$TICKET_REPO' is not in the operating scope (or the reader is unavailable) — refusing to file"; return 1; }
+  existing="$(gh issue list --repo "$slug" --state open --label "$TICKET_LABEL" --limit 50 \
+              --json number,body -q '.[] | select(.body | startswith("host-op: rebuild-devbox '"$REBUILD_WORKLOAD"'")) | .number' 2>/dev/null | head -n1)" || existing=''
+  if [ -n "$existing" ]; then
+    log "an OPEN rebuild ticket already exists (#$existing) — not filing a duplicate (idempotent)"
+    return 0
+  fi
+  mb="$(manifest_block)"
+  if manifest_v2_enabled; then                                   # sid-completeness is a v2 property (a v1 line carries no sid to cross-check)
+    local missing; missing="$(missing_sids "$mb" | tr '\n' ' ')"
+    if [ -n "${missing// /}" ]; then
+      log "REFUSING to file rebuild-devbox: the captured manifest OMITS live session id(s) [ ${missing}] — a rebuild on it would KILL those sessions and NOT restore them. rebuild-request could not read all sessions' /proc: it MUST run as core at the fedora-dev BASE level (root is in the parent userns and reads NONE; a sandboxed shell reads only its own lineage). NOT filing; the flag is kept so the poller retries from the correct context."
+      return 1
+    fi
+    local ambig; ambig="$(ambiguous_v1_cwds "$mb" | tr '\n' ' ')"
+    if [ -n "${ambig// /}" ]; then
+      log "REFUSING to file rebuild-devbox: the captured manifest has a NO-SID (v1) session sharing cwd(s) [ ${ambig}] with another session — the executor would restore that cwd via \`claude --continue\`, which resolves to the MOST-RECENT session there and so MIS-RESTORES (resumes one session twice, DROPS the other; observed 2026-07-21 #226). Capture as CORE at the fedora-dev BASE level so every session carries its --session-id (a v2 restore BY ID, never --continue); a session stuck on a cwd-scoped --continue launch must be re-launched with its id. NOT filing; the flag is kept so the poller retries from the correct context."
+      return 1
+    fi
+  fi
+  count="$(printf '%s\n' "$mb" | grep -c '^session ' || true)"
+  [ "$count" -gt 0 ] || log "WARNING: zero sessions captured — the rebuild would restore nothing"
+  body="$(printf '%s\n' "$mb" | compose_body filed)"
+  tmp="$(mktemp)" || return 1
+  printf '%s\n' "$body" > "$tmp"
+  gh label create "$TICKET_LABEL"   --repo "$slug" --color 5319e7 >/dev/null 2>&1 || true   # create-on-use
+  gh label create "$APPROVAL_LABEL" --repo "$slug" --color d93f0b >/dev/null 2>&1 || true
+  if url="$(gh issue create --repo "$slug" \
+        --title "🔴 APPROVAL REQUIRED: rebuild-devbox $REBUILD_WORKLOAD ($count session(s)) — tap the approved label" \
+        --label "$TICKET_LABEL" --label "$APPROVAL_LABEL" --body-file "$tmp" 2>&1)"; then
+    rm -f "$tmp"
+    log "FILED $url ($count session(s)) — awaiting the maintainer's one-tap \`approved\` label"
+    printf '%s\n' "$url"
+    return 0
+  fi
+  rm -f "$tmp"
+  log "gh issue create FAILED (does the App hold Issues:write on $slug?): $url"
+  return 1
 }
 
 # urlencode: RFC-3986 percent-encoding for the prefilled new-issue URL (ASCII manifest only).
@@ -277,6 +440,22 @@ run_selftest(){
   # compose_body line 1 is the exact machine op the executor's parse_op reads
   out="$(echo x | compose_body | head -1)"
   ok "body line1 op"           '[ "$out" = "host-op: rebuild-devbox fedora-dev" ]'
+  # missing_sids — the COMPLETENESS cross-check (fail-safe against a lossy manifest; file-mode REFUSE)
+  _seen_present(){ printf '%s\n' aaaaaaaa-1111-2222-3333-444444444444; }
+  _seen_extra(){   printf '%s\n' aaaaaaaa-1111-2222-3333-444444444444 bbbbbbbb-5555-6666-7777-888888888888; }
+  local mf; mf="$(printf '%s\nsession s-aaa /home/core aaaaaaaa-1111-2222-3333-444444444444\n%s\n' "$MANIFEST_BEGIN" "$MANIFEST_END")"
+  ok "missing_sids none when captured" '[ -z "$(SEEN_SIDS_SOURCE=_seen_present missing_sids "$mf")" ]'
+  ok "missing_sids flags the omitted"  '[ "$(SEEN_SIDS_SOURCE=_seen_extra missing_sids "$mf")" = bbbbbbbb-5555-6666-7777-888888888888 ]'
+  # ambiguous_v1_cwds — the #226 mis-restore guard (a NO-SID line SHARING a cwd → flag; lone/all-sid → none)
+  local amb
+  amb="$(ambiguous_v1_cwds "$(printf '%s\nsession s-ebcfa847 /home/core aaaaaaaa-1111-2222-3333-444444444444\nsession s-p2128 /home/core\n%s\n' "$MANIFEST_BEGIN" "$MANIFEST_END")")"
+  ok "ambig flags a shared-cwd no-sid line" '[ "$amb" = /home/core ]'
+  amb="$(ambiguous_v1_cwds "$(printf '%s\nsession s-a /home/core aaaaaaaa-1111-2222-3333-444444444444\nsession s-p9 /root\n%s\n' "$MANIFEST_BEGIN" "$MANIFEST_END")")"
+  ok "ambig none when no-sid cwd is unique"  '[ -z "$amb" ]'
+  amb="$(ambiguous_v1_cwds "$(printf '%s\nsession s-a /home/core aaaaaaaa-1111-2222-3333-444444444444\nsession s-b /home/core bbbbbbbb-5555-6666-7777-888888888888\n%s\n' "$MANIFEST_BEGIN" "$MANIFEST_END")")"
+  ok "ambig none when both lines carry a sid" '[ -z "$amb" ]'
+  amb="$(ambiguous_v1_cwds "$(printf '%s\nsession s-p1 /home/core\nsession s-p2 /home/core\n%s\n' "$MANIFEST_BEGIN" "$MANIFEST_END")")"
+  ok "ambig flags two no-sid on one cwd"     '[ "$amb" = /home/core ]'
   [ "$fail" = 0 ] && echo "rebuild-request --selftest: ALL PASS"
   return "$fail"
 }
@@ -286,11 +465,18 @@ case "${1:-}" in
   --selftest) run_selftest; exit $? ;;
   --help|-h)  usage; exit 0 ;;
   manifest)   manifest_block; exit 0 ;;
+  file)       file_ticket; exit $? ;;   # R17 approval flow: the apparatus files; the maintainer taps `approved`
   ""|request) : ;;   # default → compose + present
-  *)          die "unknown argument '$1' (use: manifest | request | --selftest | --help)" ;;
+  *)          die "unknown argument '$1' (use: manifest | request | file | --selftest | --help)" ;;
 esac
 
 mb="$(manifest_block)"
+if manifest_v2_enabled; then
+  miss="$(missing_sids "$mb" | tr '\n' ' ')"
+  [ -n "${miss// /}" ] && log "WARNING: manifest is INCOMPLETE — omits live session id(s) [ ${miss}]. A rebuild would not restore them. Run rebuild-request as core at the fedora-dev base level (not root / not a sandboxed shell)."
+  amb="$(ambiguous_v1_cwds "$mb" | tr '\n' ' ')"
+  [ -n "${amb// /}" ] && log "WARNING: manifest has a NO-SID session sharing cwd(s) [ ${amb}] — a rebuild would MIS-RESTORE via \`claude --continue\` (resume one twice, drop the other; #226). Capture as core at the fedora-dev base level so every session carries its --session-id."
+fi
 count="$(printf '%s\n' "$mb" | grep -c '^session ' || true)"
 body="$(printf '%s\n' "$mb" | compose_body)"
 

@@ -118,24 +118,28 @@ Task mentions any of:
 
 ## OPERATING SCOPE — R16 (BINDING; #167)
 
-The apparatus acts ONLY on the maintainer-confirmed repo set in `policy/scope.conf`, read via
-`bin/repo-scope.sh` (today: fedora-dev, fedora-bootstrap, fedora-desktop, e2e-alpha). Scope is
-**per-objective, not permanent** (maintainer's ruling, 2026-07-13): the org holds repos that belong
-to other people and other workstreams; a repo off-limits today may be in scope tomorrow.
+The apparatus operates on **every repository its GitHub App is installed on** — read via
+`bin/repo-scope.sh`, which ENUMERATES the App's own installation (`gh api /installation/repositories`,
+archived/forks/templates excluded). **There is NO allowlist, no `policy/scope.conf`, no hardcoded repo
+set, and no confirm-to-add ceremony** (all retired — R16 rebuild 2026-07-21, spec amendment). WHICH repos
+the apparatus works on is the **maintainer's App-access configuration**, never software: a GitHub App
+cannot create a repo on a personal account, so every repo is human-created, and the maintainer authorizes
+the apparatus on a repo by **installing the App on it** (a non-coding GitHub-settings act) and
+de-authorizes by **removing it**. **"THE PAIR" NAMES THE TWO BOXES** — `fedora-dev` (devbox) +
+`fedora-bootstrap` (host) — NOT a two-repo work ceiling: the pair's JOB is to develop EVERY repo the App
+reaches (multi-tenant, unbounded, new repos included); those two are the pair's OWN repos, self-developed
+when that is a session's objective.
 
 - **Every actuator checks scope before acting** — poller sweep, fixer, fitness review, auto-merge,
-  dev-plan/dev-loop/dev-author, host tickets/refresh. Out of scope ⇒ NO action, one loud log line.
-  Fail-closed: an unreadable scope config freezes everything but the apparatus's own two repos
-  (fedora-dev + fedora-bootstrap); a missing reader freezes all scoped action (rc≠0 is never a go).
-- **Expanding the scope is maintainer-gated, structurally** (the R1 spec-confirmation discipline):
-  the fitness gate treats a PR that NET-ADDS a repo to `policy/scope.conf` without a maintainer's
-  recorded confirmation on that PR as (b) UNSAFE — a deterministic RETURN, never a NOTE (the hole
-  #165 sailed through). Confirmation is NAME-BOUND: a PR comment whose FIRST line is exactly
-  `CONFIRMED <repo> [<repo>…]` and nothing else, its author role-checked admin|maintain via the
-  permission API — it covers exactly the repos it names, so a post-confirmation head that swaps or
-  extends the adds re-gates unconfirmed; a bare or prose `CONFIRMED` confirms nothing, and App
-  identities and label presence authorize NOTHING. Removing a repo needs no ceremony: narrowing is
-  always safe.
+  dev-plan/dev-loop/dev-author, host tickets/refresh. Out of scope (App not installed on it) ⇒ NO action,
+  one loud log line. **Fail-closed:** an unreadable App-install enumeration freezes everything but the
+  apparatus's own two repos (fedora-dev + fedora-bootstrap, so the loop can always fix/ship itself); a
+  missing reader freezes all scoped action (rc≠0 is never a go).
+- **New-repo consent is the human's, structurally:** the App-install boundary IS the gate — the
+  apparatus cannot reach a repo the App is not installed on (the credential has no access there), so it
+  can never wander onto a repo the maintainer did not open to it (the #165 leak class is dead by
+  construction, not by a software allowlist). No PR, confirmation comment, or review from the maintainer
+  brings a repo in or out of scope — only the App-install toggle. Narrowing is always the maintainer's right.
 - **SESSION DISCIPLINE (law, not code):** an agent session MUST NOT act on a repo outside its
   granted scope even via shared machinery — no enrolling it, no provisioning the clone, credential
   or config that lets an actuator reach it, no "fixing" a blocked actuator to get there. A blocked

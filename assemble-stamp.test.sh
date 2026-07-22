@@ -174,4 +174,15 @@ ck "…the failure names the verify (INERT #175)"       "$(grep -q 'INERT (#175)
 ck "…no .assembled marker (not READY)"                "$(marker .assembled)" absent
 rm -rf "$FIX"
 
+# ---- 6. DRIFT GUARD: the base-level stamp-verify must use ONLY base-available tools -----
+# claudebox-assemble.sh runs at the fedora-dev BASE level, where diffutils is NOT installed
+# (only the claudebox ships it). A base-level `cmp`/`diff` is "command not found", so the
+# verify FATALs and EVERY rebuild freezes the box .assemble-failed AND tears down live
+# sessions (observed live 2026-07-21; #175 shipped a base-level `cmp`). The verify must
+# hash-compare with sha256sum (coreutils). Comment lines are excluded from the scan.
+ck "stamp-verify invokes no cmp/diff in code (base lacks diffutils)" \
+   "$(grep -E '\b(cmp|diff)\b' "$REPO/claudebox-assemble.sh" | grep -cvE '^[[:space:]]*#')" 0
+ck "stamp-verify hash-compares with sha256sum (base-available)" \
+   "$([ "$(grep -cE '\bsha256sum\b' "$REPO/claudebox-assemble.sh")" -ge 1 ] && echo yes || echo no)" yes
+
 echo "-----"; echo "PASS=$pass FAIL=$fail"; [ "$fail" -eq 0 ]

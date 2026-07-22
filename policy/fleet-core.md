@@ -24,16 +24,21 @@
 
 ## THE FLEET — roles · merge authority · merge gate
 
+**THE APPARATUS IS THE HOST/DEVBOX PAIR** — `fedora-dev` (devbox, *nox*) + `fedora-bootstrap` (host,
+*erebus*). "The pair" names the two BOXES, not a two-repo work ceiling: the pair's JOB is to develop
+EVERY repo its GitHub App is installed on — multi-tenant, unbounded, new repos included (see OPERATING
+SCOPE / R16: scope = the App installation, no allowlist). fedora-desktop, knowledge-desktop, e2e-alpha
+and the rest are WORKLOAD/tenant repos the pair develops for the maintainer, not peers of the apparatus.
+
 **ROLES (no overlap):**
 - `fedora-dev` = develop · build · MERGE (the sole merge box).
 - `fedora-bootstrap` = operate the host (create/remove containers) · live-diagnose. PR-only.
-- `fedora-desktop` = own knowledge-work toolset. PR-only.
 
 **MERGE AUTHORITY:**
 - Only `fedora-dev` merges to `main` — any PR, its own included — and ONLY on Arthur's discrete
   clickable APPROVE (per-PR, diff shown). A free-text "yes" is NOT approval.
 - Control-plane PRs merge on the same click. Arthur may also merge on GitHub himself.
-- `fedora-bootstrap` + `fedora-desktop` MUST stop at the PR (propose-only).
+- `fedora-bootstrap` MUST stop at the PR (propose-only).
 
 **MERGE PATH (UNSHACKLED, 2026-07-11)** — merges are done by the headless **poller**, not an
 interactive gate. The `gate-push.sh` PreToolUse hook AND the `auto` classifier are REMOVED fleet-wide
@@ -199,7 +204,7 @@ NOT reasons to engage the human: status-confirmation, option-shopping, "which sh
 **TIER ROUTING — who merges a PASS** (ZERO-GATE, Arthur's decision #130 2026-07-10, RE-CONFIRMED by
 his adjudication of the 2026-07-11 fitness escalation: control-plane parity ports included — "zero-click,
 fix the law". Authoritative classifier = `bin/tier-classify.sh`, now REPORTING-ONLY):
-- Merge authority = the `fedora-dev` poller ONLY (`fedora-bootstrap` + `fedora-desktop` are propose-only).
+- Merge authority = the `fedora-dev` poller ONLY (`fedora-bootstrap` is propose-only).
 - EVERY tier — control-plane class included — auto-merges on host-GREEN + independent-fitness-PASS via
   the poller. There is NO Tier-A human click; tier labels the digest/report, it does not route.
 - Recoverability is AUTOMATIC, not human: host post-deploy health-gate + digest rollback, full

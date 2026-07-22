@@ -469,6 +469,15 @@ tenant makes one load-bearing.
   `repo-scope.sh union`, per-repo `check` to `owner`-resolved `SCOPE_SESSION`, and pass the owner SID to
   the per-PR sub-actuators — behind a `POLLER_ARMED=0` dry-run soak (it controls merges: highest-risk,
   done last). The `union`/`owner` verbs are built + tested now; only the wiring is deferred.
+  **[PRE-CUTOVER GATES LANDED — R34/#210]** The cutover removes the `scope.conf` ceiling that today makes
+  any self-provisioned session scope NON-actionable (a session can only NARROW the ceiling). The R34
+  review of #209 required the two provenance gates below to land BEFORE that removal, and they now have:
+  (1) `transcribe --objective` resolves the backing sha ONLY from `origin/main` (the HEAD fallback is
+  DROPPED — a self-authored `~/work/<repo>` with no gated remote main can no longer back a scope off a
+  local HEAD), and (2) the read path (`session_scope_verified` → `objective_sha_gated`) fails a session
+  CLOSED (`UNGATED`) unless its backing sha is an ancestor of `origin/main`. So a session cannot
+  self-author its own scope; the actual repoint + `scope.conf` deletion below stays deferred (it needs a
+  maintainer-authored apparatus `<sid>.objective` in place + a clean soak — a deploy step, not a code PR).
 - **DELETE `policy/scope.conf`** and drop the transitional `diff-adds` arm from `fitness-review.sh`
   (the objective-adds gate is the authority) — strictly AFTER the cutover soaks clean.
 - **fedora-desktop / e2e-alpha / knowledge-desktop** migrate to their own objective-backed sessions (or
@@ -477,10 +486,12 @@ tenant makes one load-bearing.
   when a backing repo's clone is absent (a non-issue for the apparatus objective, whose backing repo
   `fedora-dev` is always local — the kd session's backing lives in the knowledge-desktop repo and needs
   either its clone present or this backend before it verifies).
-- **`is-ancestor-of-main` sha hardening:** the read-path re-verify closes the hand-edited-`.session`
-  vector; a residual local-commit-forgery (crafting a local commit that lists an extra repo — same
-  home-volume-write trust level as editing `.session` directly) is hardened by pinning the backing sha
-  to an ancestor of `origin/main`.
+- **`is-ancestor-of-main` sha hardening [BUILT — R34/#210]:** the read-path re-verify already closed the
+  hand-edited-`.session`-widening vector (MISMATCH); `objective_sha_gated` now ALSO pins the backing sha
+  to an ancestor of `origin/main` (`UNGATED` otherwise), closing the local-commit-forgery variant (a local
+  widening commit is reachable from HEAD but not from `origin/main`). RESIDUAL (disclosed, not theater): a
+  locally-forged `refs/remotes/origin/main` is the same home-volume-write trust level as editing `.session`
+  directly — this gate raises the bar, it is not a hard boundary against a fully-compromised session.
 - **Section-confined objective-adds:** the detector is a strict-grammar SUPERSET (a stray backticked
   `owner/repo` table row anywhere in `00-OBJECTIVES.md` triggers a safe RETURN); confining it to the
   scope section is polish, not safety.

@@ -110,7 +110,7 @@ esac
 esid="$sid"
 [ -n "$esid" ] || esid="$(printf ' %s ' "$*" | grep -oE -- ' (--resume|--session-id|-r)[= ][0-9a-fA-F-]{36}' | grep -oE -- '[0-9a-fA-F-]{36}' | head -1 || true)"
 scope_seed="${SCOPE_SELF_SEED:-$HOME/.local/share/fedora-dev/bin/session-scope-seed.sh}"
-[ -n "$esid" ] && [ -x "$scope_seed" ] && SESSION_HOLDER_PID=$$ "$scope_seed" "$esid" 2>/dev/null || true
+[ -n "$esid" ] && [ -x "$scope_seed" ] && SESSION_HOLDER_PID=$$ "$scope_seed" "$esid" >/dev/null 2>&1 || true
 
 attempt=0
 while :; do
@@ -125,6 +125,7 @@ while :; do
             SEED_CWD="$1"; SID="$2"; shift 2
             s="$HOME/.local/share/fedora-dev/bin/seed-claude-trust.py"
             [ -f "$s" ] && command -v python3 >/dev/null 2>&1 && python3 "$s" "$SEED_CWD" 2>/dev/null || true
+            export FD_INTERACTIVE=1   # marks THIS as an interactive session for the anti-stall Stop hook; headless `claude -p` (which bypasses this wrapper) never sets it, so the hook never touches a bounded headless run
             exec /usr/bin/claude ${SID:+--session-id "$SID"} --model default --permission-mode auto --effort ultracode "$@"
         ' bash "$PWD" "$sid" "$@"
     rc=$?
