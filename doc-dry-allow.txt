@@ -1,0 +1,37 @@
+# doc-dry-allow.txt — the reviewable LEDGER of cross-document clause duplications judged INTENTIONAL.
+# Read by bin/doc-dry-audit.sh (the BP9 cross-document DRY drift-audit, fedora-dev#206). Any normalized
+# clause listed here is subtracted from the audit, so the audit is GREEN on the current tree and RED only
+# on NEW cross-doc duplication. This is a ledger, NOT a silence: every entry names WHY the overlap is
+# accepted. Prefer fixing (one authoritative home + a one-line pointer) over adding a line here.
+#
+# FORMAT: a `#` line is a comment; a blank line is ignored; every other line is a normalized clause
+#         (lowercase, alnum-collapsed — copy it verbatim from the audit's RED / --list output).
+#
+# ── BASELINE (2026-07-19, BP9 statement -> tooling, #206) ────────────────────────────────────────────
+# The pre-existing cross-layer restatements present when the audit first landed. BP9 was enforced by
+# review, not machine, until now; these are the accepted overlaps of that era. The audit's job from here
+# is to gate NEW drift — retrofitting each of these into a single-home+pointer is follow-up review work
+# over the maintainer-confirmed Trinity, deliberately out of this MVP's scope.
+
+# BP3 CAPABILITY-RELATIVE MINIMALISM — stated as an objective (00-OBJECTIVES.md) and instantiated per-repo
+# (CLAUDE.md Principle 3). Cross-layer principle -> instantiation.
+a lighter option that reduces the capability is not more minimal
+
+# R1 SPEC-CONFIRMATION — the "amendment = a new maintainer confirmation" rule appears in both Trinity legs
+# (00-OBJECTIVES.md the WHY, 00-REQUIREMENTS.md the WHAT).
+amendment is a new maintainer confirmation r1 never a silent edit
+
+# LIVE-GATE ENROLMENT — the "label the PR + ship a .live-gate" mechanism, in the cross-box map (FLEET.md)
+# and the per-repo dev-loop rules (CLAUDE.md).
+enroll one just by labelling its pr and shipping a
+
+# BP9 ITSELF — the DRY rule stated in its home (00-BUILDPRINCIPLE.md BP9) and restated in CLAUDE.md's
+# binding DOC ARCHITECTURE section (the per-repo instantiation agents read while editing this repo).
+every other mention is a one line pointer or deleted
+evidence and benchmarks live only in the principle they prove
+
+# DEFINITION OF DONE — "not done until proven live on the target" across both Trinity legs.
+not done until verified live on the target
+
+# PER-ITERATION AUTONOMY — "the human is out of the loop" stated in CLAUDE.md and FLEET.md.
+the human is out of this per iteration loop
