@@ -50,11 +50,18 @@
 #
 #   CONTROL repo (HOST_REFRESH_CONTROL_REPO, default fedora-bootstrap — the erebus host's own repo):
 #   a merged change touching host-executed paths (anything but docs/tests/CI — HOST_REFRESH_INERT_RE)
-#   has NO allowlisted apply verb: the host agent's fixed allowlist is exactly `redeploy <workload>`.
-#   So SURFACE a question on the merged PR (`host-refresh → host-apply needed:`, once per PR, same
-#   anchor-dedup discipline) instead of inventing an unbounded host op (req 2 — destructive/unbounded
-#   host verbs are out of #163's scope). When a bounded apply verb ever lands in host-agent-watch.sh,
-#   this arm is the seam that files it.
+#   FILES exactly one `apply-bootstrap` ticket via bin/host-ticket.sh — the bounded host verb has landed
+#   (#133/#187): the host FF-pulls the control clone to merged `main` + re-runs setup.sh AS ROOT,
+#   health-gated with rollback + a fail-closed live readback, idempotent (same-sha ⇒ no-op). apply-boot-
+#   strap takes NO arg (it applies pinned, merge-gated `main`, injecting nothing — the merge gate is the
+#   content-authorization). CONFIG-CONVERGE ONLY: it re-installs the Quadlet FILE + daemon-reload but
+#   does NOT recreate a running container, so a changed Quadlet `Environment=`/`Secret=` takes effect on
+#   the next recreate (the approved-gated Tier-2 recreate is a disclosed follow-on). Same anchor-dedup
+#   discipline as the workload arm: a `host-refresh → apply-filed:` comment is the audit trail + the
+#   wiped-state dedup anchor; a duplicate filing is a harmless no-op (host idempotency + the agent's
+#   per-ticket claim/outcome markers). TRANSITION: a PR already carrying the pre-#187 `host-refresh →
+#   host-apply needed:` question is left alone — it was surfaced for a human to apply when no verb
+#   existed; only FRESH merges (neither anchor) are filed.
 #
 # FAIL-SAFE (req 5): every failure path — list/files/run/comments fetch, ticket create, comment post —
 # LOGS and DEGRADES TO THE STATUS QUO (skip now, retry next scan, the monthly timer as backstop).
@@ -264,17 +271,23 @@ scan_control(){ # <control repo>
     fi
     cmts="$(gh pr view "$pr" --repo "$slug" --json comments -q '.comments[].body' 2>/dev/null)" \
       || { log "$slug#$pr: comments fetch failed — retry next scan"; continue; }
-    if printf '%s' "$cmts" | grep -qF 'host-refresh → host-apply needed:'; then
+    # wiped-state dedup (req 4): the PR's own comment stream is the durable record. Skip if we already
+    # FILED (the `apply-filed:` anchor) OR — TRANSITION — if the pre-#187 `host-apply needed:` question
+    # is present (that PR was surfaced for a human to apply back when no verb existed; never re-file it).
+    if printf '%s' "$cmts" | grep -qF 'host-refresh → apply-filed:' \
+       || printf '%s' "$cmts" | grep -qF 'host-refresh → host-apply needed:'; then
       : > "$mark"; continue
     fi
-    # REQUIREMENT 2, THE HONEST HALF: the host agent's allowlist holds NO bounded apply verb (it is
-    # exactly `redeploy <workload>`), and #163 forbids inventing an unbounded host op — so SURFACE.
-    if gh pr comment "$pr" --repo "$slug" --body "**host-refresh → host-apply needed:** this merged \`$repo\` change touches host-executed paths, but the host agent's verb allowlist has no bounded apply verb (allowed today: \`redeploy <workload>\`) — the running host will NOT pick it up automatically. A human must apply it on erebus (ff-pull the host clone and re-stamp what it feeds), or a bounded apply verb must first land in \`host-agent-watch.sh\` (a fedora-bootstrap change — deliberately not invented here: destructive/unbounded host ops are out of #163's scope). When such a verb exists, bin/host-refresh.sh's control-repo arm is the seam that will file it."$'\n\n'"<sub>bin/host-refresh.sh (#163) — the host half of self-refresh; asked once per merged PR.</sub>" >/dev/null 2>&1; then
-      log "$slug#$pr: merged control-repo change touches host-executed paths and no allowlisted apply verb exists — surfaced a question on the PR"
-      : > "$mark"
-    else
-      log "$slug#$pr: host-apply question POST failed — retry next scan"
-    fi
+    # #133/#187: the bounded `apply-bootstrap` verb now exists on the host agent — FILE it (NO arg; it
+    # applies pinned, merge-gated `main`). The host FF-pulls the control clone + re-runs setup.sh as root,
+    # health-gated with rollback + a fail-closed readback; idempotent (same-sha ⇒ no-op). CONFIG-CONVERGE,
+    # not a container recreate — a changed Quadlet env takes effect on the next recreate (disclosed).
+    url="$("$HOST_TICKET" apply-bootstrap)" \
+      || { log "$slug#$pr: host-ticket.sh (apply-bootstrap) FAILED — no ticket filed; retry next scan"; continue; }
+    log "$slug#$pr (merge ${oid:0:7}): merged control-repo change touches host-executed paths → apply-bootstrap ticket filed: $url"
+    gh pr comment "$pr" --repo "$slug" --body "**host-refresh → apply-filed:** $url — merge \`${oid:0:7}\` touches host-executed paths; the host agent's \`apply-bootstrap\` FF-pulls the control clone to merged \`main\` + re-runs setup.sh as root (health-gated with rollback + a fail-closed live readback; idempotent, same-sha ⇒ no-op). This is config-converge ON DISK — a changed Quadlet \`Environment=\`/\`Secret=\` takes effect on the next container recreate (the approved-gated Tier-2 recreate is the disclosed follow-on)."$'\n\n'"<sub>bin/host-refresh.sh (#163) — the host half of self-refresh; this comment is also the wiped-state dedup anchor.</sub>" >/dev/null 2>&1 \
+      || log "$slug#$pr: apply-filed audit comment FAILED (the ticket IS filed: $url); dedup rests on the local marker until a comment lands"
+    : > "$mark"
   done 3<<< "$rows"
 }
 

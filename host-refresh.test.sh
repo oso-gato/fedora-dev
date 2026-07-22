@@ -6,7 +6,9 @@
 # health-gate + digest rollback) was proven live, but NOTHING fired it on a merge — a merged
 # Containerfile/install/entrypoint change reached erebus only on the MONTHLY workload-refresh timer or
 # a human runbook. This proves the trigger: bin/host-refresh.sh files exactly ONE `redeploy <workload>`
-# ticket per image-baked merge, and only AFTER CI actually published the image.
+# ticket per image-baked merge (only AFTER CI actually published the image), and — for a CONTROL-repo
+# merge touching host-executed paths — exactly ONE `apply-bootstrap` ticket (#133/#187: the bounded
+# verb has landed; the arm that once only surfaced a question now files it).
 #
 # HOW IT BITES — only `gh` is stubbed (answering at gh's own -q output level, per-case fixture files);
 # the ticket producer is the REAL bin/host-ticket.sh (so the recorded ticket pins the consumer's
@@ -110,7 +112,10 @@ run_poller(){ # extra env…  (drives the REAL poller --once; empty fixtures ⇒
 haslog(){ grep -qF "$1" "$OUT"; }
 tickets(){ wc -l 2>/dev/null < "$CASE/tickets.log" || echo 0; }
 recs(){ wc -l 2>/dev/null < "$CASE/scan.rec" || echo 0; }
-applyqs(){ grep -c 'host-apply needed' "$CASE/prcomments.log" 2>/dev/null || echo 0; }
+# grep -c emits "0"+exit1 on an existing-but-unmatched file, so a `|| echo 0` would double-emit; capture
+# then default so the helper ALWAYS prints exactly one number (missing file → "" → 0; match → N).
+applyqs(){ local n; n="$(grep -cF 'host-apply needed' "$CASE/prcomments.log" 2>/dev/null || true)"; echo "${n:-0}"; }
+applyfiled(){ local n; n="$(grep -cF 'host-refresh → apply-filed:' "$CASE/prcomments.log" 2>/dev/null || true)"; echo "${n:-0}"; }
 
 # ===================================================================================================
 echo "== REQ 1+6: an image-baked merge files exactly ONE redeploy ticket — AFTER publish =="
@@ -195,33 +200,45 @@ ck "$([ "$(tickets)" = 0 ] && echo 1 || echo 0)" "filed $(tickets) tickets for a
 ck "$(haslog 'catch-up window' && echo 1 || echo 0)" "the window park was not logged"
 done_case
 
-echo "== REQ 2: a merged CONTROL-repo change SURFACES its host apply — no verb is invented =="
-DESC="host-path bootstrap merge → one question comment, zero tickets; doc-only → silence"; OK=1
+echo "== REQ 2 (#133/#187): a merged CONTROL-repo change FILES one apply-bootstrap ticket =="
+DESC="host-path bootstrap merge → one apply-bootstrap ticket (right grammar) + apply-filed anchor; idempotent"; OK=1
 setup_case
 printf '126\t%s\t%s\n' "$OID" "$FRESH"            > "$CASE/merged-fedora-bootstrap.tsv"
 printf 'container-refresh.sh\n'                   > "$CASE/files-fedora-bootstrap-126.txt"
 run_scan HOST_REFRESH_WORKLOADS=
-ck "$([ "$(applyqs)" = 1 ] && echo 1 || echo 0)" "surfaced $(applyqs) host-apply questions, want exactly 1"
-ck "$([ "$(tickets)" = 0 ] && echo 1 || echo 0)" "invented a host ticket ($(tickets)) for a verb the allowlist does not hold"
-run_scan HOST_REFRESH_WORKLOADS=
-ck "$([ "$(applyqs)" = 1 ] && echo 1 || echo 0)" "re-asked the same question ($(applyqs) total) — not idempotent"
+ck "$([ "$(tickets)" = 1 ] && echo 1 || echo 0)" "filed $(tickets) apply-bootstrap tickets, want exactly 1"
+ck "$([ "$(head -1 "$CASE/ticket-bodies.txt" 2>/dev/null)" = "host-op: apply-bootstrap" ] && echo 1 || echo 0)" "ticket line 1 is not the consumer's 'host-op: apply-bootstrap' grammar (no arg)"
+ck "$([ "$(applyfiled)" = 1 ] && echo 1 || echo 0)" "no 'apply-filed:' audit/dedup comment on the merged PR"
+ck "$([ "$(applyqs)" = 0 ] && echo 1 || echo 0)" "surfaced the pre-#187 question ($(applyqs)) — the verb exists now, it must FILE not ask"
+run_scan HOST_REFRESH_WORKLOADS=                   # same HOME — the scan-once marker parks it
+ck "$([ "$(tickets)" = 1 ] && echo 1 || echo 0)" "a re-scan filed again ($(tickets) total) — not idempotent"
 done_case
 
-DESC="doc-only bootstrap merge → no question (nothing for the running host)"; OK=1
+DESC="doc-only bootstrap merge → no ticket (nothing for the running host to apply)"; OK=1
 setup_case
 printf '127\t%s\t%s\n' "$OID" "$FRESH"            > "$CASE/merged-fedora-bootstrap.tsv"
 printf 'README.md\n'                              > "$CASE/files-fedora-bootstrap-127.txt"
 run_scan HOST_REFRESH_WORKLOADS=
-ck "$([ "$(applyqs)" = 0 ] && echo 1 || echo 0)" "surfaced a question for a doc-only merge"
+ck "$([ "$(tickets)" = 0 ] && echo 1 || echo 0)" "filed $(tickets) tickets for a doc-only merge, want 0"
 done_case
 
-DESC="wiped state + a prior host-apply anchor on the bootstrap PR → no re-ask"; OK=1
+DESC="REQ 4: wiped state + a prior apply-filed anchor on the bootstrap PR → no re-file"; OK=1
 setup_case
 printf '128\t%s\t%s\n' "$OID" "$FRESH"            > "$CASE/merged-fedora-bootstrap.tsv"
 printf 'host-agent-watch.sh\n'                    > "$CASE/files-fedora-bootstrap-128.txt"
-printf '**host-refresh → host-apply needed:** …\n' > "$CASE/comments-fedora-bootstrap-128.txt"
+printf '**host-refresh → apply-filed:** https://github.com/oso-gato/fedora-bootstrap/issues/41 — …\n' \
+                                                  > "$CASE/comments-fedora-bootstrap-128.txt"
 run_scan HOST_REFRESH_WORKLOADS=
-ck "$([ "$(applyqs)" = 0 ] && echo 1 || echo 0)" "a wiped box re-asked despite the PR's own anchor"
+ck "$([ "$(tickets)" = 0 ] && echo 1 || echo 0)" "a wiped box re-filed ($(tickets)) despite the PR's own apply-filed anchor"
+done_case
+
+DESC="TRANSITION: a PR carrying the pre-#187 'host-apply needed:' question is left alone (never re-filed)"; OK=1
+setup_case
+printf '129\t%s\t%s\n' "$OID" "$FRESH"            > "$CASE/merged-fedora-bootstrap.tsv"
+printf 'host-agent-watch.sh\n'                    > "$CASE/files-fedora-bootstrap-129.txt"
+printf '**host-refresh → host-apply needed:** …\n' > "$CASE/comments-fedora-bootstrap-129.txt"
+run_scan HOST_REFRESH_WORKLOADS=
+ck "$([ "$(tickets)" = 0 ] && echo 1 || echo 0)" "re-filed apply-bootstrap ($(tickets)) for a PR already surfaced for a human — the transition must leave it alone"
 done_case
 
 # ---------------------------------------------------------------------------------------------------
