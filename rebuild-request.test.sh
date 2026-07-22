@@ -158,22 +158,9 @@ fixture 'main\t/bad path\t\n'
 out="$(SESSION_SOURCE="$STUB" bash "$TMPD/mutcwd.sh" manifest)"; printf '%s\n' "$out" | exec_parse_manifest >/dev/null; rc=$?
 check "cwd-mutation: executor now REJECTS (rc=2)" '[ "$rc" = 2 ]'
 
-# ── Row 8: default (request) mode composes a body whose line 1 is the op + a 4-field manifest parses ──
-fixture "main\t/home/core\t$UUID\n"
-REBUILD_REQUEST_OUT="$TMPD/body.md" SESSION_SOURCE="$STUB" DEVBOX_MANIFEST_V2=1 bash "$SUT" >/dev/null 2>&1
-check "request: body written"                   '[ -s "$TMPD/body.md" ]'
-check "request: line 1 is the exact op"         '[ "$(head -1 "$TMPD/body.md")" = "host-op: rebuild-devbox fedora-dev" ]'
-exec_parse_manifest < "$TMPD/body.md" >/dev/null; rc=$?
-check "request: body manifest parses rc=0"      '[ "$rc" = 0 ]'
-check "request: body carries the sid"           '[ "$(exec_parse_manifest < "$TMPD/body.md")" = "$(printf "main\t/home/core\t%s" "$UUID")" ]'
-
-# ── Row 9: the pure-helper selftest passes ───────────────────────────────────────────────────────────
-bash "$SUT" --selftest >/dev/null 2>&1
-check "--selftest passes"                       '[ "$?" = 0 ]'
-
-# ═══ FILE MODE (R17 approval flow — pairs with fedora-bootstrap v1.2.69) ═════════════════════════════
-# A stub gh serves `issue list` (the dedup probe, from $FAKE_OPEN — the value the real -q would emit)
-# and RECORDS `issue create` (title/labels/body-file content). A stub repo-scope answers R16 ($SCOPE_OK).
+# ── stub gh (serves `issue list` for the dedup probe from $FAKE_OPEN; records create/label) + a stub ──
+#    repo-scope — SHARED by the request-mode (Row 8) and file-mode rows below. Defined here so Row 8's
+#    dedup probe never touches the real network (No GitHub contract).
 FBIN="$TMPD/fbin"; mkdir -p "$FBIN"
 cat > "$FBIN/gh" <<'GHEOF'
 #!/usr/bin/env bash
@@ -196,6 +183,33 @@ GHEOF
 chmod +x "$FBIN/gh"
 printf '#!/usr/bin/env bash\n[ "${SCOPE_OK:-1}" = 1 ] && exit 0 || exit 1\n' > "$FBIN/repo-scope-stub"
 chmod +x "$FBIN/repo-scope-stub"
+
+# ── Row 8: default (request) mode — body op line + the SHARED 🔴 title/labels (must NOT drift from file
+#    mode — the #242/#243 incident) + the dedup that points at an already-open ticket ─────────────────
+fixture "main\t/home/core\t$UUID\n"
+RQOUT="$TMPD/rq.out"
+REBUILD_REQUEST_OUT="$TMPD/body.md" SESSION_SOURCE="$STUB" DEVBOX_MANIFEST_V2=1 PATH="$FBIN:$PATH" FAKE_OPEN='' bash "$SUT" >"$RQOUT" 2>/dev/null
+check "request: body written"                   '[ -s "$TMPD/body.md" ]'
+check "request: line 1 is the exact op"         '[ "$(head -1 "$TMPD/body.md")" = "host-op: rebuild-devbox fedora-dev" ]'
+check "request: presented title is the 🔴 one (matches file mode)" 'grep -q "🔴 APPROVAL REQUIRED: rebuild-devbox fedora-dev (1 session(s))" "$RQOUT"'
+check "request: presents the rebuild-approval label"  'grep -q -- "--label rebuild-approval" "$RQOUT"'
+check "request: prefilled URL carries BOTH labels"    'grep -q "labels=host-task%2Crebuild-approval" "$RQOUT"'
+exec_parse_manifest < "$TMPD/body.md" >/dev/null; rc=$?
+check "request: body manifest parses rc=0"      '[ "$rc" = 0 ]'
+check "request: body carries the sid"           '[ "$(exec_parse_manifest < "$TMPD/body.md")" = "$(printf "main\t/home/core\t%s" "$UUID")" ]'
+
+# ── Row 8b: request-mode DEDUP — an already-OPEN ticket ⇒ point at it, present NO new-issue URL (the ──
+#    #243/#242 hand-filed duplicate). FAKE_OPEN feeds the stub gh's issue-list output.
+REBUILD_REQUEST_OUT="$TMPD/body.md" SESSION_SOURCE="$STUB" DEVBOX_MANIFEST_V2=1 PATH="$FBIN:$PATH" FAKE_OPEN='88' bash "$SUT" >"$TMPD/rq-dup.out" 2>/dev/null
+check "request: dedup points at the existing #88" 'grep -q "ALREADY EXISTS" "$TMPD/rq-dup.out" && grep -q "issues/88" "$TMPD/rq-dup.out"'
+check "request: dedup presents NO new-issue URL"  '! grep -q "issues/new" "$TMPD/rq-dup.out"'
+
+# ── Row 9: the pure-helper selftest passes ───────────────────────────────────────────────────────────
+bash "$SUT" --selftest >/dev/null 2>&1
+check "--selftest passes"                       '[ "$?" = 0 ]'
+
+# ═══ FILE MODE (R17 approval flow — pairs with fedora-bootstrap v1.2.69) ═════════════════════════════
+# Reuses the stub gh + repo-scope defined above Row 8 (the shared dedup-probe / create-recorder).
 run_file(){ # extra env…  — deliberately does NOT set DEVBOX_MANIFEST_V2: the FILING path must default v2
             # ON itself (incident 2026-07-19: env-dependent v2 filed a v1 cwd-scoped manifest live — a
             # multi-tenant collapse for sessions sharing one cwd; the sid row below proves the default)
