@@ -1,0 +1,14 @@
+# CODEOWNERS — the CONFIRMED SPEC (the "Trinity": objective + requirements + build principles) and the
+# maintainer's constitution GOVERNANCE.md are MAINTAINER-MERGE-ONLY (R1): amending them is a NEW
+# maintainer confirmation, never an autonomous merge.
+#
+# Listing the maintainer here makes GitHub auto-REQUEST their review on any PR touching these paths — it
+# surfaces in the GitHub app (Review requested) — and, WITH a branch-protection "Require review from Code
+# Owners" rule on `main`, BLOCKS the merge (even a raw-API merge) until the maintainer approves. That
+# server-side rule is a one-time maintainer settings act; this file + the dev-side auto-merge.sh Trinity
+# guard (which also assigns the maintainer) are the versioned, durable belt.
+
+/00-OBJECTIVES.md      @oso-gato
+/00-REQUIREMENTS.md    @oso-gato
+/00-BUILDPRINCIPLE.md  @oso-gato
+/GOVERNANCE.md         @oso-gato

@@ -144,6 +144,31 @@ defects caught: two rebuild-bricks, an overclaimed safety statement, a false ver
 
 ## 6. Resolved decisions (each states DECISION vs current STATUS explicitly)
 
+**(f) TRINITY = MAINTAINER-MERGE-ONLY — durable enforcement of R1 (the maintainer's decision, 2026-07-23).**
+- **DECISION (the maintainer, this session):** a PR that amends the confirmed spec (the Trinity —
+  `00-OBJECTIVES.md` / `00-REQUIREMENTS.md` / `00-BUILDPRINCIPLE.md`) or this `GOVERNANCE.md` must be
+  **merged by the human maintainer, never autonomously**, and must be **assigned to `@oso-gato`** so it
+  surfaces clearly in the GitHub app. "Make it durable and update the docs."
+- **What it changes:** the ONE documented exception to the zero-gate auto-merge model (§6(c)). It closes
+  the 2026-07-22 audit's finding #16 (a confirmed-requirement edit, PR #224, had auto-merged — the spec
+  was immutable only on paper). Three enforcing layers, defence in depth:
+  (1) **loop guard** — `bin/auto-merge.sh` detects a Trinity/GOVERNANCE path in the PR's files and
+  REFUSES (exit 4, a distinct "maintainer-merge hold" the poller parks QUIETLY, not a trust-boundary
+  alarm), while assigning `@oso-gato` + labelling `maintainer-merge`;
+  (2) **server-side review-request** — `.github/CODEOWNERS` maps those paths to `@oso-gato`, so GitHub
+  auto-requests the maintainer's review (visible in the app);
+  (3) **server-side block (maintainer's one-time settings act)** — a branch-protection / ruleset
+  "Require review from Code Owners" on `main` makes GitHub BLOCK the merge (even a raw-API merge) until
+  the maintainer approves — the belt to the loop-guard suspenders, and it also closes the known
+  raw-API-merge residual for these paths.
+- **ADVERSE EFFECTS (recorded):** Trinity/GOVERNANCE PRs no longer merge autonomously — they wait for
+  the maintainer (intended; a rare, high-consequence class). The nox App cannot self-approve a
+  Code-Owner-review requirement, so even a doctrine-audit-proposed spec amendment is correctly BLOCKED on
+  the human (R1). Non-Trinity work is unaffected — the whole rest of the loop stays zero-gate autonomous.
+- **STATUS: ENACTED** via the PR carrying this entry (the loop guard + CODEOWNERS + the R1/objective doc
+  codification). Layer (3), the branch-protection rule, is the maintainer's one-time GitHub-settings act
+  (mirror it as versioned config per R15).
+
 **(d) MVP-FIRST SEVERITY — the maintainer's recorded enactment (2026-07-12).**
 - **DECISION (the maintainer's own words, posted from his account `oso-gato` on fedora-dev#158 —
   https://github.com/oso-gato/fedora-dev/pull/158#issuecomment-4951654555):**
