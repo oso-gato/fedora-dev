@@ -1,0 +1,34 @@
+name: e2e-suite
+
+# R14 END-TO-END ACCEPTANCE (00-REQUIREMENTS.md:63-64), the OFFLINE portion, machine-run. This is the
+# FIRST CI job that executes a repo test suite (the audit-2026-07-22 #25 gap: build.yml only builds the
+# image; nothing ran the ~35 *.test.sh). It runs e2e-suite.test.sh + `bin/e2e-suite.sh all` — the pure
+# core, the faithful-offline E2E-ISO drill (real bin/session-registry.sh), the anti-theater PARTIAL fold,
+# and the honest ledger. It is OFFLINE: no secrets, no App creds, no host.
+#
+# NOT run here (disclosed, R37): the LIVE proofs E2E-A/B/KILL/SELF and the LIVE interaction-count audit
+# need an App-installed repo / the host live-gate / a real dual-box kill / the staggered refresh — none
+# exist in a GitHub-Actions runner. Those are the box/host CANARY, seated by the monthly schedule below
+# as a heartbeat but computed for real only on the live pair.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 5 15 * *"   # monthly canary — 15th 05:00 UTC (an hour after build.yml's rebuild cadence)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (docs + bin/e2e-suite.sh + bin/session-registry.sh)
+        uses: actions/checkout@v4
+      - name: e2e-suite test (pure core + iso drill + anti-theater + ledger + audit)
+        run: bash e2e-suite.test.sh
+      - name: e2e-suite all (offline scenarios; iso GREEN, A/B/KILL/SELF STAGED → PARTIAL)
+        run: AUTONOMY_RUNS_DIR="$RUNNER_TEMP/autonomy-runs" bash bin/e2e-suite.sh all
