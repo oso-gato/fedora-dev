@@ -104,6 +104,12 @@ DEADMAN_EXPECT_POLLER="${DEADMAN_EXPECT_POLLER:-1}"    # 1 = a poller SHOULD be 
 DEADMAN_CLONE="${DEADMAN_CLONE:-$(dirname "$HERE")}"   # bin/ sits inside the live clone
 DEADMAN_REMOTE="${DEADMAN_REMOTE:-origin}"
 DEADMAN_BRANCH="${DEADMAN_BRANCH:-main}"
+# @mention the maintainer at the TOP of the anomaly-issue BODY → when the issue is OPENED, GitHub
+# push-notifies that user, so the GitHub MOBILE APP (with "Direct Mentions" push on) rings the phone —
+# the same mechanism rebuild-request.sh uses for the rebuild-approval ticket. Set empty to disable. A
+# mention is a NOTIFICATION only, never authorization. (Editing the body on later updates does NOT
+# re-notify — GitHub only fires on the create; that is the intended once-per-episode ping.)
+APPARATUS_ALERT_MENTION="${APPARATUS_ALERT_MENTION:-@oso-gato}"
 DEADMAN_POLLER_LOG="${DEADMAN_POLLER_LOG:-$HOME/.local/state/pr-poller/poller.log}"
 # The FITNESS token ferry writes ~/.config/fitness/env and RE-MINTS every 40 min; if its mtime goes
 # STALE the entrypoint ferry has stalled (a dropped secret / a dead tick), so fitness-review can no
@@ -542,6 +548,7 @@ find_open_issue(){
 # taken (audit) + a timestamp.
 fmt_body(){
   local reasons="$1" resp="${2:-}" line
+  [ -n "$APPARATUS_ALERT_MENTION" ] && printf '%s — apparatus liveness anomaly (mobile-app push).\n\n' "$APPARATUS_ALERT_MENTION"
   printf '**Apparatus deadman → operator [liveness anomaly]:** the running loop failed a liveness check at %s. Current anomalies:\n\n' "$(now_iso)"
   while IFS= read -r line; do
     [ -n "$line" ] || continue

@@ -75,6 +75,7 @@ case "$1 $2" in
     for a in "$@"; do
       [ "$prev" = "--title" ] && echo "title: $a" >> "$CASE/tickets.log"
       [ "$prev" = "--body-file" ] && cat "$a" >> "$CASE/ticket-bodies.txt"
+      [ "$prev" = "--body" ] && printf '%s\n' "$a" >> "$CASE/issue-bodies.txt"   # surface_blocked's alarm uses --body
       prev="$a"
     done
     echo "https://github.com/oso-gato/fedora-bootstrap/issues/42"; exit 0;;
@@ -319,6 +320,7 @@ run_scan HOST_REFRESH_WORKLOADS=
 ck "$([ "$(applytix)" = 0 ] && echo 1 || echo 0)" "retries exhausted but still filed an apply ticket ($(applytix)) — must stop and surface"
 ck "$([ "$(applyblocked)" = 1 ] && echo 1 || echo 0)" "no loud apply-blocked PR comment on exhaustion ($(applyblocked))"
 ck "$([ "$(alarms)" = 1 ] && echo 1 || echo 0)" "no deduped BLOCKED alarm issue on exhaustion ($(alarms))"
+ck "$(grep -q '@oso-gato' "$CASE/issue-bodies.txt" 2>/dev/null && echo 1 || echo 0)" "the BLOCKED alarm body does not @mention the maintainer (no GitHub mobile-app push)"
 printf '77\n'                                     > "$CASE/search-issues.txt"   # now an alarm is open
 run_scan HOST_REFRESH_WORKLOADS=                  # re-scan: terminal marker parks it, no duplicate alarm
 ck "$([ "$(alarms)" = 1 ] && echo 1 || echo 0)" "a re-scan duplicated the BLOCKED alarm ($(alarms) total) — it must dedup and park"

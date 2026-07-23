@@ -177,6 +177,10 @@ STATE="$HOME/.local/state/host-refresh"
 # code and needs a human). BLOCKED_LABEL tags the alarm issue (created on first use).
 MAX_APPLY_RETRIES="${HOST_REFRESH_MAX_APPLY_RETRIES:-3}"
 BLOCKED_LABEL="${HOST_REFRESH_BLOCKED_LABEL:-apparatus-blocked}"
+# @mention the maintainer in the alarm-issue BODY → opening the issue push-notifies that user, so the
+# GitHub MOBILE APP (with "Direct Mentions" push on) rings the phone (same mechanism as
+# rebuild-request.sh). Empty disables it. Notification only, never authorization.
+APPARATUS_ALERT_MENTION="${APPARATUS_ALERT_MENTION:-@oso-gato}"
 log(){ echo "host-refresh: $*" >&2; }
 
 # merged_rows <slug> — ONE batched list call (number/merge-oid/mergedAt as TSV; the sweep's TSV
@@ -213,6 +217,7 @@ ticket_outcome(){
 # PR comment AND find-or-create a single deduped alarm issue in the control repo (the host is on PRIOR code).
 surface_blocked(){
   local slug="$1" pr="$2" oid="$3" attempts="$4" tnum="$5"
+  local mention="${APPARATUS_ALERT_MENTION:+$APPARATUS_ALERT_MENTION — }"   # @mention → GitHub mobile-app push
   gh pr comment "$pr" --repo "$slug" --body "**host-refresh → apply-blocked:** apply-bootstrap FAILED ${attempts}× for merge \`${oid:0:7}\` (last ticket #${tnum}) — the host is on PRIOR code and auto-retry is EXHAUSTED. A human is needed. (Auto-retry resumes only if a later merge re-arms the apply.)"$'\n\n'"<sub>bin/host-refresh.sh — bounded apply-bootstrap retry (HOST_REFRESH_MAX_APPLY_RETRIES=${MAX_APPLY_RETRIES}).</sub>" >/dev/null 2>&1 \
     || log "$slug#$pr: apply-blocked PR comment FAILED (surfacing continues via the alarm issue)"
   local title="BLOCKED: host apply-bootstrap keeps failing (${slug}#${pr})" existing
@@ -222,10 +227,10 @@ surface_blocked(){
     return 0
   fi
   gh issue create --repo "$ORG/$CONTROL_REPO" --title "$title" \
-      --body "apply-bootstrap for merge \`${oid:0:7}\` (${slug}#${pr}) FAILED and rolled back ${attempts}× (last ticket #${tnum}). The host is running PRIOR code; bounded auto-retry (${MAX_APPLY_RETRIES}) is exhausted. A human must investigate the failing apply. See ${slug}#${pr} for the apply-filed history." \
+      --body "${mention}apply-bootstrap for merge \`${oid:0:7}\` (${slug}#${pr}) FAILED and rolled back ${attempts}× (last ticket #${tnum}). The host is running PRIOR code; bounded auto-retry (${MAX_APPLY_RETRIES}) is exhausted. A human must investigate the failing apply. See ${slug}#${pr} for the apply-filed history." \
       --label "$BLOCKED_LABEL" >/dev/null 2>&1 \
     || gh issue create --repo "$ORG/$CONTROL_REPO" --title "$title" \
-      --body "apply-bootstrap for merge \`${oid:0:7}\` (${slug}#${pr}) FAILED and rolled back ${attempts}× (last ticket #${tnum}). The host is running PRIOR code; bounded auto-retry is exhausted. A human must investigate." >/dev/null 2>&1 \
+      --body "${mention}apply-bootstrap for merge \`${oid:0:7}\` (${slug}#${pr}) FAILED and rolled back ${attempts}× (last ticket #${tnum}). The host is running PRIOR code; bounded auto-retry is exhausted. A human must investigate." >/dev/null 2>&1 \
     || log "$slug#$pr: apply-blocked alarm issue create FAILED (PR comment carries the signal)"
 }
 
