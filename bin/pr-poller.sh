@@ -230,6 +230,17 @@ rebase_due(){
   [ "$n" -lt "$max" ] && echo TRY || echo GIVEUP
 }
 
+# verdict_base_void <recorded-base> <current-base> -> OK | VOID (R25 base-drift voiding). A GREEN verdict
+# records the base (target `main`) tip it was computed against; it is VOID once main advances past it
+# (current != recorded). An EMPTY recorded base (a pre-R25 verdict) is VOID (fail-closed — an unbindable
+# verdict must not gate; the rebase re-gates it into a base-bearing one). An unreadable CURRENT base is
+# OK (don't churn this sweep — auto-merge is the fail-closed backstop that re-reads it).
+verdict_base_void(){
+  local rec="$1" cur="$2"
+  [ -n "$cur" ] || { printf 'OK'; return; }
+  [ -n "$rec" ] && [ "$rec" = "$cur" ] && printf 'OK' || printf 'VOID'
+}
+
 # fix_outcome <blocked:0|1> <gated-sha> <worktree-head> <push-rc> <origin-head>
 #   -> BLOCKED | NO_COMMIT | PUSH_FAILED | NOT_LANDED | LANDED
 # The fixer's TRUTHFUL outcome — this retires the old `new head (if pushed) will re-gate` shrug, which
@@ -455,6 +466,13 @@ if [ "${1:-}" = "--selftest" ]; then
   rb "at bound → GIVEUP"   6 6 GIVEUP
   rb "over bound → GIVEUP" 9 6 GIVEUP
   rb "garbage n → TRY"     x 6 TRY
+  # R25 — a GREEN verdict is void once main advances past the base it was computed against.
+  vbv(){ local got; got="$(verdict_base_void "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — verdict_base_void($2,$3)=$got want $4"; fail=1; }; }
+  vbv "same base → OK"          aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa OK
+  vbv "drifted base → VOID"     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb VOID
+  vbv "empty recorded → VOID"   ""                                       bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb VOID
+  vbv "unreadable current → OK" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ""                                       OK
+  vbv "both empty → OK"         ""                                       ""                                       OK
   # R6 — the fixer must be told WHICH gate failed. plan() returns FIX from two routes; fix_cause pins
   # the mapping so a fitness RETURN can never again be handed a canned "host live-gate RED" prompt.
   fc(){ local got; got="$(fix_cause "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — fix_cause($2,$3)=$got want $4"; fail=1; }; }
@@ -1256,15 +1274,15 @@ sweep_repo(){
   # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
   # number (no torn read across a mid-sweep push).
   local rows
-  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid,labels \
-          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\([.labels[].name]|join(","))"' 2>/dev/null)" \
+  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid,labels,baseRefOid \
+          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\([.labels[].name]|join(","))\t\(.baseRefOid)"' 2>/dev/null)" \
     || { log "pr list failed — skipping sweep"; return 0; }
   [ -n "$rows" ] || return 0                       # zero open PRs — quiet (rc 0 distinguishes it)
   # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
   # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
   # --watch flock; FD 3 is free.
-  local pr ref sha labels comments host tier fit action files fitraw ferr frc nf ef n last now since
-  while IFS=$'\t' read -r -u 3 pr ref sha labels; do
+  local pr ref sha labels base comments host tier fit action files fitraw ferr frc nf ef n last now since
+  while IFS=$'\t' read -r -u 3 pr ref sha labels base; do
     [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
     # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — bound to THIS
@@ -1278,6 +1296,33 @@ sweep_repo(){
     # dedup: act on each (pr,sha,host-verdict) at most once for the terminal actions; REVIEW/FIX manage
     # their own re-entry (fitness marker; progress signature), so only gate the whole sweep-action here.
     local done="$STATE/acted-${pr}-${sha}-${host}.done"
+    # R25 BASE-DRIFT VOID: a GREEN verdict is bound to the base (target `main`) tip it was computed
+    # against; once main advances past it the verdict is VOID (the validated head would merge onto
+    # UNvalidated main). Route the void to the bounded server-side rebase (new head → host re-gates)
+    # rather than let auto-merge REFUSE it (a REFUSE would false-alarm as a merge-trust disagreement AND
+    # park it). This sits BEFORE the terminal-skip so a drifted-then-parked GREEN is un-parked to rebase.
+    # The recorded base is read from the ALREADY-fetched host header ($comments) — no extra gh call on the
+    # common (non-drifted) path, which falls straight through to the terminal-skip below.
+    if [ "$host" = GREEN ] && [ -n "$base" ]; then
+      local vbase; vbase="$(printf '%s' "$comments" | grep -oE 'base [0-9a-f]{40}' | grep -oE '[0-9a-f]{40}' | tail -1)"
+      if [ "$(verdict_base_void "$vbase" "$base")" = VOID ]; then
+        if [ "$POLLER_ARMED" != 1 ]; then
+          log "#$pr ${sha:0:7} — R25 base-drift VOID (verdict base ${vbase:0:7} → current ${base:0:7}); disarmed soak, no rebase"
+          continue
+        fi
+        local rn="$STATE/rebase-${pr}.n" rc_n=0; [ -f "$rn" ] && read -r rc_n < "$rn"
+        case "$rc_n" in ''|*[!0-9]*) rc_n=0;; esac
+        if [ "$(rebase_due "$rc_n" "$POLLER_REBASE_MAX")" = TRY ] \
+           && gh pr update-branch "$pr" --repo "$POLLER_REPO" >/dev/null 2>&1; then
+          echo $((rc_n+1)) > "$rn"
+          log "#$pr ${sha:0:7} — R25 base-drift: verdict void (base ${vbase:0:7}→${base:0:7}) — auto-rebased ($((rc_n+1))/$POLLER_REBASE_MAX); the new head re-gates, NOT parked"
+        else
+          surface "$pr" "$sha" "base-drift" "R25 base-drift: the GREEN verdict was computed against main tip \`${vbase:0:7}\` but main advanced to \`${base:0:7}\` — the verdict is VOID (a merge would combine this validated head with UNvalidated main commits). Bounded auto-rebase hit its bound or conflicted — rebase + push to re-gate." \
+            && : > "$done"
+        fi
+        continue
+      fi
+    fi
     # TERMINAL-STATE SKIP: once (pr,sha,GREEN) has ACTED (PRESENT posted / dry-run decided / merge
     # attempted), no further action exists for this tuple — the case arms below would only hit
     # their own `[ -f "$done" ] && continue`. Skip the GREEN-moment fetches too, so a PARKED GREEN

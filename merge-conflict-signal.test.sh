@@ -15,6 +15,7 @@ for f in "$AM" "$POLLER" "$SCOPE"; do [ -f "$f" ] || { echo "FATAL: $f not found
 pass=0; fail=0; ok(){ pass=$((pass+1)); printf '  ok   %s\n' "$1"; }; bad(){ fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 SHA=aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee
+BASE=ffffffff00000000111111112222222233333333          # R25: the base (target main) tip the verdict is bound to
 HOST=oso-gato-erebus-claudebox; FIT=oso-gato-fitness-claudebox
 printf 'fedora-dev\n' > "$TMP/scope.conf"
 
@@ -29,12 +30,13 @@ case "\$sub" in
     case "\$q" in
       *"--json author"*)      echo "someone-else";;
       *"--json headRefOid"*)  echo "$SHA";;
+      *"--json baseRefOid"*)  echo "$BASE";;                    # R25 base pin
       *"--json mergeable"*)   echo "\${MS:-MERGEABLE CLEAN}";;   # my new classification read
       *"--json files"*)       echo "bin/x.sh";;
       *"--json comments"*)
         # hdr_verdict passes the queried login in the -q string; return that login's verdict line only.
-        case "\$q" in *"$HOST"*) [ "\${GATE:-GREEN}" = RED ] && echo "**Host live-gate (Gate B): VERDICT RED** — fedora-dev @ $SHA" || echo "**Host live-gate (Gate B): VERDICT GREEN** — fedora-dev @ $SHA";; esac
-        case "\$q" in *"$FIT"*)  echo "Fitness review: VERDICT PASS — head $SHA";; esac
+        case "\$q" in *"$HOST"*) [ "\${GATE:-GREEN}" = RED ] && echo "**Host live-gate (Gate B): VERDICT RED** — fedora-dev @ $SHA base $BASE" || echo "**Host live-gate (Gate B): VERDICT GREEN** — fedora-dev @ $SHA base $BASE";; esac
+        case "\$q" in *"$FIT"*)  echo "Fitness review: VERDICT PASS — head $SHA base $BASE";; esac
         ;;
     esac;;
   "pr merge") [ "\${MERGE_FAIL:-0}" = 1 ] && { echo "gh: merge failed" >&2; exit 1; } || { echo merged; exit 0; };;

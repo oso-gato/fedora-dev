@@ -17,7 +17,9 @@
 # OTHER (G1 — one compromised token must never satisfy both gates). Verdict SELECTION and EXTRACTION
 # both read ONLY line 1 of each anchor comment (G2 — embedded candidate logs and reviewer rationale
 # are attacker-influenceable prose; neither a forged verdict nor a planted future-head anchor there
-# can act), each bound to the FULL 40-hex head sha (a 7-hex prefix would be grindable), and the
+# can act), each bound to the FULL 40-hex head sha AND the FULL 40-hex base (target main) sha (R25
+# base-drift voiding — a verdict computed against a since-advanced base matches no anchor and is void),
+# a 7-hex prefix would be grindable, and the
 # merge is --match-head-commit pinned. Same-identity fitness (FITNESS_SAME_IDENTITY=1) is DRY-RUN-ONLY:
 # --commit under it is a hard REFUSE (#96 STEP 1 — arming requires a real, distinct fitness App).
 # Else the gate is UNVERIFIABLE ⇒ REFUSE (fail-closed — a forgeable gate is treated as no gate).
@@ -113,6 +115,15 @@ fi
 head_sha="$(gh pr view "$PR" --repo "$SLUG" --json headRefOid -q .headRefOid 2>/dev/null)"
 [ -n "$head_sha" ] || { echo "[auto-merge] cannot read head sha — REFUSE (fail-closed)"; exit 1; }
 
+# R25 BASE PIN — a verdict is ALSO bound to the base (target `main`) tip it was computed against; it is
+# VOID once main advances past that base (the validated head would merge onto UNvalidated main commits).
+# The gates below additionally require the verdict's `base <sha>` token to equal this CURRENT base — a
+# drifted base matches NO verdict ⇒ gate/fit NONE ⇒ REFUSE (fail-closed; the poller then rebases to
+# re-gate). baseRefOid is the target-main TIP, not the git merge-base fork point (which does not move
+# when main advances, so it cannot detect the drift R25 targets).
+base_sha="$(gh pr view "$PR" --repo "$SLUG" --json baseRefOid -q .baseRefOid 2>/dev/null)"
+[ -n "$base_sha" ] || { echo "[auto-merge] cannot read base sha — REFUSE (fail-closed, R25)"; exit 1; }
+
 # hdr_verdict <login> <sha-anchor> <verdict-ERE> (G2): BOTH the sha-anchor SELECTION and the verdict
 # EXTRACTION read ONLY THE FIRST LINE (the machine-owned header) of each comment authored by <login>,
 # newest last, and the anchor is the FULL 40-hex head sha. WHY line-1-only: the host comment embeds
@@ -137,7 +148,7 @@ tier="$(gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/n
 # from anyone else (incl. the PR author) is ignored. No trust anchor ⇒ gate=NONE ⇒ REFUSE.
 gate="NONE"
 if [ -n "$LG_HOST_LOGIN" ] && [ "$LG_HOST_LOGIN" != "$pr_author" ]; then
-  lgc="$(hdr_verdict "$LG_HOST_LOGIN" "@ $head_sha" '^\**Host live-gate \(Gate B\): VERDICT (GREEN|RED)')"
+  lgc="$(hdr_verdict "$LG_HOST_LOGIN" "@ $head_sha base $base_sha" '^\**Host live-gate \(Gate B\): VERDICT (GREEN|RED)')"
   case "$lgc" in *GREEN) gate=GREEN;; *RED) gate=RED;; esac
 else
   echo "[auto-merge] live-gate trust anchor unset or == PR author — gate unverifiable (fail-closed)"
@@ -148,7 +159,7 @@ fi
 # invalid. No trust anchor ⇒ fit=NONE ⇒ REFUSE. (This is why the fitness harness POSTS such a comment.)
 fit="NONE"
 if [ -n "$FITNESS_LOGIN" ] && { [ "${FITNESS_SAME_IDENTITY:-0}" = 1 ] || [ "$FITNESS_LOGIN" != "$pr_author" ]; }; then
-  fvc="$(hdr_verdict "$FITNESS_LOGIN" "head $head_sha" '^Fitness review: VERDICT (PASS|RETURN|ESCALATE)')"
+  fvc="$(hdr_verdict "$FITNESS_LOGIN" "head $head_sha base $base_sha" '^Fitness review: VERDICT (PASS|RETURN|ESCALATE)')"
   case "$fvc" in *PASS) fit=PASS;; *RETURN) fit=RETURN;; *ESCALATE) fit=ESCALATE;; esac
 else
   echo "[auto-merge] fitness trust anchor unset or == PR author — fitness unverifiable (fail-closed)"

@@ -178,6 +178,10 @@ fi
 # DEDUP — one review per head SHA. If $FITNESS_LOGIN already commented a verdict since the current head,
 # don't re-review (idempotent; avoids duplicate/contradictory verdicts on the same code).
 head_sha="$(gh pr view "$PR" --repo "$SLUG" --json headRefOid -q .headRefOid 2>/dev/null)"
+# R25: bind the verdict to the base (target `main`) tip too, so auto-merge can VOID it once main advances
+# past that base. (The dedup marker stays head-only — a base drift is recovered by the poller's rebase,
+# which changes the head, so a fresh review runs on the new head automatically.)
+base_sha="$(gh pr view "$PR" --repo "$SLUG" --json baseRefOid -q .baseRefOid 2>/dev/null)"
 state_dir="$HOME/.local/state/fitness-review"; mkdir -p "$state_dir"
 marker="$state_dir/${REPO}-${PR}-${head_sha}.done"
 if [ -f "$marker" ]; then log "already reviewed $SLUG#$PR @ ${head_sha:0:7} — skipping"; exit 0; fi
@@ -329,9 +333,9 @@ rationale="$(printf '%s' "$review" | grep -vE '^[[:space:]]*FITNESS_VERDICT:' | 
 fi # ---- end of the model-review guard (the R16 gate above may have decided instead) ----------------
 
 # ---- compose the CANONICAL verdict comment (shell-owned) + the rationale ---------------------------
-comment="Fitness review: VERDICT $verdict — head $head_sha
+comment="Fitness review: VERDICT $verdict — head $head_sha base $base_sha
 
-<sub>Independent fitness review (Step 4b) — reviewer \`$FITNESS_LOGIN\`, head \`${head_sha:0:7}\`.$trunc_note Machine-read by \`bin/auto-merge.sh\` from LINE 1 ONLY (verdict + FULL head sha — prose/rationale below this line is never machine-trusted); the verdict token above is authoritative.</sub>
+<sub>Independent fitness review (Step 4b) — reviewer \`$FITNESS_LOGIN\`, head \`${head_sha:0:7}\`.$trunc_note Machine-read by \`bin/auto-merge.sh\` from LINE 1 ONLY (verdict + FULL head sha + FULL base (target main) sha, R25 — prose/rationale below this line is never machine-trusted); the verdict token above is authoritative.</sub>
 
 <details><summary>rationale</summary>
 

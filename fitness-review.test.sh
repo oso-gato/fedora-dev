@@ -40,6 +40,7 @@ POLLER="$HERE/bin/pr-poller.sh"
 ROOT="$(mktemp -d)"; trap 'rm -rf "$ROOT"' EXIT
 BIN="$ROOT/bin"; mkdir -p "$BIN"
 SHA=aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee          # a full 40-hex head, as the gates bind to
+BASE=ffffffff00000000111111112222222233333333      # a full 40-hex base (target main) tip — R25 binds it too
 MAXARG=$(( $(getconf PAGESIZE) * 32 ))                # the ceiling the old transport hit: 131072
 
 pass=0; fail=0
@@ -53,6 +54,7 @@ case "$*" in
   *"pr diff"*)          cat "$DIFF_FILE";;
   *"--json author"*)    printf 'someone-else\n';;
   *"--json headRefOid"*) printf '%s\n' "$FAKE_SHA";;
+  *"--json baseRefOid"*) printf '%s\n' "${FAKE_BASE:-}";;
   *"--json title"*)     printf 'a change\n';;
   *"--json body"*)      printf 'the PR body\n';;
   *"pr comment"*)       printf 'POSTED %s\n' "$*" >> "$ACT_LOG";;
@@ -97,7 +99,7 @@ review(){
   # REPO_SCOPE pinned to the real reader: the MUT rows run a sed-COPY of the harness from $CASE,
   # where the default $HERE/repo-scope.sh does not exist — and a missing reader is a fail-closed
   # refusal (R16/#167) that would pass those rows VACUOUSLY, for the wrong reason.
-  env PATH="$BIN:$PATH" HOME="$CASE/home" ACT_LOG="$ACT_LOG" DIFF_FILE="$DIFF" FAKE_SHA="$SHA" \
+  env PATH="$BIN:$PATH" HOME="$CASE/home" ACT_LOG="$ACT_LOG" DIFF_FILE="$DIFF" FAKE_SHA="$SHA" FAKE_BASE="$BASE" \
       RECV="$RECV" RECV_ARGV="$RECV_ARGV" REPO_SCOPE="$HERE/bin/repo-scope.sh" \
       FITNESS_CLAUDE="reviewer -p" FITNESS_LOGIN=fit-bot LG_HOST_LOGIN= "$@" \
       bash "$script" fedora-dev 1 > "$CASE/out.log" 2> "$CASE/err.log"
@@ -192,7 +194,7 @@ ck "$(grep -q 'DIFF TRUNCATED' "$RECV" && echo 1 || echo 0)" "the REVIEWER was h
 ck "$(grep -q 'ESCALATE' "$RECV" && echo 1 || echo 0)" "the reviewer was not told to ESCALATE when the hidden part decides it"
 ck "$(grep -q 'TRUNCATED' "$CASE/out.log" && echo 1 || echo 0)" "the posted verdict does not disclose that it judged a partial diff"
 # NON-GOAL GUARD: the verdict grammar and the line-1 sha-binding (G2) are untouched by all of this.
-ck "$(grep -qx "Fitness review: VERDICT PASS — head $SHA" "$CASE/out.log" && echo 1 || echo 0)" "line 1 of the verdict comment changed — the grammar/sha-binding is a NON-GOAL and must be byte-stable"
+ck "$(grep -qx "Fitness review: VERDICT PASS — head $SHA base $BASE" "$CASE/out.log" && echo 1 || echo 0)" "line 1 of the verdict comment changed — the grammar/sha-binding (now incl. the R25 base token) must be byte-stable"
 done_case
 
 # ===================================================================================================
