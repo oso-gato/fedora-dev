@@ -1,5 +1,7 @@
 # Apparatus — BUILD PRINCIPLES (construction spec of record)
 
+> **THE HOW** — how every artifact is constructed & packaged.
+
 > **The third leg of the Trinity.** Companion to [`00-OBJECTIVES.md`](./00-OBJECTIVES.md) (the **WHY** /
 > what) and [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md) (the functional **WHAT** it must do + its
 > non-functional qualities). This document is the **HOW WE CONSTRUCT & PACKAGE ANY ARTIFACT** — the

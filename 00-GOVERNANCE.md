@@ -1,5 +1,7 @@
 # GOVERNANCE — the product-owner constitution for the autonomous dev loop
 
+> **THE WHO** — who decides, and the record of every ruling (the decision log).
+
 > **What this is.** The fixed reference the fitness gate grades every change against, and the standing
 > law for how work reaches (or does not reach) the maintainer. Written by the **product owner** — a
 > non-coding maintainer whose authority is *intent*, not code review. The developer and reviewer agents

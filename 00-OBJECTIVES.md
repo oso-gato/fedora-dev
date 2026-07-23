@@ -1,5 +1,7 @@
 # Apparatus — OBJECTIVE (spec of record)
 
+> **THE WHY** — the objective / north star this apparatus is built to.
+
 > **Confirmed by the maintainer on 2026-07-14; Trinity amendment 2026-07-16; NO-ALLOWLIST / TWO-CAMPS
 > amendment confirmed 2026-07-21** (the operating scope is the App INSTALLATION, not a software
 > allowlist — the 2026-07-16 repo-list-authorization + confirm-to-add model is removed as redundant:

@@ -1,5 +1,7 @@
 # Apparatus — REQUIREMENTS (spec of record: functional + non-functional)
 
+> **THE WHAT** — what the apparatus must do: the numbered, testable requirements it must satisfy.
+
 > **Confirmed set as of 2026-07-14; Trinity amendment 2026-07-16; NO-ALLOWLIST / TWO-CAMPS amendment
 > confirmed 2026-07-21** (R16 rebuilt — operating scope = the App installation, not an allowlist;
 > the confirm-to-add gate + `policy/scope.conf` are retired; R6/R7 name the distinct fitness identity;
