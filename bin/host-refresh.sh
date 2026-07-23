@@ -172,6 +172,11 @@ HOST_TICKET="${HOST_TICKET:-$HERE/host-ticket.sh}"
 # comment against it; rc≠0 (127 included) is never a go (fail-closed).
 REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
 STATE="$HOME/.local/state/host-refresh"
+# apply-bootstrap retry bound: after a merged control change's apply FAILS this many times (each a fresh
+# ticket the host rolled back), stop auto-retrying and surface a loud BLOCKED alarm (the host is on prior
+# code and needs a human). BLOCKED_LABEL tags the alarm issue (created on first use).
+MAX_APPLY_RETRIES="${HOST_REFRESH_MAX_APPLY_RETRIES:-3}"
+BLOCKED_LABEL="${HOST_REFRESH_BLOCKED_LABEL:-apparatus-blocked}"
 log(){ echo "host-refresh: $*" >&2; }
 
 # merged_rows <slug> — ONE batched list call (number/merge-oid/mergedAt as TSV; the sweep's TSV
@@ -187,6 +192,41 @@ too_old(){
   local m; m="$(date -d "$1" +%s 2>/dev/null)" || m="$NOW"
   [ -n "$m" ] || m="$NOW"
   [ $(( NOW - m )) -gt "$MAX_AGE" ]
+}
+
+# ticket_outcome <issue-num> — echo done|failed|pending for a filed apply-bootstrap ticket, read DIRECTLY
+# from the control-repo issue (NEVER via host-ticket.sh --outcome, which is SID-scoped and refuses a ticket
+# after a rebuild changes the poller SID). The host's respond() posts `**host-agent: DONE|FAILED** — …` and
+# closes the issue. Mapping: a DONE verdict ⇒ done; a FAILED verdict ⇒ failed; CLOSED with NO host-agent
+# verdict ⇒ pending (a human manually cancelled it — NEVER retry that, it fights the maintainer; it ages
+# out via too_old). Anything else (open, unreadable) ⇒ pending (fail-safe: wait, never a false terminal).
+ticket_outcome(){
+  local n="$1" state cmts
+  state="$(gh issue view "$n" --repo "$ORG/$CONTROL_REPO" --json state -q .state 2>/dev/null)"
+  cmts="$(gh issue view "$n" --repo "$ORG/$CONTROL_REPO" --json comments -q '.comments[].body' 2>/dev/null)"
+  if printf '%s' "$cmts" | grep -qiE 'host-agent:[*[:space:]]*done'; then echo done; return; fi
+  if printf '%s' "$cmts" | grep -qiE 'host-agent:[*[:space:]]*failed'; then echo failed; return; fi
+  echo pending   # OPEN (in-flight), CLOSED-without-verdict (human cancel), or unreadable → wait, never terminal
+}
+
+# surface_blocked <slug> <pr> <oid> <attempts> <last-ticket-num> — retries exhausted: post ONE loud terminal
+# PR comment AND find-or-create a single deduped alarm issue in the control repo (the host is on PRIOR code).
+surface_blocked(){
+  local slug="$1" pr="$2" oid="$3" attempts="$4" tnum="$5"
+  gh pr comment "$pr" --repo "$slug" --body "**host-refresh → apply-blocked:** apply-bootstrap FAILED ${attempts}× for merge \`${oid:0:7}\` (last ticket #${tnum}) — the host is on PRIOR code and auto-retry is EXHAUSTED. A human is needed. (Auto-retry resumes only if a later merge re-arms the apply.)"$'\n\n'"<sub>bin/host-refresh.sh — bounded apply-bootstrap retry (HOST_REFRESH_MAX_APPLY_RETRIES=${MAX_APPLY_RETRIES}).</sub>" >/dev/null 2>&1 \
+    || log "$slug#$pr: apply-blocked PR comment FAILED (surfacing continues via the alarm issue)"
+  local title="BLOCKED: host apply-bootstrap keeps failing (${slug}#${pr})" existing
+  existing="$(gh api -X GET "search/issues" -f q="repo:$ORG/$CONTROL_REPO in:title \"$title\" state:open" -q '.items[0].number' 2>/dev/null)"
+  if [ -n "$existing" ] && [ "$existing" != null ]; then
+    log "$slug#$pr: apply-blocked alarm already open (#$existing) — not duplicating"
+    return 0
+  fi
+  gh issue create --repo "$ORG/$CONTROL_REPO" --title "$title" \
+      --body "apply-bootstrap for merge \`${oid:0:7}\` (${slug}#${pr}) FAILED and rolled back ${attempts}× (last ticket #${tnum}). The host is running PRIOR code; bounded auto-retry (${MAX_APPLY_RETRIES}) is exhausted. A human must investigate the failing apply. See ${slug}#${pr} for the apply-filed history." \
+      --label "$BLOCKED_LABEL" >/dev/null 2>&1 \
+    || gh issue create --repo "$ORG/$CONTROL_REPO" --title "$title" \
+      --body "apply-bootstrap for merge \`${oid:0:7}\` (${slug}#${pr}) FAILED and rolled back ${attempts}× (last ticket #${tnum}). The host is running PRIOR code; bounded auto-retry is exhausted. A human must investigate." >/dev/null 2>&1 \
+    || log "$slug#$pr: apply-blocked alarm issue create FAILED (PR comment carries the signal)"
 }
 
 scan_workload(){ # <workload == repo name>
@@ -255,7 +295,7 @@ scan_control(){ # <control repo>
   rows="$(merged_rows "$slug")" \
     || { log "$slug: merged-PR list failed — skipping this scan (retry next)"; return 0; }
   [ -n "$rows" ] || return 0
-  local pr oid mergedat files cmts mark
+  local pr oid mergedat files cmts mark attempts tnum
   while IFS=$'\t' read -r -u 3 pr oid mergedat; do
     [ -n "$pr" ] || continue
     mark="$STATE/apply-${repo}-${pr}.done"
@@ -271,23 +311,47 @@ scan_control(){ # <control repo>
     fi
     cmts="$(gh pr view "$pr" --repo "$slug" --json comments -q '.comments[].body' 2>/dev/null)" \
       || { log "$slug#$pr: comments fetch failed — retry next scan"; continue; }
-    # wiped-state dedup (req 4): the PR's own comment stream is the durable record. Skip if we already
-    # FILED (the `apply-filed:` anchor) OR — TRANSITION — if the pre-#187 `host-apply needed:` question
-    # is present (that PR was surfaced for a human to apply back when no verb existed; never re-file it).
-    if printf '%s' "$cmts" | grep -qF 'host-refresh → apply-filed:' \
-       || printf '%s' "$cmts" | grep -qF 'host-refresh → host-apply needed:'; then
+    # TERMINAL skips (the PR's own comment stream is the durable record): the pre-#187 `host-apply needed:`
+    # question asked a human to apply back when no verb existed — never re-file it; and a prior
+    # `apply-blocked:` surface means bounded auto-retry is exhausted (a human owns it) — also terminal.
+    if printf '%s' "$cmts" | grep -qF 'host-refresh → host-apply needed:' \
+       || printf '%s' "$cmts" | grep -qF 'host-refresh → apply-blocked:'; then
       : > "$mark"; continue
     fi
-    # #133/#187: the bounded `apply-bootstrap` verb now exists on the host agent — FILE it (NO arg; it
-    # applies pinned, merge-gated `main`). The host FF-pulls the control clone + re-runs setup.sh as root,
-    # health-gated with rollback + a fail-closed readback; idempotent (same-sha ⇒ no-op). CONFIG-CONVERGE,
-    # not a container recreate — a changed Quadlet env takes effect on the next recreate (disclosed).
+    # OUTCOME-KEYED dedup (audit #7 fix): the old dedup skipped whenever a ticket had been FILED
+    # (`apply-filed:`), so a FAILED+rolled-back apply NEVER retried and the host sat on prior code SILENTLY
+    # (stranded fedora-bootstrap #239/#240/#241). Instead read the LAST filed ticket's host-agent verdict
+    # and branch on the OUTCOME: DONE ⇒ terminal skip; PENDING ⇒ wait (no re-file, no marker → re-check
+    # next scan); FAILED ⇒ bounded retry up to MAX_APPLY_RETRIES, then surface BLOCKED and stop.
+    attempts="$(printf '%s' "$cmts" | grep -cF 'host-refresh → apply-filed:')"
+    if [ "$attempts" -gt 0 ]; then
+      tnum="$(printf '%s' "$cmts" | grep -F 'host-refresh → apply-filed:' | tail -1 | grep -oE 'issues/[0-9]+' | tail -1)"
+      tnum="${tnum##*/}"
+      case "$(ticket_outcome "$tnum")" in
+        done)
+          : > "$mark"; continue ;;                       # terminal success — the host reached merged main
+        pending)
+          log "$slug#$pr: apply ticket #${tnum:-?} in-flight or human-cancelled (no verdict yet) — waiting, no re-file"
+          continue ;;                                    # NO marker → re-check the outcome next scan
+        failed)
+          if [ "$attempts" -ge "$MAX_APPLY_RETRIES" ]; then
+            log "$slug#$pr: apply FAILED ${attempts}× (>= MAX_APPLY_RETRIES=$MAX_APPLY_RETRIES) — surfacing BLOCKED, stopping auto-retry"
+            surface_blocked "$slug" "$pr" "$oid" "$attempts" "$tnum"
+            : > "$mark"; continue                        # terminal: a human owns it now
+          fi
+          log "$slug#$pr: apply ticket #$tnum FAILED, host rolled back — bounded retry $((attempts+1))/$MAX_APPLY_RETRIES" ;;
+      esac                                               # (falls through to re-file, NO marker)
+    fi
+    # FILE (first attempt, or a bounded FAILED retry). apply-bootstrap applies pinned, merge-gated `main`
+    # (health-gated with rollback + a fail-closed readback; idempotent, same-sha ⇒ no-op). CONFIG-CONVERGE
+    # ON DISK — a changed Quadlet env takes effect on the next recreate (disclosed).
     url="$("$HOST_TICKET" apply-bootstrap)" \
       || { log "$slug#$pr: host-ticket.sh (apply-bootstrap) FAILED — no ticket filed; retry next scan"; continue; }
-    log "$slug#$pr (merge ${oid:0:7}): merged control-repo change touches host-executed paths → apply-bootstrap ticket filed: $url"
-    gh pr comment "$pr" --repo "$slug" --body "**host-refresh → apply-filed:** $url — merge \`${oid:0:7}\` touches host-executed paths; the host agent's \`apply-bootstrap\` FF-pulls the control clone to merged \`main\` + re-runs setup.sh as root (health-gated with rollback + a fail-closed live readback; idempotent, same-sha ⇒ no-op). This is config-converge ON DISK — a changed Quadlet \`Environment=\`/\`Secret=\` takes effect on the next container recreate (the approved-gated Tier-2 recreate is the disclosed follow-on)."$'\n\n'"<sub>bin/host-refresh.sh (#163) — the host half of self-refresh; this comment is also the wiped-state dedup anchor.</sub>" >/dev/null 2>&1 \
-      || log "$slug#$pr: apply-filed audit comment FAILED (the ticket IS filed: $url); dedup rests on the local marker until a comment lands"
-    : > "$mark"
+    log "$slug#$pr (merge ${oid:0:7}): merged control-repo change touches host-executed paths → apply-bootstrap ticket filed: $url (attempt $((attempts+1)))"
+    gh pr comment "$pr" --repo "$slug" --body "**host-refresh → apply-filed:** $url — merge \`${oid:0:7}\` touches host-executed paths; the host agent's \`apply-bootstrap\` FF-pulls the control clone to merged \`main\` + re-runs setup.sh as root (health-gated with rollback + a fail-closed live readback; idempotent, same-sha ⇒ no-op). This is config-converge ON DISK — a changed Quadlet \`Environment=\`/\`Secret=\` takes effect on the next container recreate (the approved-gated Tier-2 recreate is the disclosed follow-on). Attempt $((attempts+1))/${MAX_APPLY_RETRIES}${tnum:+; prior ticket #$tnum FAILED, host rolled back to prior code}."$'\n\n'"<sub>bin/host-refresh.sh (#163) — the host half of self-refresh; this comment is the OUTCOME-keyed apply-bootstrap dedup anchor (retries count these).</sub>" >/dev/null 2>&1 \
+      || log "$slug#$pr: apply-filed audit comment FAILED (the ticket IS filed: $url); next scan may re-file — apply-bootstrap is idempotent (same-sha no-op)"
+    # NO marker written here — it is set ONLY on terminal states (done / blocked / transition / too-old /
+    # not-host-relevant), so an in-flight or failed apply is always re-evaluated on the next scan.
   done 3<<< "$rows"
 }
 
