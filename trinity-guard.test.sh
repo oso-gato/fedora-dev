@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# trinity-guard.test.sh — a PR touching the CONFIRMED SPEC (Trinity) or GOVERNANCE.md is held for the
+# trinity-guard.test.sh — a PR touching the CONFIRMED SPEC (Trinity) or 00-GOVERNANCE.md is held for the
 # MAINTAINER (R1): auto-merge.sh REFUSES to autonomously merge it (exit 4), assigns the maintainer, and
 # labels it — while a normal PR is unaffected. Drives the REAL bin/auto-merge.sh with a stub gh. No net.
 set -uo pipefail
@@ -44,9 +44,9 @@ grep -q -- '--add-assignee oso-gato' "$TMP/edit.log" && ok "assigned to the main
 grep -q -- '--add-label maintainer-merge' "$TMP/edit.log" && ok "labelled maintainer-merge" || bad "not labelled"
 [ ! -s "$TMP/merged.log" ] && ok "did NOT merge the confirmed-spec PR" || bad "auto-merged a Trinity PR"
 
-echo "== GOVERNANCE.md is also held =="
-run "GOVERNANCE.md"
-[ "$RC" = 4 ] && ok "GOVERNANCE.md → exit 4" || bad "GOVERNANCE.md not held (rc=$RC)"
+echo "== 00-GOVERNANCE.md is also held =="
+run "00-GOVERNANCE.md"
+[ "$RC" = 4 ] && ok "00-GOVERNANCE.md → exit 4" || bad "00-GOVERNANCE.md not held (rc=$RC)"
 
 echo "== a normal (non-Trinity) PR is NOT held by this guard (proceeds past it) =="
 run "bin/some-feature.sh"

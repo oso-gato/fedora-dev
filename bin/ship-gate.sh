@@ -5,7 +5,7 @@
 #
 # It reviews the BUILT PRODUCT (the repo at its current main tip = the "shipped aggregate") against the
 # CONFIRMED spec, IN ORDER — (1) 00-OBJECTIVES.md, (2) 00-REQUIREMENTS.md (functional + non-functional),
-# (3) 00-BUILDPRINCIPLE.md — plus GOVERNANCE.md. The DESIGN (00-DESIGN.md) is the dev's own mutable means
+# (3) 00-BUILDPRINCIPLE.md — plus 00-GOVERNANCE.md. The DESIGN (00-DESIGN.md) is the dev's own mutable means
 # and is NOT a conformance target (deliberately excluded). The reviewer is a FRESH agent-context (a
 # `claude -p` that did not build the product); the verdict LINE is shell-owned (a hallucinated reply
 # cannot forge a PASS); it is posted by a DISTINCT identity (the fitness App, != the author); it is
@@ -124,7 +124,7 @@ $(r 00-REQUIREMENTS.md)
 $(r 00-BUILDPRINCIPLE.md)
 
 # GOVERNANCE (maintainer rulings that bind the grading)
-$(r GOVERNANCE.md)
+$(r 00-GOVERNANCE.md)
 
 NOTE: 00-DESIGN.md is the dev's own MUTABLE MEANS and is NOT a conformance target — do NOT grade against it.
 

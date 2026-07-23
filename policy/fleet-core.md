@@ -186,13 +186,13 @@ finished", host-EXECUTED work you can drive through the ticket bus.
 5. INDEPENDENT FITNESS REVIEW — self-examination (item 4) is NOT sufficient.
    - RULE: a DIFFERENT agent-context than the author MUST score the change before it is presented to
      Arthur OR auto-merged. The author MUST NOT be its own sole judge.
-   - INPUT: the change + the requirements + `GOVERNANCE.md` (human expansion).
+   - INPUT: the change + the requirements + `00-GOVERNANCE.md` (human expansion).
    - THREE QUESTIONS (each is ASKED; severity — below — decides what a finding DOES):
      - Q1 ASKED-FOR — maps to a stated requirement; no unrequested surface.
      - Q2 NON-CONTRADICT — does not satisfy one requirement by breaking another.
      - Q3 FIT — advances the WHOLE objective AND satisfies EVERY doctrine mandate (checklist, the
        DOCTRINE block at top).
-   - **SEVERITY — MVP-FIRST** (Arthur's decision 2026-07-12, ledgered in `GOVERNANCE.md` §6(d)):
+   - **SEVERITY — MVP-FIRST** (Arthur's decision 2026-07-12, ledgered in `00-GOVERNANCE.md` §6(d)):
      *"Get it to work first. Where fitness finds something that could be better or improved but is NOT
      blocking, we continue to build and you make a note of it — later, when we ship a finished function
      or feature, we revisit and close those loops. Build your minimum viable product and prove your
@@ -227,7 +227,7 @@ fix the law". Authoritative classifier = `bin/tier-classify.sh`, now REPORTING-O
   rollback or exfiltrates the merge/secret credential FAILS review).
 - A fitness ESCALATE still routes to Arthur — not as a merge click, but as the adjudication of a genuine
   policy ambiguity (this is the one human-judgment path that survives, by design). Editing the DOCTRINE
-  or `GOVERNANCE.md` remains maintainer-adjudicated through exactly that path.
+  or `00-GOVERNANCE.md` remains maintainer-adjudicated through exactly that path.
 
 RULE: a change is presentable/mergeable only when 1–5 hold. The human is engaged by ESCALATE (a
 question), never by a routine approve-to-merge.

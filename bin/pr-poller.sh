@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pr-poller.sh — the DEV-SIDE POLLER / wake-up mechanism (GOVERNANCE §5 / #93 Step 5).
+# pr-poller.sh — the DEV-SIDE POLLER / wake-up mechanism (R6/R7 / #93 Step 5).
 #
 # The host is already autonomous: it live-gates a labelled PR and posts a GREEN/RED verdict on its own
 # timer. This closes the DEV-side gap — a supervised, PLAIN-SHELL (NO Claude in the loop) watcher on

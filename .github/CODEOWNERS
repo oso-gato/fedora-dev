@@ -1,5 +1,5 @@
 # CODEOWNERS — the CONFIRMED SPEC (the "Trinity": objective + requirements + build principles) and the
-# maintainer's constitution GOVERNANCE.md are MAINTAINER-MERGE-ONLY (R1): amending them is a NEW
+# maintainer's constitution 00-GOVERNANCE.md are MAINTAINER-MERGE-ONLY (R1): amending them is a NEW
 # maintainer confirmation, never an autonomous merge.
 #
 # Listing the maintainer here makes GitHub auto-REQUEST their review on any PR touching these paths — it
@@ -11,4 +11,4 @@
 /00-OBJECTIVES.md      @oso-gato
 /00-REQUIREMENTS.md    @oso-gato
 /00-BUILDPRINCIPLE.md  @oso-gato
-/GOVERNANCE.md         @oso-gato
+/00-GOVERNANCE.md         @oso-gato

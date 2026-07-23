@@ -43,7 +43,7 @@ set -uo pipefail
 # (CI runs `bash bin/doc-dry-audit.sh` from the checkout root; a human may run it from anywhere).
 _self_root(){ cd "$(dirname "$0")/.." 2>/dev/null && pwd; }
 ROOT="${DRY_ROOT:-$(_self_root)}"
-DOCS="${DRY_DOCS:-00-OBJECTIVES.md 00-REQUIREMENTS.md 00-BUILDPRINCIPLE.md CLAUDE.md policy/CLAUDE.md FLEET.md}"
+DOCS="${DRY_DOCS:-00-OBJECTIVES.md 00-REQUIREMENTS.md 00-BUILDPRINCIPLE.md 00-GOVERNANCE.md CLAUDE.md policy/CLAUDE.md FLEET.md}"
 MIN_WORDS="${DRY_MIN_WORDS:-8}"
 ALLOW="${DRY_ALLOW:-}"          # resolved against ROOT below once ROOT is final
 

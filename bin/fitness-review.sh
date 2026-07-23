@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# fitness-review.sh — the INDEPENDENT FITNESS-REVIEW HARNESS (GOVERNANCE §5 / #93 Step 4b).
+# fitness-review.sh — the INDEPENDENT FITNESS-REVIEW HARNESS (R6 / #93 Step 4b).
 #
 # The third gate auto-merge.sh reads. On a GREEN PR it spawns a HEADLESS `claude -p` INSIDE claudebox
 # in a SEPARATE context from the PR author (separation of duties) that scores the change against
-# GOVERNANCE.md + the doctrine — the three questions:
+# 00-GOVERNANCE.md + the doctrine — the three questions:
 #   Q1  Is it what was asked for?                    (scope: no unrequested surface)
-#   Q2  Does it contradict the constitution/law?     (GOVERNANCE.md, fleet-core.md, Build Principles)
+#   Q2  Does it contradict the constitution/law?     (00-GOVERNANCE.md, fleet-core.md, Build Principles)
 #   Q3  Is it fit for purpose — incl. the 6 doctrine mandates? (solution-oriented, iterated-on-facts,
 #       zero-based, objective-held, no-rabbit-hole, no-quiet-quit)
 # …and posts exactly ONE comment `Fitness review: VERDICT PASS|RETURN|ESCALATE` AS THE FITNESS-REVIEW
@@ -221,7 +221,7 @@ ONE verdict. You have NO merge power — your only job is the judgment.
 
 Answer these three questions about the PR below, briefly, then emit the verdict line.
   Q1 ASKED-FOR: does the change do what its title/body says was asked, with NO unrequested extra surface?
-  Q2 CONTRADICTS: does it violate the constitution/law — GOVERNANCE.md, fleet-core.md, the Build
+  Q2 CONTRADICTS: does it violate the constitution/law — 00-GOVERNANCE.md, fleet-core.md, the Build
      Principles (provenance/minimalism/no-secrets/deploy-contract/validate), or the control-plane/Tier
      boundary?
   Q3 FIT-FOR-PURPOSE incl. the 6 doctrine mandates: solution-oriented; iterated-on-facts (proven, not

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# auto-merge.sh — the DETERMINISTIC Tier-B/C merger (GOVERNANCE §4, Option 1).
+# auto-merge.sh — the DETERMINISTIC Tier-B/C merger (R7 + 00-GOVERNANCE §6(c) zero-gate).
 #
 # The ONLY thing besides Arthur that merges to main — and it is a DUMB, non-agent script, by design.
 # It holds merge power precisely BECAUSE it has no agency: it merges iff three machine-checkable gates
@@ -70,14 +70,14 @@ if ! "$REPO_SCOPE" check "$REPO"; then
 fi
 
 # TRINITY GUARD (R1 durability). A PR that modifies the CONFIRMED SPEC — 00-OBJECTIVES.md /
-# 00-REQUIREMENTS.md / 00-BUILDPRINCIPLE.md — or the maintainer's constitution GOVERNANCE.md is a
+# 00-REQUIREMENTS.md / 00-BUILDPRINCIPLE.md — or the maintainer's constitution 00-GOVERNANCE.md is a
 # MAINTAINER-MERGE-ONLY change: R1 makes amending the confirmed spec a NEW maintainer confirmation,
 # NEVER an autonomous merge. (Audit 2026-07-22 #16: PR #224 auto-merged a confirmed-spec edit — the
 # spec was immutable only on paper.) This is the ONE documented exception to the zero-gate model. The
 # loop HOLDS such a PR (exit 4 — never a merge), LABELS it, and ASSIGNS it to the maintainer so it
 # surfaces in their GitHub app under "assigned to me". Server-side CODEOWNERS + a branch-protection
 # "require Code Owner review" rule is the belt to this suspenders (.github/CODEOWNERS).
-TRINITY_PATHS="${TRINITY_PATHS:-00-OBJECTIVES.md 00-REQUIREMENTS.md 00-BUILDPRINCIPLE.md GOVERNANCE.md}"
+TRINITY_PATHS="${TRINITY_PATHS:-00-OBJECTIVES.md 00-REQUIREMENTS.md 00-BUILDPRINCIPLE.md 00-GOVERNANCE.md}"
 MAINTAINER_LOGIN="${MAINTAINER_LOGIN:-oso-gato}"
 MAINTAINER_MERGE_LABEL="${MAINTAINER_MERGE_LABEL:-maintainer-merge}"
 _trinity_hit=""

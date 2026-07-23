@@ -19,7 +19,7 @@ ck(){ [ "$2" = 1 ] && { pass=$((pass+1)); printf '  ok   %s\n' "$1"; } || { fail
 CLONE="$ROOT/clone"; mkdir -p "$CLONE"
 git -C "$CLONE" init -q
 git -C "$CLONE" config user.email t@t; git -C "$CLONE" config user.name t
-for d in 00-OBJECTIVES 00-REQUIREMENTS 00-BUILDPRINCIPLE GOVERNANCE; do printf '# %s\ndummy\n' "$d" > "$CLONE/$d.md"; done
+for d in 00-OBJECTIVES 00-REQUIREMENTS 00-BUILDPRINCIPLE 00-GOVERNANCE; do printf '# %s\ndummy\n' "$d" > "$CLONE/$d.md"; done
 printf 'FROM scratch\n' > "$CLONE/Containerfile"
 git -C "$CLONE" add -A; git -C "$CLONE" commit -qm init
 SHA="$(git -C "$CLONE" rev-parse HEAD)"
