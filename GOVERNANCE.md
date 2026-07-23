@@ -144,6 +144,29 @@ defects caught: two rebuild-bricks, an overclaimed safety statement, a false ver
 
 ## 6. Resolved decisions (each states DECISION vs current STATUS explicitly)
 
+**(e) SCOPE = LIVE APP INSTALLATION — camp-2 "private-data wall" retired (the maintainer's enactment, 2026-07-23).**
+- **DECISION (the maintainer's own words, this build session, adjudicating a 2026-07-22 audit finding):**
+  > The objective is the development pair working wherever the GitHub App has authority. If I give the
+  > App access to a private repo, then it's available. [On the audit flag that the App is installed on
+  > the "camp-2" private repos:] reality is right — fix the document so the audit stops flagging it.
+- **What it changes:** the operating scope is the **live App installation, private repositories included**
+  — whatever the maintainer installs the App on is in scope, enumerated live by `bin/repo-scope.sh`. The
+  earlier two-camp model (00-OBJECTIVES.md / R16 / R36: a "vibe-coded camp-1 the App is installed on"
+  versus a "private-data camp-2 the App is NEVER installed on and can never reach") is **retired**. R36 no
+  longer grades a private-repo install as (b) UNSAFE; the security line that remains is that the apparatus
+  must **never SELF-widen** its own installation (a scope request is surfaced to the maintainer, never
+  acted on).
+- **Why (recorded):** the two-camp table hardcoded a repo list that had already drifted — the App is in
+  fact installed on repos the doc named forbidden (`ak-private`, `voiceid-archive`, `bear-alchemist`) plus
+  ones it did not list (`euclid-vision`, `piguet-fatima`). The audit flagged this as its top "UNSAFE"
+  finding, but it was a **doc-vs-reality contradiction, not a code defect**: the maintainer's standing
+  model is that App-install IS authorization (R16), so a hardcoded forbidden list is redundant and
+  drift-prone. The fix makes the doc say what R16 already meant — scope = the live installation — and
+  stops hardcoding any list that can drift out of truth again.
+- **STATUS: ENACTED** via the PR carrying this entry + the 00-OBJECTIVES.md / R16 / R36 amendments; the
+  maintainer ratifies on that PR (the confirming artifact of record). The App installation itself is
+  unchanged by this edit — it records that the existing install IS the authorized scope.
+
 **(d) MVP-FIRST SEVERITY — the maintainer's recorded enactment (2026-07-12).**
 - **DECISION (the maintainer's own words, posted from his account `oso-gato` on fedora-dev#158 —
   https://github.com/oso-gato/fedora-dev/pull/158#issuecomment-4951654555):**

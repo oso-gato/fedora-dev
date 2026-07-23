@@ -1,10 +1,12 @@
 # Apparatus — OBJECTIVE (spec of record)
 
-> **Confirmed by the maintainer on 2026-07-14; Trinity amendment 2026-07-16; NO-ALLOWLIST / TWO-CAMPS
-> amendment confirmed 2026-07-21** (the operating scope is the App INSTALLATION, not a software
-> allowlist — the 2026-07-16 repo-list-authorization + confirm-to-add model is removed as redundant:
-> the human gate is repo-creation + App-install; the account splits into a vibe-coded camp-1 the
-> apparatus develops and a private-data camp-2 it can never reach; the three named Apps are enumerated).
+> **Confirmed by the maintainer on 2026-07-14; Trinity amendment 2026-07-16; NO-ALLOWLIST amendment
+> 2026-07-21; SCOPE = LIVE INSTALLATION amendment confirmed 2026-07-23** (the operating scope is the
+> App INSTALLATION, not a software allowlist and not a fixed camp split — **private repositories
+> included where the maintainer installs the App**; the earlier "private-data camp the apparatus can
+> never reach" wall is retired. The maintainer draws the boundary purely by App install/uninstall, and
+> the apparatus develops whatever it finds installed without ever expanding that set itself; the three
+> named Apps share that same installed set. R16 states this normatively).
 > This
 > is the durable, versioned objective the apparatus builds to. It is the ground truth the fitness gate
 > re-grounds on, mirrored by spec issue [#135](https://github.com/oso-gato/fedora-dev/issues/135). The
@@ -36,20 +38,17 @@ Every package and artifact is installed **minimally — relative to the chosen c
 
 Throughout, the apparatus continuously self-checks each change against three questions: (a) is it a stated requirement, (b) does it contradict anything, (c) does it advance the objective.
 
-## Operating scope — the App installation, not an allowlist (amended 2026-07-21)
+## Operating scope — the live App installation (amended 2026-07-23)
 
-The apparatus operates on **every repository the apparatus GitHub App is installed on** under the `oso-gato` personal account — the maintainer's **vibe-coded camp**. That installed set **IS** the operating scope; the apparatus enumerates it from its own installation, never a hardcoded list. There is **NO software allowlist, no per-repo enrollment file, and no maintainer confirm-to-add ceremony.** The gate is inherent and human: a GitHub App **cannot create a repository on a personal account**, so every `oso-gato` repo is human-created, and the maintainer authorizes the apparatus on a repo by **installing the App on it** (a non-coding GitHub-settings act) — removing the App de-authorizes it. A new vibe-coded repo becomes in-scope the moment the maintainer installs the App; nothing else is required (no PR, no file, no review — the maintainer is a vibe-coding maintainer who never authors or reviews code; the apparatus does all of it).
+The apparatus operates on **every repository the apparatus GitHub App is installed on** under the `oso-gato` personal account — **private repositories very much included, wherever the maintainer has chosen to install it**. That installed set **IS** the operating scope; the apparatus enumerates it **live from its own installation** (`bin/repo-scope.sh`), never a hardcoded list. (R16 is the authoritative statement of this rule; this section is the WHY.) There is **NO software allowlist, no per-repo enrollment file, no maintainer confirm-to-add ceremony, and no fixed "forbidden" set.** The gate is inherent and human: a GitHub App **cannot create a repository on a personal account**, so every `oso-gato` repo is human-created, and the maintainer authorizes the apparatus on a repo by **installing the App on it** (a non-coding GitHub-settings act) and de-authorizes it by **removing the App**. A repo becomes in-scope the moment the maintainer installs the App; nothing else is required (no PR, no file, no review — the maintainer is a vibe-coding maintainer who never authors or reviews code; the apparatus does all of it).
 
-The account is **two camps**, and the App-install boundary separates them at the **credential level** (the strongest boundary — the token physically cannot see, read, write, merge, or close in a repo the App is not installed on):
+**The maintainer sets scope one repo at a time, through nothing but installing or removing the App** — the apparatus itself never expands or shrinks what it can reach. The App-install boundary is a **credential-level** wall (the strongest boundary — the token physically cannot see, read, write, merge, or close in a repo the App is not installed on). The maintainer draws that wall wherever they choose: a repo they want the apparatus to keep out of, they simply do not install the App on; a repo they want developed — **including a private one** — they install it on. **No repo is permanently off-limits by spec** (the earlier "private-data camp the apparatus can never reach" wall is retired 2026-07-23); the live installation is the sole authority on scope.
 
-| Camp | App installed? | The apparatus… | Repos (2026-07-21) |
-|---|---|---|---|
-| **1 — vibe-coded** | **yes** | develops autonomously | `fedora-dev`, `fedora-bootstrap`, `fedora-desktop`, `knowledge-desktop`, `e2e-alpha`, `noir-strix-halo-fcos`, `vps-host-bootstrap`, `dev-container`, `strix-ms-s1-bootc`, `voiceid` |
-| **2 — private data** (wiki, keys, personal data) | **NO** | **NEVER touches** | `ak-private`, `voiceid-archive`, `bear-alchemist` |
+**Snapshot — illustrative only, NOT authoritative (do not hardcode; read `bin/repo-scope.sh`).** As of 2026-07-23 the App is installed on: `fedora-dev`, `fedora-bootstrap`, `fedora-desktop`, `knowledge-desktop`, `e2e-alpha`, `noir-strix-halo-fcos`, `vps-host-bootstrap`, `dev-container`, `strix-ms-s1-bootc`, `voiceid`, `euclid-vision`, `piguet-fatima`. This set changes whenever the maintainer installs or uninstalls the App.
 
-The apparatus **IS the two-box pair** — `fedora-bootstrap` (host, *erebus*) + `fedora-dev` (dev container, *nox*). "The pair" names the two **boxes**, not a two-repo work ceiling: the pair's job is to develop **every camp-1 repo**, multi-tenant (the dev container runs an unbounded number of isolated tenant sessions; the single host is the shared validator). The two apparatus repos are the pair's **own** repos (self-developed when that is a session's objective); every other camp-1 repo is a workload the pair develops for the maintainer.
+The apparatus **IS the two-box pair** — `fedora-bootstrap` (host, *erebus*) + `fedora-dev` (dev container, *nox*). "The pair" names the two **boxes**, not a two-repo work ceiling: the pair's job is to develop **every in-scope repo**, multi-tenant (the dev container runs an unbounded number of isolated tenant sessions; the single host is the shared validator). The two apparatus repos are the pair's **own** repos (self-developed when that is a session's objective); every other in-scope repo is a workload the pair develops for the maintainer.
 
-The apparatus uses **exactly three GitHub App identities**, all installed on camp-1 and **never** camp-2: **erebus** — the host live-gate validator (`oso-gato-erebus-claudebox`); **nox** — the dev/author/merge identity (`oso-gato-nox-claudebox`, App id `4238728`); **fitness** — the independent reviewer (`oso-gato-fitness-claudebox`, App id `4241099`). The three are distinct; the merge gate requires the host and fitness logins to differ.
+The apparatus uses **exactly three GitHub App identities**, all installed on the **same in-scope set**: **erebus** — the host live-gate validator (`oso-gato-erebus-claudebox`); **nox** — the dev/author/merge identity (`oso-gato-nox-claudebox`, App id `4238728`); **fitness** — the independent reviewer (`oso-gato-fitness-claudebox`, App id `4241099`). The three are distinct; the merge gate requires the host and fitness logins to differ.
 
 ## Document authority — the Trinity and the design
 
