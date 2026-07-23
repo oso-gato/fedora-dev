@@ -44,6 +44,11 @@ BACKLOG_LABEL="${BACKLOG_LABEL:-backlog}"
 ESCALATE_LABELS="${ESCALATE_LABELS:-escalate,needs-decision,blocked,awaiting-maintainer}"
 OS_PROBE_TIMEOUT="${OS_PROBE_TIMEOUT:-20}"
 SCOPE_REGISTRY_DIR="${SCOPE_REGISTRY_DIR:-$HOME/.local/state/scope-registry}"
+# The R34 ship-gate reviewer identity (== the independent fitness App). Its commit-comment on the current
+# main sha is the unforgeable ship-gate verdict this oracle reads (it never RUNS the gate — ship-gate.sh
+# does). In make-it-work mode (FITNESS_SAME_IDENTITY=1) the gate posts under the dev identity, so FACT 4
+# accepts DEV_LOGIN too — mirroring the same-identity relaxation fitness/auto-merge already accept.
+SHIPGATE_LOGIN="${SHIPGATE_LOGIN:-oso-gato-fitness-claudebox}"
 
 log(){ echo "objective-status: $*" >&2; }
 
@@ -64,20 +69,27 @@ pr_drivable(){
   printf 1
 }
 
-# classify <drivable-count> <probe:PASS|FAIL|ABSENT> <ever-backlog:0|1> → SHIPPED | OPEN | INDETERMINATE.
-#   OPEN         — positive drivable work remains, OR a declared probe FAILs (the assembled objective does
-#                  not yet work). This is the anti-false-stop teeth.
-#   SHIPPED       — nothing drivable AND the probe does not fail AND the objective left ship evidence
-#                  (a backlog existed, or the probe positively passed). Requiring evidence closes the
-#                  "empty backlog + no probe reads vacuously SHIPPED" hole (that returns INDETERMINATE).
-#   INDETERMINATE — the oracle cannot speak (no evidence the objective was ever decomposed and no probe);
-#                  the gate then uses its heuristic — the oracle never TRAPS on its own silence.
+# classify <drivable-count> <probe:PASS|FAIL|ABSENT> <ever-backlog:0|1> [shipgate:PASS|PENDING] →
+#   SHIPPED | OPEN | INDETERMINATE.
+#   OPEN         — positive drivable work remains, OR a declared probe FAILs, OR the objective is otherwise
+#                  would-be-shipped but the R34 SPEC-VS-BUILD ship gate has NOT passed the current aggregate
+#                  (shipgate != PASS). This is the anti-false-stop teeth AND the R34 close-gate.
+#   SHIPPED       — nothing drivable AND the probe does not fail AND ship evidence exists (backlog existed
+#                  or probe PASS) AND an independent R34 ship-gate PASS is bound to THIS aggregate. The
+#                  objective closes ONLY with that independent PASS — the author is never its own sole judge.
+#   INDETERMINATE — the oracle cannot speak (no evidence the objective was ever decomposed and no probe).
 classify(){
-  local drivable="$1" probe="$2" ever="$3"
+  local drivable="$1" probe="$2" ever="$3" shipgate="${4:-}"
   case "$drivable" in ''|*[!0-9]*) echo INDETERMINATE; return;; esac
   [ "$probe" = FAIL ] && { echo OPEN; return; }
   [ "$drivable" -ge 1 ] && { echo OPEN; return; }
-  if [ "$probe" = PASS ] || [ "$ever" = 1 ]; then echo SHIPPED; else echo INDETERMINATE; fi
+  if [ "$probe" = PASS ] || [ "$ever" = 1 ]; then
+    # would-be SHIPPED — R34: close ONLY with an independent ship-gate PASS bound to this aggregate.
+    # RETURN, a stale-sha PASS, none, or an unreadable verdict all keep the loop iterating (fail-closed).
+    if [ "$shipgate" = PASS ]; then echo SHIPPED; else echo OPEN; fi
+  else
+    echo INDETERMINATE
+  fi
 }
 
 # next_action <open-backlog:0|1> <first-backlog#> <first-drivable-pr#> <first-pr-has-live-validate:0|1>
@@ -109,14 +121,17 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "someone else's PR → not mine"       "$(pr_drivable arthur oso-gato-nox-claudebox '')" "0"
   ck "empty dev-login proves nothing"     "$(pr_drivable oso-gato-nox-claudebox '' 'live-validate')" "0"
   ck "substring not a false escalate"     "$(pr_drivable oso-gato-nox-claudebox oso-gato-nox-claudebox 'blockeder')" "1"
-  echo "== classify (SHIPPED / OPEN / INDETERMINATE) =="
+  echo "== classify (SHIPPED / OPEN / INDETERMINATE) — R34 ship-gate gates the close =="
   ck "drivable work → OPEN"               "$(classify 2 ABSENT 1)" "OPEN"
   ck "probe FAIL, empty backlog → OPEN"   "$(classify 0 FAIL 0)" "OPEN"
-  ck "none + backlog existed → SHIPPED"   "$(classify 0 ABSENT 1)" "SHIPPED"
-  ck "none + probe PASS → SHIPPED"        "$(classify 0 PASS 0)" "SHIPPED"
+  ck "backlog + ship-gate PASS → SHIPPED" "$(classify 0 ABSENT 1 PASS)" "SHIPPED"
+  ck "probe PASS + ship-gate PASS → SHIPPED" "$(classify 0 PASS 0 PASS)" "SHIPPED"
+  ck "backlog + NO ship-gate → OPEN (R34)"   "$(classify 0 ABSENT 1)" "OPEN"
+  ck "backlog + ship-gate RETURN → OPEN"     "$(classify 0 ABSENT 1 RETURN)" "OPEN"
+  ck "drivable work beats a stale PASS"      "$(classify 2 ABSENT 1 PASS)" "OPEN"
   ck "none + no evidence → INDETERMINATE" "$(classify 0 ABSENT 0)" "INDETERMINATE"
   ck "non-numeric → INDETERMINATE"        "$(classify '' ABSENT 1)" "INDETERMINATE"
-  ck "probe FAIL wins over evidence"      "$(classify 0 FAIL 1)" "OPEN"
+  ck "probe FAIL wins over evidence"      "$(classify 0 FAIL 1 PASS)" "OPEN"
   echo "== next_action (the exact drive step) =="
   ck "open backlog → author it"           "$(next_action 1 41 '' 0 | grep -o 'author + ship backlog issue #41')" "author + ship backlog issue #41"
   ck "labelled PR → read the verdict"     "$(next_action 0 '' 233 1 | grep -o 'drive PR #233: read its host')" "drive PR #233: read its host"
@@ -136,6 +151,7 @@ emit(){ # <status> <reason> [next]
   printf 'OPEN_DEV_PRS: %s\n' "${drivable:-?}"
   printf 'DRIVABLE: %s\n' "${drivable_total:-?}"
   printf 'PROBE: %s\n' "${probe:-ABSENT}"
+  printf 'SHIP_GATE: %s\n' "${shipgate:-N/A}"
   [ -n "${3:-}" ] && printf 'NEXT: %s\n' "$3"
   printf 'REASON: %s\n' "$2"
 }
@@ -195,14 +211,46 @@ elif [ -n "$probe_path" ]; then
   log "declared acceptance probe '$probe_path' is not executable — treating as ABSENT"
 fi
 
-verdict="$(classify "$drivable_total" "$probe" "$ever_backlog")"
+# FACT 4 — the R34 SPEC-VS-BUILD SHIP GATE verdict, bound to the CURRENT shipped aggregate (main tip).
+# Read-only: this oracle never RUNS the gate (bin/ship-gate.sh does) — it only reads the recorded fact.
+# PASS iff an unforgeable SHIPGATE_LOGIN commit-comment on the exact current main sha reads VERDICT PASS
+# (a stale-sha PASS, a RETURN, none, or an unreadable read ⇒ PENDING — fail-closed toward NOT-shipping).
+# Only consulted when the objective is otherwise would-be-shipped (cheap: 2 gh calls, backlog-empty only).
+shipgate=PENDING; aggregate_sha=""
+if [ "$drivable_total" -eq 0 ] && { [ "$probe" = PASS ] || [ "$ever_backlog" = 1 ]; }; then
+  aggregate_sha="$(gh api "repos/$SLUG/branches/main" -q .commit.sha 2>/dev/null || true)"
+  if [ -n "$aggregate_sha" ]; then
+    # In make-it-work mode the gate posts under the dev identity — accept it too (mirrors fitness).
+    sg_logins="$SHIPGATE_LOGIN"
+    [ "${FITNESS_SAME_IDENTITY:-0}" = 1 ] && sg_logins="$SHIPGATE_LOGIN $DEV_LOGIN"
+    sg_line=""
+    for _lg in $sg_logins; do
+      sg_line="$(gh api "repos/$SLUG/commits/$aggregate_sha/comments" \
+         -q ".[] | select(.user.login==\"$_lg\" or .user.login==\"${_lg}[bot]\") | .body" 2>/dev/null \
+         | grep -oE '^SHIP GATE: VERDICT (PASS|RETURN) aggregate [0-9a-f]{7,40}' | tail -1)"
+      [ -n "$sg_line" ] && break
+    done
+    sg_verdict="$(printf '%s' "$sg_line" | grep -oE 'VERDICT (PASS|RETURN)' | awk '{print $2}')"
+    sg_sha="$(printf '%s' "$sg_line" | grep -oE 'aggregate [0-9a-f]{7,40}' | awk '{print $2}')"
+    [ "$sg_verdict" = PASS ] && [ -n "$sg_sha" ] && [ "$sg_sha" = "$aggregate_sha" ] && shipgate=PASS
+  fi
+fi
+
+verdict="$(classify "$drivable_total" "$probe" "$ever_backlog" "$shipgate")"
 case "$verdict" in
   OPEN)
-    next="$(next_action "$( [ "$open_backlog" -ge 1 ] && echo 1 || echo 0 )" "$first_backlog" "$first_pr" "$first_pr_lv")"
-    emit OPEN "drivable open work remains: $open_backlog open $BACKLOG_LABEL issue(s) + $drivable open dev PR(s); probe=$probe — the objective is NOT shipped" "$next"
+    # would-be-shipped (no drivable work, probe not failing, ship evidence) but the R34 ship gate has
+    # not PASSed the current aggregate — the one OPEN case whose ONLY remaining step is the ship gate.
+    if [ "$drivable_total" -eq 0 ] && [ "$probe" != FAIL ] && { [ "$probe" = PASS ] || [ "$ever_backlog" = 1 ]; }; then
+      next="run the R34 spec-vs-build ship gate — 'bin/ship-gate.sh --post $REPO' — an independent review (objective→requirements→build-principles) must PASS the built product bound to main@${aggregate_sha:0:7} before the objective can close; current ship-gate=$shipgate."
+      emit OPEN "all backlog features shipped and probe=$probe, but the R34 SPEC-VS-BUILD ship gate has NOT passed the current aggregate (ship-gate=$shipgate) — the objective is NOT closed (R34)" "$next"
+    else
+      next="$(next_action "$( [ "$open_backlog" -ge 1 ] && echo 1 || echo 0 )" "$first_backlog" "$first_pr" "$first_pr_lv")"
+      emit OPEN "drivable open work remains: $open_backlog open $BACKLOG_LABEL issue(s) + $drivable open dev PR(s); probe=$probe — the objective is NOT shipped" "$next"
+    fi
     ;;
   SHIPPED)
-    emit SHIPPED "no drivable open work; probe=$probe; ship evidence present — the whole objective is shipped"
+    emit SHIPPED "no drivable open work; probe=$probe; ship evidence present; R34 ship-gate PASS bound to main@${aggregate_sha:0:7} — the whole objective is shipped"
     ;;
   *)
     emit INDETERMINATE "no drivable open work but no ship evidence (backlog never decomposed, no acceptance probe) — the oracle cannot certify a ship"
