@@ -50,6 +50,18 @@ gh_args=()
 # keeping the independent reviewer's key invisible in-box (the author≠judge boundary). No uid= here.
 [ -n "${GH_APP_FITNESS_SECRET:-}" ]          && gh_args+=( --secret "${GH_APP_FITNESS_SECRET},type=mount,target=gh_app_key_fitness,mode=0400" )
 
+# TS_AUTHKEY (the day-0 unattended tailnet-join key) is delivered as a MOUNTED podman secret FILE, NOT
+# an env var: `-e TS_AUTHKEY=` lands in the container's persistent environment, which distrobox
+# re-materialises as `--env=TS_AUTHKEY=<key>` on the argv of EVERY `distrobox enter`/`podman exec`
+# (world-readable via /proc/<pid>/cmdline). The mount keeps it off both the env and every argv; the
+# entrypoint reads /run/secrets/ts-authkey and joins via tailscale's `--auth-key=file:` prefix. The
+# secret name matches the deployed Quadlet's (setup-user.sh creates the same `fedora-dev-ts-authkey`).
+ts_args=()
+if [ -n "${TS_AUTHKEY:-}" ]; then
+    printf '%s' "$TS_AUTHKEY" | podman secret create --replace fedora-dev-ts-authkey - >/dev/null
+    ts_args+=( --secret "fedora-dev-ts-authkey,type=mount,target=ts-authkey,mode=0400" )
+fi
+
 podman run -d --name fedora-dev \
     --hostname "${BOX_HOSTNAME:-fedora-dev}" \
     --restart=always \
@@ -58,7 +70,7 @@ podman run -d --name fedora-dev \
     --device /dev/net/tun \
     --device /dev/fuse \
     --security-opt label=disable \
-    -e TS_AUTHKEY="${TS_AUTHKEY:-}" \
+    "${ts_args[@]}" \
     -e POLLER_ENABLED="${POLLER_ENABLED:-}" \
     -e POLLER_ARMED="${POLLER_ARMED:-}" \
     -e DEV_LOOP_ENABLED="${DEV_LOOP_ENABLED:-}" \

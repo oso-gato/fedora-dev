@@ -90,15 +90,29 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 
-if [ -n "${TS_AUTHKEY:-}" ]; then
+# TS_AUTHKEY (the unattended tailnet-join key, a day-0 input) is delivered as a MOUNTED podman secret
+# FILE at /run/secrets/ts-authkey — NOT an env var. An env var lands in the container's persistent
+# environment, which distrobox re-materialises as `--env=TS_AUTHKEY=<key>` on the argv of EVERY
+# `distrobox enter` / `podman exec` (world-readable via /proc/<pid>/cmdline). The mount keeps the key
+# off both the container env AND every argv. A LEGACY env-supplied TS_AUTHKEY is still honoured for
+# back-compat, written to a private 0600 tmpfile so it never reaches tailscale's own argv either; both
+# paths pass the key to tailscale via its `--auth-key=file:` prefix (stable since Tailscale 1.38).
+_ts_keyfile=/run/secrets/ts-authkey
+if [ -r "$_ts_keyfile" ] || [ -n "${TS_AUTHKEY:-}" ]; then
+    if [ -r "$_ts_keyfile" ]; then
+        _tskf="$_ts_keyfile"                       # the mounted secret (preferred)
+    else
+        _tskf="$(mktemp)"; chmod 600 "$_tskf"; printf '%s' "${TS_AUTHKEY}" > "$_tskf"   # legacy env → tmpfile
+    fi
     # Tailnet node name = the container hostname (run.sh --hostname / Quadlet HostName —
     # the BOX_HOSTNAME pairing choice: nox = VPS/erebus, nyx = homelab/strix).
     # uname -n, NOT $(hostname): the image ships no `hostname` binary (verified live on nox —
     # the substitution was silently EMPTY and the join only worked because tailscale falls
     # back to deriving the name from the OS hostname). uname is coreutils, always present.
-    until tailscale up --ssh --auth-key="${TS_AUTHKEY}" --hostname="$(uname -n)"; do
+    until tailscale up --ssh --auth-key="file:$_tskf" --hostname="$(uname -n)"; do
         echo "[tailscale] up failed, retrying in 5s"; sleep 5
     done
+    [ "$_tskf" = "$_ts_keyfile" ] || rm -f "$_tskf"   # drop the tmpfile; never the mounted secret
     echo "==== TAILNET JOINED ===="
 else
     (
