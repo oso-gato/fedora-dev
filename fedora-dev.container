@@ -16,8 +16,8 @@
 # 61001-62000. Tailscale SSH (tailnet, keyless) remains primary.
 #
 # Optional: TS_AUTHKEY for unattended tailnet join can be added via a
-# `Secret=` directive (podman secret create fedora-dev-ts-authkey -); the
-# entrypoint honors $TS_AUTHKEY if set, falls back to interactive join.
+# `Secret=…,type=mount` directive (podman secret create fedora-dev-ts-authkey -); the
+# entrypoint reads the mounted file, falls back to interactive web-login join.
 
 [Unit]
 Description=fedora-dev — headless Fedora workshop for building container images
@@ -132,11 +132,14 @@ Environment=DEV_LOOP_ENABLED=1
 # no session stranded), so this is safe to default on. Set DEVBOX_MANIFEST_V2=0 to force v1.
 Environment=DEVBOX_MANIFEST_V2=1
 
-# Optional TS_AUTHKEY for an UNATTENDED tailnet join — a podman secret injected as an ENV
-# VAR (type=env; the entrypoint honors $TS_AUTHKEY, else falls back to web-login).
+# Optional TS_AUTHKEY for an UNATTENDED tailnet join — a podman secret MOUNTED as a FILE
+# (type=mount at /run/secrets/ts-authkey; the entrypoint reads it and joins via tailscale's
+# `--auth-key=file:` prefix, else falls back to web-login). type=mount (NOT type=env): an env
+# var would land in the container environment, which distrobox re-materialises as
+# `--env=TS_AUTHKEY=<key>` on every `distrobox enter`/`podman exec` argv (/proc-readable).
 # fedora-bootstrap's setup-user creates the secret from the spin-up answer and uncomments:
 #   podman secret create fedora-dev-ts-authkey -
-# Secret=fedora-dev-ts-authkey,type=env,target=TS_AUTHKEY
+# Secret=fedora-dev-ts-authkey,type=mount,target=ts-authkey,mode=0400
 
 # Public ports:
 #   4444/tcp -> container :22 (sshd, key-only; keys synced from github.com/oso-gato.keys)
