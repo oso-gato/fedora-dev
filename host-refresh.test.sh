@@ -55,6 +55,13 @@ case "$1 $2" in
       *"--json files"*)    cat "$CASE/files-$repo-$3.txt" 2>/dev/null;;
       *"--json comments"*) cat "$CASE/comments-$repo-$3.txt" 2>/dev/null;;
     esac; exit 0;;
+  "issue view")   # ticket_outcome reads the filed apply-bootstrap ticket directly (state + comments)
+    case "$*" in
+      *"--json state"*)    cat "$CASE/ticket-state-$3.txt" 2>/dev/null;;
+      *"--json comments"*) cat "$CASE/ticket-comments-$3.txt" 2>/dev/null;;
+    esac; exit 0;;
+  "api -X")       # surface_blocked's alarm dedup: `api -X GET search/issues …` → open alarm number or empty
+    cat "$CASE/search-issues.txt" 2>/dev/null; exit 0;;
   "run list")
     echo "runlist $repo $oid" >> "$CASE/calls.log"
     cat "$CASE/run-$oid.tsv" 2>/dev/null; exit 0;;
@@ -116,6 +123,13 @@ recs(){ wc -l 2>/dev/null < "$CASE/scan.rec" || echo 0; }
 # then default so the helper ALWAYS prints exactly one number (missing file → "" → 0; match → N).
 applyqs(){ local n; n="$(grep -cF 'host-apply needed' "$CASE/prcomments.log" 2>/dev/null || true)"; echo "${n:-0}"; }
 applyfiled(){ local n; n="$(grep -cF 'host-refresh → apply-filed:' "$CASE/prcomments.log" 2>/dev/null || true)"; echo "${n:-0}"; }
+# apply-bootstrap tickets ONLY (line-1 grammar in the ticket body) — excludes the surface_blocked alarm,
+# which is created via `gh issue create --body` (no --body-file) so it never lands in ticket-bodies.txt.
+applytix(){ local n; n="$(grep -cF 'host-op: apply-bootstrap' "$CASE/ticket-bodies.txt" 2>/dev/null || true)"; echo "${n:-0}"; }
+# the deduped BLOCKED alarm issue (its --title is recorded to tickets.log).
+alarms(){ local n; n="$(grep -cF 'BLOCKED: host apply-bootstrap' "$CASE/tickets.log" 2>/dev/null || true)"; echo "${n:-0}"; }
+# the loud terminal apply-blocked PR comment.
+applyblocked(){ local n; n="$(grep -cF 'host-refresh → apply-blocked:' "$CASE/prcomments.log" 2>/dev/null || true)"; echo "${n:-0}"; }
 
 # ===================================================================================================
 echo "== REQ 1+6: an image-baked merge files exactly ONE redeploy ticket — AFTER publish =="
@@ -210,8 +224,15 @@ ck "$([ "$(tickets)" = 1 ] && echo 1 || echo 0)" "filed $(tickets) apply-bootstr
 ck "$([ "$(head -1 "$CASE/ticket-bodies.txt" 2>/dev/null)" = "host-op: apply-bootstrap" ] && echo 1 || echo 0)" "ticket line 1 is not the consumer's 'host-op: apply-bootstrap' grammar (no arg)"
 ck "$([ "$(applyfiled)" = 1 ] && echo 1 || echo 0)" "no 'apply-filed:' audit/dedup comment on the merged PR"
 ck "$([ "$(applyqs)" = 0 ] && echo 1 || echo 0)" "surfaced the pre-#187 question ($(applyqs)) — the verb exists now, it must FILE not ask"
-run_scan HOST_REFRESH_WORKLOADS=                   # same HOME — the scan-once marker parks it
-ck "$([ "$(tickets)" = 1 ] && echo 1 || echo 0)" "a re-scan filed again ($(tickets) total) — not idempotent"
+# Idempotency under OUTCOME-keying: scan 1 posted an apply-filed comment (issues/42, the stub's URL) and
+# the ticket is now in-flight. Simulate that comment landing on the PR + the ticket PENDING (no verdict) —
+# the re-scan reads the anchor, sees PENDING, and WAITS (no second apply ticket).
+printf '**host-refresh → apply-filed:** https://github.com/oso-gato/fedora-bootstrap/issues/42 — attempt 1/3.\n' \
+                                                  > "$CASE/comments-fedora-bootstrap-126.txt"
+printf 'OPEN\n'                                   > "$CASE/ticket-state-42.txt"
+: > "$CASE/ticket-comments-42.txt"
+run_scan HOST_REFRESH_WORKLOADS=                   # same HOME — an in-flight ticket must be waited on
+ck "$([ "$(applytix)" = 1 ] && echo 1 || echo 0)" "a re-scan re-filed ($(applytix) total) — an in-flight apply must be waited on, not re-filed"
 done_case
 
 DESC="doc-only bootstrap merge → no ticket (nothing for the running host to apply)"; OK=1
@@ -222,14 +243,16 @@ run_scan HOST_REFRESH_WORKLOADS=
 ck "$([ "$(tickets)" = 0 ] && echo 1 || echo 0)" "filed $(tickets) tickets for a doc-only merge, want 0"
 done_case
 
-DESC="REQ 4: wiped state + a prior apply-filed anchor on the bootstrap PR → no re-file"; OK=1
+DESC="REQ 4: wiped state + a prior apply-filed anchor whose ticket is DONE → terminal skip, no re-file"; OK=1
 setup_case
 printf '128\t%s\t%s\n' "$OID" "$FRESH"            > "$CASE/merged-fedora-bootstrap.tsv"
 printf 'host-agent-watch.sh\n'                    > "$CASE/files-fedora-bootstrap-128.txt"
 printf '**host-refresh → apply-filed:** https://github.com/oso-gato/fedora-bootstrap/issues/41 — …\n' \
                                                   > "$CASE/comments-fedora-bootstrap-128.txt"
+printf 'CLOSED\n'                                 > "$CASE/ticket-state-41.txt"
+printf '**host-agent: DONE** — applied, healthy.\n' > "$CASE/ticket-comments-41.txt"
 run_scan HOST_REFRESH_WORKLOADS=
-ck "$([ "$(tickets)" = 0 ] && echo 1 || echo 0)" "a wiped box re-filed ($(tickets)) despite the PR's own apply-filed anchor"
+ck "$([ "$(applytix)" = 0 ] && echo 1 || echo 0)" "a DONE apply re-filed ($(applytix)) — a terminal-success ticket must skip"
 done_case
 
 DESC="TRANSITION: a PR carrying the pre-#187 'host-apply needed:' question is left alone (never re-filed)"; OK=1
@@ -239,6 +262,66 @@ printf 'host-agent-watch.sh\n'                    > "$CASE/files-fedora-bootstra
 printf '**host-refresh → host-apply needed:** …\n' > "$CASE/comments-fedora-bootstrap-129.txt"
 run_scan HOST_REFRESH_WORKLOADS=
 ck "$([ "$(tickets)" = 0 ] && echo 1 || echo 0)" "re-filed apply-bootstrap ($(tickets)) for a PR already surfaced for a human — the transition must leave it alone"
+done_case
+
+# ---------------------------------------------------------------------------------------------------
+# OUTCOME-KEYED RETRY (audit #7) — a FAILED apply must RE-FILE (not sit stranded on the filed-anchor),
+# a PENDING one waits, and repeated failure surfaces BLOCKED. The old dedup skipped on "was filed".
+# ---------------------------------------------------------------------------------------------------
+echo "== OUTCOME: a FAILED apply RE-FILES (bounded); the old filed-anchor dedup stranded the host =="
+DESC="apply-filed anchor + ticket verdict FAILED (attempts<MAX) → re-files, no alarm, and is NOT parked"; OK=1
+setup_case
+printf '130\t%s\t%s\n' "$OID" "$FRESH"            > "$CASE/merged-fedora-bootstrap.tsv"
+printf 'host-agent-watch.sh\n'                    > "$CASE/files-fedora-bootstrap-130.txt"
+printf '**host-refresh → apply-filed:** https://github.com/oso-gato/fedora-bootstrap/issues/50 — attempt 1/3.\n' \
+                                                  > "$CASE/comments-fedora-bootstrap-130.txt"
+printf 'CLOSED\n'                                 > "$CASE/ticket-state-50.txt"
+printf '**host-agent: FAILED** — apply rolled back to prior commit.\n' > "$CASE/ticket-comments-50.txt"
+run_scan HOST_REFRESH_WORKLOADS=
+ck "$([ "$(applytix)" = 1 ] && echo 1 || echo 0)" "a FAILED apply did NOT re-file ($(applytix) apply tickets) — the host would stay on prior code"
+ck "$([ "$(applyfiled)" = 1 ] && echo 1 || echo 0)" "no new apply-filed anchor posted on the retry ($(applyfiled))"
+ck "$([ "$(alarms)" = 0 ] && echo 1 || echo 0)" "surfaced BLOCKED ($(alarms)) below the retry bound"
+run_scan HOST_REFRESH_WORKLOADS=                  # same HOME — a still-FAILED ticket must NOT be parked
+ck "$([ "$(applytix)" = 2 ] && echo 1 || echo 0)" "a failed apply was PARKED by a marker ($(applytix) total after re-scan, want 2) — no marker may be written on a non-terminal state"
+done_case
+
+echo "== OUTCOME: a PENDING apply WAITS (no re-file); it re-files once the verdict turns FAILED =="
+DESC="apply-filed anchor + ticket still OPEN/no-verdict → wait; flip to FAILED → re-file"; OK=1
+setup_case
+printf '131\t%s\t%s\n' "$OID" "$FRESH"            > "$CASE/merged-fedora-bootstrap.tsv"
+printf 'setup-host.sh\n'                          > "$CASE/files-fedora-bootstrap-131.txt"
+printf '**host-refresh → apply-filed:** https://github.com/oso-gato/fedora-bootstrap/issues/51 — attempt 1/3.\n' \
+                                                  > "$CASE/comments-fedora-bootstrap-131.txt"
+printf 'OPEN\n'                                   > "$CASE/ticket-state-51.txt"
+: > "$CASE/ticket-comments-51.txt"                # in-flight: no host-agent verdict yet
+run_scan HOST_REFRESH_WORKLOADS=
+ck "$([ "$(applytix)" = 0 ] && echo 1 || echo 0)" "an in-flight (PENDING) apply re-filed ($(applytix)) — it must wait for the verdict"
+ck "$(haslog 'in-flight' && echo 1 || echo 0)" "the PENDING wait was not logged"
+printf 'CLOSED\n'                                 > "$CASE/ticket-state-51.txt"
+printf '**host-agent: FAILED** — rolled back.\n'  > "$CASE/ticket-comments-51.txt"
+run_scan HOST_REFRESH_WORKLOADS=                  # verdict now FAILED → the wait releases into a retry
+ck "$([ "$(applytix)" = 1 ] && echo 1 || echo 0)" "once PENDING turned FAILED the apply did not re-file ($(applytix))"
+done_case
+
+echo "== OUTCOME: retries exhausted → BLOCKED surfaced (loud), no further auto-retry =="
+DESC="MAX_APPLY_RETRIES apply-filed anchors + last ticket FAILED → BLOCKED alarm + PR comment, no new apply"; OK=1
+setup_case
+printf '132\t%s\t%s\n' "$OID" "$FRESH"            > "$CASE/merged-fedora-bootstrap.tsv"
+printf 'host-apply.sh\n'                          > "$CASE/files-fedora-bootstrap-132.txt"
+{ printf '**host-refresh → apply-filed:** https://github.com/oso-gato/fedora-bootstrap/issues/60 — attempt 1/3.\n'
+  printf '**host-refresh → apply-filed:** https://github.com/oso-gato/fedora-bootstrap/issues/61 — attempt 2/3.\n'
+  printf '**host-refresh → apply-filed:** https://github.com/oso-gato/fedora-bootstrap/issues/62 — attempt 3/3.\n'
+} > "$CASE/comments-fedora-bootstrap-132.txt"
+printf 'CLOSED\n'                                 > "$CASE/ticket-state-62.txt"
+printf '**host-agent: FAILED** — rolled back again.\n' > "$CASE/ticket-comments-62.txt"
+: > "$CASE/search-issues.txt"                      # no open alarm yet → surface_blocked creates one
+run_scan HOST_REFRESH_WORKLOADS=
+ck "$([ "$(applytix)" = 0 ] && echo 1 || echo 0)" "retries exhausted but still filed an apply ticket ($(applytix)) — must stop and surface"
+ck "$([ "$(applyblocked)" = 1 ] && echo 1 || echo 0)" "no loud apply-blocked PR comment on exhaustion ($(applyblocked))"
+ck "$([ "$(alarms)" = 1 ] && echo 1 || echo 0)" "no deduped BLOCKED alarm issue on exhaustion ($(alarms))"
+printf '77\n'                                     > "$CASE/search-issues.txt"   # now an alarm is open
+run_scan HOST_REFRESH_WORKLOADS=                  # re-scan: terminal marker parks it, no duplicate alarm
+ck "$([ "$(alarms)" = 1 ] && echo 1 || echo 0)" "a re-scan duplicated the BLOCKED alarm ($(alarms) total) — it must dedup and park"
 done_case
 
 # ---------------------------------------------------------------------------------------------------
