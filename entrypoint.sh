@@ -167,7 +167,9 @@ fi
 # verdict AS the fleet-wide fitness App — an identity DISTINCT from this box's dev
 # App, or auto-merge.sh rejects the verdict as self-review. The fitness App PRIVATE
 # KEY stays at the BASE layer (/run/secrets/gh_app_key_fitness, tmpfs — NOT visible
-# in-box, verified empirically); only a <=1h INSTALLATION token is ferried to a
+# in-box because it is mounted mode-0400 owner=root/uid-0, and the nested claudebox is a
+# separate userns where uid 0 is unmapped, so no in-box process can read it); only a
+# <=1h INSTALLATION token is ferried to a
 # 0600 home-volume file the box can read. Same minter as the dev App (gh-app-auth.sh
 # is env-parameterized; `token` mode is read-only — it never touches the dev
 # identity's git/gh wiring). Runs AS ROOT (the secret mount is root-readable); only

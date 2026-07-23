@@ -79,7 +79,7 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # uncomment the two lines (the key mounts into tmpfs at /run/secrets/gh_app_key,
 # never persisted; the entrypoint mints a <=1h installation token on demand):
 #   podman secret create gh_app_key ./app-private-key.pem
-# Secret=gh_app_key,type=mount,target=gh_app_key
+# Secret=gh_app_key,type=mount,target=gh_app_key,uid=1000,gid=1000,mode=0400
 # Environment=GH_APP_ID=000000 GH_APP_INSTALLATION_ID=00000000
 
 # Optional FITNESS-REVIEW App credential — the fleet-wide INDEPENDENT reviewer identity
@@ -89,7 +89,7 @@ Volume=fedora-dev-state:/var/lib/tailscale
 # the fleet constants (public, not secrets); uncomment the THREE lines to enable (setup-user.sh
 # uncomments them automatically when a fitness PEM is provisioned at commission):
 #   podman secret create gh_app_key_fitness ./fitness-app-private-key.pem
-# Secret=gh_app_key_fitness,type=mount,target=gh_app_key_fitness
+# Secret=gh_app_key_fitness,type=mount,target=gh_app_key_fitness,mode=0400
 # Environment=GH_APP_FITNESS_ID=4241099 GH_APP_FITNESS_INSTALLATION_ID=145067591
 # FITNESS_SAME_IDENTITY=0 selects STRICT separation-of-duties — the poller auto-MERGES on a distinct
 # fitness-App PASS (auto-merge.sh refuses a same-identity verdict). Uncomment ONLY WITH the secret above

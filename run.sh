@@ -28,7 +28,10 @@ gh_args=()
 [ -n "${GH_APP_INSTALLATION_ID:-}" ] && gh_args+=( -e "GH_APP_INSTALLATION_ID=${GH_APP_INSTALLATION_ID}" )
 [ -n "${GH_TOKEN:-}" ]               && gh_args+=( -e "GH_TOKEN=${GH_TOKEN}" )
 [ -n "${GH_APP_KEY_FILE:-}" ]        && gh_args+=( -v "${GH_APP_KEY_FILE}:/run/secrets/gh_app_key:ro" )
-[ -n "${GH_APP_SECRET:-}" ]          && gh_args+=( --secret "${GH_APP_SECRET},type=mount,target=gh_app_key,mode=0400" )
+# The DEV key is read by `core` (uid 1000) via `runuser -u core` in the entrypoint, so the mount
+# MUST be owned by core (uid=1000,gid=1000) for owner-only 0400 to stay readable; a bare 0400
+# (owner uid 0) would EACCES the core reader and break dev auth.
+[ -n "${GH_APP_SECRET:-}" ]          && gh_args+=( --secret "${GH_APP_SECRET},type=mount,target=gh_app_key,uid=1000,gid=1000,mode=0400" )
 
 # Optional FITNESS-REVIEW App credential (the fleet-wide independent reviewer identity —
 # DISTINCT from the dev App above; auto-merge.sh rejects a self-authored verdict):
@@ -42,6 +45,9 @@ gh_args=()
 [ -n "${GH_APP_FITNESS_INSTALLATION_ID:-}" ] && gh_args+=( -e "GH_APP_FITNESS_INSTALLATION_ID=${GH_APP_FITNESS_INSTALLATION_ID}" )
 [ -n "${FITNESS_LOGIN:-}" ]                  && gh_args+=( -e "FITNESS_LOGIN=${FITNESS_LOGIN}" )
 [ -n "${GH_APP_FITNESS_KEY_FILE_HOST:-}" ]   && gh_args+=( -v "${GH_APP_FITNESS_KEY_FILE_HOST}:/run/secrets/gh_app_key_fitness:ro" )
+# The FITNESS key is read ONLY by PID-1 root (the entrypoint ferry + its 40-min refresh), so owner-root
+# 0400 is intended: root reads it, and the nested claudebox (a separate userns, uid 0 unmapped) cannot —
+# keeping the independent reviewer's key invisible in-box (the author≠judge boundary). No uid= here.
 [ -n "${GH_APP_FITNESS_SECRET:-}" ]          && gh_args+=( --secret "${GH_APP_FITNESS_SECRET},type=mount,target=gh_app_key_fitness,mode=0400" )
 
 podman run -d --name fedora-dev \
