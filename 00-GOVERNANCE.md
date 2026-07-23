@@ -35,30 +35,13 @@ that would catch a subverted agent) and **irreversibility** (gate anything that 
   **MAINTAINER-MERGE-ONLY** and is held + assigned to the maintainer (R1; §6(f)).
 - The surviving **human-judgment path** under zero-gate is a fitness **ESCALATE** (a question, never a
   merge button); amending this constitution or the DOCTRINE is maintainer-adjudicated through it.
-- **Reversibility / recoverability** of host and deploy changes → R38 (+ R10/R23); host-apply routing is
-  zero-gate (§6(c)), not a click.
 
-## References — this doc points, it does not restate (BP9 DRY)
+## The four docs of record (MECE — one concept, one home)
 
-Every concept has ONE home; governance references it rather than keeping a second copy:
+Governance owns only the authority above and the §6 decision log below. It does **not** restate — nor
+index — anyone else's content; each concern lives in exactly one doc:
 
-- **The objective** (the north star this doc grades against) → `00-OBJECTIVES.md`.
-- **The intake → review → merge → ship workflow** → the requirements: **R1** (single-touch intake) →
-  **R6** (independent fitness — the three questions + PASS/RETURN/ESCALATE) → **R7** (click-free
-  server-enforced merge) → **R34** (adversarial spec-vs-build ship gate). Operative rubric:
-  `fleet-core.md` INDEPENDENT FITNESS REVIEW.
-- **Who merges, and how** → **R7** + `fleet-core.md` MERGE AUTHORITY / TIER ROUTING (the old Tier A/B/C
-  table is superseded by §6(c) zero-gate).
-- **Separation of duties (author ≠ judge)** → **R6**.
-- **Reversibility governs autonomy** → **R38** (+ R10/R23).
-- **How any artifact is built**, including throwaway builds and the no-waste bounded/GC'd package cache →
-  `00-BUILDPRINCIPLE.md` (**BP5**).
-- **Proportionate-control / anti-theater** doctrine → `CLAUDE.md` class-(c) ANTI-THEATER.
-- **No rabbit-holes / human-out-of-the-loop** → the PROBLEM-SOLVING DOCTRINE (`fleet-core.md`, top); the
-  RETURN mechanism is **R6**; the loop mechanics are `fleet-core.md` THE LOOP.
-- **Keeping the doctrine alive** (always-in-context stamping, per-change Q3 grading, the daily
-  `fleet-guard-parity` CHECK-6 drift audit) → `fleet-core.md` + `bin/fleet-guard-parity.sh` — not
-  restated here.
+**why** → [`00-OBJECTIVES.md`](./00-OBJECTIVES.md) · **what** → [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md) · **how** → [`00-BUILDPRINCIPLE.md`](./00-BUILDPRINCIPLE.md) · **who** → this doc.
 
 ## 6. Resolved decisions (each states DECISION vs current STATUS explicitly)
 
