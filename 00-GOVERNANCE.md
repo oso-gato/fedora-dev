@@ -38,8 +38,10 @@ that would catch a subverted agent) and **irreversibility** (gate anything that 
 
 ## The four docs of record (MECE — one concept, one home)
 
-Governance owns only the authority above and the §6 decision log below. It does **not** restate — nor
-index — anyone else's content; each concern lives in exactly one doc:
+Governance owns only the authority above and the §6 decision log below. It does **not restate** anyone
+else's content — but it does **map** it, because MECE forbids duplicated content, not a signpost: a
+visible partition is what lets an author route a new sentence to exactly one home. Each concern lives
+in exactly one doc:
 
 **why** → [`00-OBJECTIVES.md`](./00-OBJECTIVES.md) · **what** → [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md) · **how** → [`00-BUILDPRINCIPLE.md`](./00-BUILDPRINCIPLE.md) · **who** → this doc.
 

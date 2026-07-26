@@ -222,6 +222,13 @@ fix the law". Authoritative classifier = `bin/tier-classify.sh`, now REPORTING-O
 - Merge authority = the `fedora-dev` poller ONLY (`fedora-bootstrap` is propose-only).
 - EVERY tier — control-plane class included — auto-merges on host-GREEN + independent-fitness-PASS via
   the poller. There is NO Tier-A human click; tier labels the digest/report, it does not route.
+- **THE ONE EXCEPTION — THE CONFIRMED SPEC (R1).** A PR that modifies `00-OBJECTIVES.md`,
+  `00-REQUIREMENTS.md`, `00-BUILDPRINCIPLE.md` or `00-GOVERNANCE.md` is **MAINTAINER-MERGE-ONLY**: the
+  loop MUST NOT merge it. Amending the confirmed spec is a NEW maintainer confirmation (R1), never an
+  autonomous merge — so `bin/auto-merge.sh` HOLDS such a PR (exit 4), assigns the maintainer and labels
+  it `maintainer-merge`, and the poller parks it QUIETLY (an expected hold, NOT a trust-boundary alarm).
+  This is the only carve-out from zero-gate; everything else still auto-merges. Mechanism: `00-DESIGN.md`
+  D2a. Decision record: `00-GOVERNANCE.md` §6(f).
 - Recoverability is AUTOMATIC, not human: host post-deploy health-gate + digest rollback, full
   git-revertability, and fitness's standing *preserve-recoverability* rule (a change that removes
   rollback or exfiltrates the merge/secret credential FAILS review).
