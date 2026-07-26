@@ -2,7 +2,9 @@
 
 > Companion to [`00-OBJECTIVES.md`](./00-OBJECTIVES.md) (the **WHY**) and
 > [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md) (the functional **WHAT** + acceptance). This document is
-> the **HOW**, in two registers: the **ARCHITECTURE** — the whole system's intended structure,
+> the **HOW IT WORKS** — this system's own structure and mechanisms (as distinct from
+> [`00-BUILDPRINCIPLE.md`](./00-BUILDPRINCIPLE.md), the **HOW WE BUILD**: the artifact-agnostic
+> construction rules every build obeys). It runs in two registers: the **ARCHITECTURE** — the whole system's intended structure,
 > architected **upfront** from the requirements — and the **DESIGN** — the per-portion mechanisms,
 > designed just-in-time as each portion is built. Read: objective → requirements → this.
 >
@@ -262,6 +264,32 @@ the judge **on the other trust domain (erebus)**; R25 additionally binds verdict
 is the open #150 class); R5's per-session routing token is not yet on every verdict. The poller is
 the working transitional mechanism that shipped the loop; converging it to R7/R6/R25 is architecture
 work ahead, not a silent status quo.
+
+### D2a. The maintainer-merge hold — how R1's confirmed-spec immutability is enforced  `[BUILT]`
+R1 states the CAPABILITY (a PR touching the confirmed spec must not be merged by the loop; it must
+reach the maintainer) and, being a requirement, deliberately carries no mechanism. This is that
+mechanism — three layers, defence in depth:
+
+1. **Loop guard (dev-side, authoritative for the autonomous path).** `bin/auto-merge.sh` reads the
+   PR's changed paths before any gate is evaluated and matches them against `TRINITY_PATHS`
+   (`00-OBJECTIVES.md` `00-REQUIREMENTS.md` `00-BUILDPRINCIPLE.md` `00-GOVERNANCE.md`). A hit exits
+   **4** — a dedicated "maintainer-merge hold" code, distinct from the fail-closed REFUSE(1) — and,
+   under `--commit`, assigns `MAINTAINER_LOGIN` and applies the `maintainer-merge` label so the PR
+   surfaces in the maintainer's GitHub app. `bin/pr-poller.sh` maps rc 4 to a QUIET park: an expected
+   hold, deliberately NOT routed to the trust-boundary "refused" alarm. Covered by
+   `trinity-guard.test.sh` (a spec PR, a governance PR, and a mixed spec+code PR all hold; a plain
+   code PR is untouched).
+2. **Server-side review request.** `.github/CODEOWNERS` maps the same four paths to the maintainer,
+   so GitHub auto-requests their review — a second, identity-side surface that does not depend on
+   the dev box behaving.
+3. **Server-side block (maintainer's one-time settings act).** A branch-protection / ruleset
+   *"Require review from Code Owners"* on `main` makes GitHub itself refuse the merge until the
+   maintainer approves. This is the only layer that also closes the accepted raw-API-merge residual
+   for these paths, and it is the one layer the apparatus cannot install for itself.
+
+WHY three: layer 1 is the apparatus policing itself (fast, testable, but self-enforced); layer 2 is
+notification, not enforcement; layer 3 is the only one that holds if the dev box is compromised or
+bypassed. The decision, its rationale and its recorded adverse effects are `00-GOVERNANCE.md` §6(f).
 
 ## D3. R17 — Rebuild continuity  `[BUILT]`
 

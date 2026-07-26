@@ -1,6 +1,7 @@
 # Apparatus — BUILD PRINCIPLES (construction spec of record)
 
-> **THE HOW** — how every artifact is constructed & packaged.
+> **THE HOW WE BUILD** — how every artifact is constructed & packaged, whatever it does.
+> *(Distinct from `00-DESIGN.md`, THE HOW IT WORKS — this system's own architecture.)*
 
 > **The third leg of the Trinity.** Companion to [`00-OBJECTIVES.md`](./00-OBJECTIVES.md) (the **WHY** /
 > what) and [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md) (the functional **WHAT** it must do + its
@@ -12,10 +13,7 @@
 > **Relationship to the other two docs.** The objective and the functional requirements are confirmed
 > once by the maintainer and are fixed (amendment = a new confirmation, R1). These build principles are
 > confirmed with them and share that authority — they are graded by the same fitness gate and enforced
-> by the same mechanical scans, **and by the same MAINTAINER-MERGE-ONLY rule: a PR editing this document
-> (like one editing the objective or the requirements) is never auto-merged — the loop holds it and
-> assigns it to the maintainer, and `.github/CODEOWNERS` + a branch-protection Code-Owner-review rule
-> gate it server-side (R1).** The **design** ([`00-DESIGN.md`](./00-DESIGN.md)) is dev-owned and
+> by the same mechanical scans, **and are MAINTAINER-MERGE-ONLY on the same terms (R1).** The **design** ([`00-DESIGN.md`](./00-DESIGN.md)) is dev-owned and
 > mutable-on-fact; a build principle is not. Where a per-repo `CLAUDE.md` BUILD PRINCIPLES table exists
 > (fedora-dev, fedora-desktop, fedora-bootstrap), it is the **per-repo instantiation** of these
 > apparatus-wide principles; it must not contradict them, and DRY (BP9) governs which is authoritative.
