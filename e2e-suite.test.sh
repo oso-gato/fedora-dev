@@ -52,6 +52,20 @@ GH_STREAM="$ROOT/stream1.txt" PATH="$BIN:$PATH" bash "$SUT" audit oso-gato/e2e-a
 GH_STREAM="$ROOT/stream2.txt" PATH="$BIN:$PATH" bash "$SUT" audit oso-gato/e2e-alpha >/dev/null 2>&1 \
   && no "2-human stream wrongly PASSed" || ok "2 human events → FAIL (rc != 0)"
 
+echo "== R37: an UNREADABLE stream is NOT a count of zero (the e2e-alpha 404 class) =="
+cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *"issues/comments"*) [ "${GH_UNREADABLE:-0}" = 1 ] && exit 1; cat "${GH_STREAM:-/dev/null}" 2>/dev/null;; *) : ;; esac
+exit 0
+EOF
+chmod +x "$BIN/gh"
+UN="$(GH_UNREADABLE=1 PATH="$BIN:$PATH" bash "$SUT" audit oso-gato/gone 2>&1)"; UNRC=$?
+{ printf '%s' "$UN" | grep -q 'UNREADABLE' && [ "$UNRC" = 3 ]; } \
+  && ok "unreadable stream → says UNREADABLE, rc 3" || no "unreadable stream not surfaced as a fault (rc=$UNRC): $UN"
+printf '%s' "$UN" | grep -qE '0 human EVENT' \
+  && no "an unreadable repo was reported as a ZERO COUNT — a measurement never made, presented as clean" \
+  || ok "no zero-count is printed for a stream that could not be read"
+
 echo "== MUTATION: misclassify the App login as HUMAN → the 1-human stream miscounts to 2 → FAIL =="
 MUT="$ROOT/mut.sh"; sed 's/case " \$APPARATUS_LOGINS " in .*printf .APPARATUS.; return;; esac/: # mutant: App logins no longer recognized/' "$SUT" > "$MUT"
 if cmp -s "$SUT" "$MUT"; then no "MUTATION vacuous (sed changed nothing)"; else

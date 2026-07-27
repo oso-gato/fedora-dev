@@ -138,14 +138,23 @@ audit(){
   local slug="${1:?usage: e2e-suite.sh audit <owner/repo> [--since <iso8601>]}"; shift || true
   local since=""; [ "${1:-}" = "--since" ] && { since="${2:-}"; shift 2 || true; }
   command -v gh >/dev/null 2>&1 || { echo "e2e-suite audit: gh not available (read-only auditor needs it)" >&2; return 3; }
-  local humans=0 total=0 login type klass
-  # issue comments across the repo's event stream (read-only GET); the actor is .user.login + .user.type.
+  local humans=0 total=0 login type klass stream rc
+  # READ the event stream FIRST and check the read succeeded. An UNREADABLE stream (deleted repo, App
+  # not installed, API error) MUST NOT be reported as a count of zero: that is a measurement never made,
+  # presented as a clean result — the exact "satisfied by a proxy" failure the objective forbids and an
+  # R37 silent-degradation. Caught live 2026-07-27: e2e-alpha 404s (App not installed) and the auditor
+  # announced "0 human EVENT(s) of 0 total", which reads as PERFECT autonomy for a repo it cannot see.
+  stream="$(gh api --paginate "repos/$slug/issues/comments${since:+?since=$since}" \
+              -q '.[] | "\(.user.login)\t\(.user.type)"' 2>/dev/null)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'e2e-suite audit %s: UNREADABLE — the event stream could not be read (gh rc %s: repo missing/renamed, App not installed on it, or an API error). NO measurement was made; this is NOT a count of zero.\n' "$slug" "$rc"
+    return 3
+  fi
   while IFS=$'\t' read -r login type; do
     [ -n "$login$type" ] || continue
     total=$((total+1)); klass="$(actor_class "$login" "$type")"
     [ "$klass" = HUMAN ] && humans=$((humans+1))
-  done < <(gh api --paginate "repos/$slug/issues/comments${since:+?since=$since}" \
-              -q '.[] | "\(.user.login)\t\(.user.type)"' 2>/dev/null)
+  done <<< "$stream"
   local v; v="$(interaction_verdict "$humans")"
   printf 'e2e-suite audit %s: %d human EVENT(s) of %d total → %s\n' "$slug" "$humans" "$total" "$v"
   printf '  NOTE: human-EVENT count; == R14 interaction count only for a no-discussion intake (R31 collapse is STAGED).\n'
