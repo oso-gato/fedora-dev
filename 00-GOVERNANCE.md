@@ -103,7 +103,7 @@ consequences*; each entry says what could bite, and why it is accepted for now.
   drift was never "too much security"; it was **security without recovery** (now R39/R43).
 - **The limit of this ruling:** it is NOT "fewer gates". Machine gates cost nothing while they work and
   are demanded by the objective's distrust-your-own-reports clause. It is that **every blocking gate
-  must carry a bounded automatic recovery** — detection may only be added together with recovery.
+  must carry a bounded automatic recovery** — the rule R39/R43 now state.
 - **STATUS: ENACTED** for the spec (R7/R14/R39–R43 in the PR carrying this entry). R41's build —
   removing the live deploy tap — is the first implementation task.
 
