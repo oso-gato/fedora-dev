@@ -62,6 +62,24 @@ consequences*; each entry says what could bite, and why it is accepted for now.
 
 ## 6. Resolved decisions (each states DECISION vs current STATUS explicitly)
 
+**(e) SCOPE = THE LIVE APP INSTALLATION — the two-camp wall retired (the maintainer's decision, 2026-07-27).**
+- **DECISION (the maintainer, adjudicating the 2026-07-22 audit's top finding):**
+  > The objective is the development pair working wherever the GitHub App has authority. If I give the
+  > App access to a private repo, then it's available. [On the audit flagging the App as installed on
+  > the "camp-2" private repos:] reality is right — fix the document so the audit stops flagging it.
+- **What it changes:** operating scope is the **live App installation, private repositories included** —
+  read from the installation itself, never from a list in code. The earlier two-camp model (a
+  "vibe-coded camp the apparatus develops" vs a "private-data camp it can never reach") is **retired**.
+  R36 no longer grades a private-repo install as (b) UNSAFE; the security line that remains is that the
+  apparatus must **never SELF-widen** its own installation.
+- **Why:** the two-camp table hardcoded a repo list that had already drifted — the App was in fact
+  installed on repos the doc named forbidden, and on others it did not list at all. The audit read that
+  as its top UNSAFE finding, but it was a **doc-vs-reality contradiction, not a code defect**: R16
+  already defined scope as the live installation, so a second hardcoded list added no authority — only
+  a copy that drifts. Scope is a maintainer act (install/remove), not a software allowlist.
+- **STATUS: ENACTED** via the PR carrying this entry. The App installation itself is unchanged — this
+  records that the existing install IS the authorized scope.
+
 **(f) TRINITY = MAINTAINER-MERGE-ONLY — durable enforcement of R1 (the maintainer's decision, 2026-07-23).**
 - **DECISION (the maintainer, this session):** a PR that amends the confirmed spec (the Trinity —
   `00-OBJECTIVES.md` / `00-REQUIREMENTS.md` / `00-BUILDPRINCIPLE.md`) or this constitution
