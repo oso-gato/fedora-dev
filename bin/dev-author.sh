@@ -181,16 +181,42 @@ esac
 # SAFE BY CONSTRUCTION: this runs AFTER the R16 scope check above, so it can only ever clone a repo the
 # App is already installed on — it can never be used to REACH an out-of-scope repo (the 2026-07-13
 # #165 lesson: a session must never self-provision its way into a repo it was not granted).
+# PURELY ADDITIVE PRE-ISOLATION REPAIR (R39 gate-resilience, 2026-07-27). fresh-tree.sh bolts its
+# isolated worktree off a persistent clone and off origin/<default>. Two mechanical conditions used to
+# make that impossible and surface a HUMAN question instead: (a) a repo the maintainer newly brought IN
+# SCOPE has no local clone; (b) a VIRGIN repo has ZERO commits, so there is no base branch to branch
+# from. Caught live in the E2E-A run on e2e-beta — all 7 backlog issues parked as "BLOCKED: a maintainer
+# should check the repo clone", i.e. 7 human interactions against a bar of ONE, none of them a decision.
+# Both are RECOVERABLE, so the loop repairs them itself.
+# DESIGN RULE: this block only ever HELPS. If it cannot repair, it logs and falls through, leaving
+# fresh-tree to fail exactly as before — it never introduces a new failure path of its own.
+# SAFE BY CONSTRUCTION: it runs AFTER the R16 scope check, so only a repo the App is already installed
+# on can be cloned or seeded — it can never be used to REACH an out-of-scope repo (the #165 lesson).
 CLONE_ROOT="${CLONE_ROOT:-$HOME/repos}"
-if [ ! -d "$CLONE_ROOT/$REPO/.git" ]; then
+_src="$REPO"; [ -d "$_src/.git" ] || _src="$CLONE_ROOT/$REPO"
+if [ ! -d "$_src/.git" ]; then
   log "no local clone of $SLUG — provisioning one (in-scope; isolation needs it)"
   mkdir -p "$CLONE_ROOT" 2>/dev/null
-  if gh repo clone "$SLUG" "$CLONE_ROOT/$REPO" -- --quiet >/dev/null 2>&1; then
-    log "cloned $SLUG → $CLONE_ROOT/$REPO"
+  gh repo clone "$SLUG" "$CLONE_ROOT/$REPO" -- --quiet >/dev/null 2>&1 || true
+  if [ -d "$CLONE_ROOT/$REPO/.git" ]; then _src="$CLONE_ROOT/$REPO"; log "cloned $SLUG → $_src"
+  else log "could not provision a clone of $SLUG — leaving isolation to fresh-tree (behaviour unchanged)"; fi
+fi
+# Seed a VIRGIN repo so work has a base to branch from. No PR can target a base that does not exist, so
+# the first commit MUST be a direct push — exactly what GitHub's own "add a README" button does. Without
+# it the apparatus could never start a greenfield product, only extend repos a human had already seeded.
+if [ -d "$_src/.git" ] && ! git -C "$_src" rev-parse --verify HEAD >/dev/null 2>&1; then
+  _def="$(gh api "repos/$SLUG" -q .default_branch 2>/dev/null)"; _def="${_def:-main}"
+  log "$SLUG is EMPTY (no commits) — seeding the initial commit on '$_def' so work can branch off it"
+  git -C "$_src" config user.name  "${GIT_AUTHOR_NAME:-claudebox}" >/dev/null 2>&1
+  git -C "$_src" config user.email "${GIT_AUTHOR_EMAIL:-claudebox@fedora-dev.local}" >/dev/null 2>&1
+  printf '# %s\n\nSeeded by the autonomous dev-pair so work can branch from a real base.\nThe product and its documentation are built by the backlog issues on this repo.\n' "$REPO" > "$_src/README.md"
+  if git -C "$_src" checkout -q -B "$_def" 2>/dev/null \
+     && git -C "$_src" add README.md >/dev/null 2>&1 \
+     && git -C "$_src" commit -qm "seed: initial commit so the backlog can branch off a real base" >/dev/null 2>&1 \
+     && git -C "$_src" push -q -u origin "$_def" >/dev/null 2>&1; then
+    log "$SLUG: seeded '$_def' — the repo now has a base to branch from"
   else
-    log "clone of $SLUG FAILED — cannot isolate (fail-closed)"
-    surface_blocked "could not clone the in-scope repo '$SLUG' to isolate a worktree from — check network/credentials."
-    exit 0
+    log "$SLUG: could not seed '$_def' — leaving isolation to fresh-tree (behaviour unchanged)"
   fi
 fi
 branch="$(branch_for "$ISSUE" "$title")"
