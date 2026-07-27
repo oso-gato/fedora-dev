@@ -172,6 +172,27 @@ case "$decision" in
 esac
 
 # 2) ISOLATE — a fresh worktree off current origin/main (mandatory; never the shared clone).
+# ENSURE THE PERSISTENT CLONE FIRST (R39 gate-resilience, 2026-07-27). fresh-tree.sh needs a clone at
+# ~/repos/<repo> to bolt the worktree off; a repo the maintainer newly brought IN SCOPE has none, so
+# EVERY backlog issue used to fail isolation and park as "BLOCKED — a maintainer should check the repo
+# clone". Caught live in the E2E-A run on e2e-beta: all 7 backlog issues parked, which would have cost
+# 7 human interactions against an acceptance bar of ONE. A missing clone of an in-scope repo is a
+# RECOVERABLE condition, not a human summons.
+# SAFE BY CONSTRUCTION: this runs AFTER the R16 scope check above, so it can only ever clone a repo the
+# App is already installed on — it can never be used to REACH an out-of-scope repo (the 2026-07-13
+# #165 lesson: a session must never self-provision its way into a repo it was not granted).
+CLONE_ROOT="${CLONE_ROOT:-$HOME/repos}"
+if [ ! -d "$CLONE_ROOT/$REPO/.git" ]; then
+  log "no local clone of $SLUG — provisioning one (in-scope; isolation needs it)"
+  mkdir -p "$CLONE_ROOT" 2>/dev/null
+  if gh repo clone "$SLUG" "$CLONE_ROOT/$REPO" -- --quiet >/dev/null 2>&1; then
+    log "cloned $SLUG → $CLONE_ROOT/$REPO"
+  else
+    log "clone of $SLUG FAILED — cannot isolate (fail-closed)"
+    surface_blocked "could not clone the in-scope repo '$SLUG' to isolate a worktree from — check network/credentials."
+    exit 0
+  fi
+fi
 branch="$(branch_for "$ISSUE" "$title")"
 log "authoring $SLUG#$ISSUE '$title' on $branch"
 WT="$("$FRESH_TREE" "$REPO" "$branch" 2>/dev/null)" \
