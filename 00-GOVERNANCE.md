@@ -45,6 +45,21 @@ in exactly one doc:
 
 **why** → [`00-OBJECTIVES.md`](./00-OBJECTIVES.md) · **what** → [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md) · **how** → [`00-BUILDPRINCIPLE.md`](./00-BUILDPRINCIPLE.md) · **who** → this doc.
 
+## Known risks & accepted residuals
+
+What the apparatus DEPENDS on, and the holes it knowingly runs with. An unnamed risk is still a risk —
+it is just one nobody can weigh. Governance owns this because it already records decisions *and their
+consequences*; each entry says what could bite, and why it is accepted for now.
+
+| # | Risk / dependency | Why accepted (for now) |
+|---|---|---|
+| K1 | **GitHub is a total single point of failure.** R5 makes it the *sole* IPC, work-log and audit trail. If GitHub is unavailable the apparatus has no bus, no durable state and no audit — it does not degrade, it stops. | No second bus exists, and building one would duplicate the thing that makes the loop auditable. Accepted; a real outage is a full stop, not data loss (the record survives in GitHub). |
+| K2 | **A raw-API merge can bypass the interactive merge block.** The `gh pr merge` deny is a command-prefix rule; a direct API call is not covered. | Pattern-denying every API shape is sieve-theater (see the anti-theater doctrine); recovery is automatic (git revert + health-gate rollback). NARROWED for the confirmed spec by the R1 Code-Owner rule, which GitHub enforces server-side. |
+| K3 | **One shared credential for every tenant session.** Isolation between sessions is enforced by code, not by identity, so the hard stop (key revocation, R9) necessarily stops *all* sessions at once. | Per-tenant identities would multiply the credential surface. Accepted; the soft stop (HALT) is per-session and maintainer-thrown. |
+| K4 | **The apparatus merges its own control-plane changes.** Under zero-gate (§6(c)) it can rewrite its own machinery without a human. | Deliberate — it is what makes self-development possible. Safety is *recoverability*, not prevention: git-revertable, health-gated, auto-rolled-back. The confirmed spec is the one carve-out (R1, §6(f)). |
+| K5 | **Stronger container isolation is undecided.** gVisor is installed and opt-in but its feasibility test has never run (§6(b)). | The plain fence is the current boundary; the decision is pending real evidence, not assumed. |
+| K6 | **The operative law can drift from the spec.** `policy/fleet-core.md` — the rules actually stamped into every agent's context — is not itself locked, and has already contradicted the confirmed spec once (it asserted control-plane auto-merge with no R1 carve-out until 2026-07-24). | Being resolved: the durable fix is to strip original authority from the stamp so it can only *derive* from these four documents. Until then, `bin/fleet-guard-parity.sh` guards its shape but not its agreement with the spec. |
+
 ## 6. Resolved decisions (each states DECISION vs current STATUS explicitly)
 
 **(f) TRINITY = MAINTAINER-MERGE-ONLY — durable enforcement of R1 (the maintainer's decision, 2026-07-23).**
