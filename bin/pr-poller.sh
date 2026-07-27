@@ -692,6 +692,12 @@ HOST_REFRESH_TICKS=0
 RECONCILE_SCAN="${RECONCILE_SCAN:-$HERE/reconcile.sh}"
 RECONCILE_EVERY="${RECONCILE_EVERY:-30}"
 RECONCILE_TICKS=0
+# SHIP ACTUATOR (R40) — the loop closes its own objective: run the R34 gate when it is the last missing
+# piece, then announce the ship. Rarer cadence than the other ticks because a gate run costs a model
+# call; 0 disables. See ship_actuator_tick() for the fail-safe contract.
+SHIP_ACTUATOR="${SHIP_ACTUATOR:-$HERE/ship-actuator.sh}"
+SHIP_ACTUATOR_EVERY="${SHIP_ACTUATOR_EVERY:-60}"
+SHIP_ACTUATOR_TICKS=0
 # ── DEV-LOOP LAUNCH (self-arm the authoring loop, 2026-07-19) ────────────────────────────────────────
 # The authoring loop (dev-loop-service.sh) is launched by entrypoint.sh — but entrypoint.sh is
 # IMAGE-BAKED, so on a box whose RUNNING image predates the loop, NOTHING launches it until a rebuild.
@@ -1155,6 +1161,27 @@ reconcile_tick(){
   return 0
 }
 
+# SHIP ACTUATOR tick (R40, 2026-07-27) — the loop closes its OWN objective. Same wiring shape as
+# reconcile: once per SHIP_ACTUATOR_EVERY sweeps, R9-halt-gated (running the R34 gate and announcing a
+# ship are ACTIONS). Rarer than the others by default because a RUN_GATE costs a model run — but the
+# actuator only reaches that branch when the backlog is already empty, and ship-gate.sh is idempotent
+# per aggregate sha, so a steady state costs one cheap oracle read per tick. FAIL-SAFE (R39): the
+# actuator returns 0 on every internal failure and this call swallows the rest — a ship that cannot be
+# announced this tick is announced the next; it can never stall the loop.
+ship_actuator_tick(){
+  [ "${SHIP_ACTUATOR_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
+  SHIP_ACTUATOR_TICKS=$((SHIP_ACTUATOR_TICKS+1))
+  [ "$SHIP_ACTUATOR_TICKS" -ge "$SHIP_ACTUATOR_EVERY" ] || return 0
+  SHIP_ACTUATOR_TICKS=0
+  if [ "${POLLER_HALTED:-0}" = 1 ]; then
+    log "ship-actuator: R9 HALT — skipped this tick (no gate run, no ship announced; resumes when the halt clears)"
+    return 0
+  fi
+  "$SHIP_ACTUATOR" "$POLLER_REPO" 2>&1 | tee -a "$LOG" >&2 \
+    || log "ship-actuator: tick failed (continuing — the objective simply stays open for the next tick)"
+  return 0
+}
+
 # DEV-LOOP LAUNCH tick (self-arm, 2026-07-19) — see the DEV_LOOP config block above. Same discipline as
 # host_refresh_tick/reconcile_tick: END of a tick, R9-halt-gated (launching a service is an ACTION),
 # rate-limited. IDEMPOTENT: launches ONLY when no live dev-loop-service already holds the loop
@@ -1244,6 +1271,7 @@ sweep(){
   done
   host_refresh_tick
   reconcile_tick
+  ship_actuator_tick
   dev_loop_launch_tick
   rebuild_request_tick
 }
