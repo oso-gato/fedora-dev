@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pr-poller.sh — the DEV-SIDE POLLER / wake-up mechanism (GOVERNANCE §5 / #93 Step 5).
+# pr-poller.sh — the DEV-SIDE POLLER / wake-up mechanism (R6/R7 / #93 Step 5).
 #
 # The host is already autonomous: it live-gates a labelled PR and posts a GREEN/RED verdict on its own
 # timer. This closes the DEV-side gap — a supervised, PLAIN-SHELL (NO Claude in the loop) watcher on
@@ -1479,6 +1479,11 @@ sweep_repo(){
         local amrc=${PIPESTATUS[0]}
         case "$amrc" in
           0) : > "$done"; rm -f "$STATE/rebase-${pr}.n" ;;   # merged → clear the auto-rebase counter
+          4) # TRINITY / MAINTAINER-MERGE hold (R1): auto-merge refuses to autonomously merge a
+             # confirmed-spec change and has assigned + labelled it for the maintainer. Park QUIETLY —
+             # this is an EXPECTED, correct hold, NOT the trust-boundary 'refused' alarm (the `*)` arm).
+             log "#$pr ${sha:0:7} — MAINTAINER-MERGE hold (touches the Trinity/GOVERNANCE, R1): assigned to the maintainer for an explicit merge, parked"
+             : > "$done" ;;
           2)  # CAT-17: OWN the mechanical rebase of a GREEN+PASS PR merely behind main — do NOT park it.
               # `gh pr update-branch` server-side-merges main into the PR branch (NO local clone touched,
               # unlike the fixer): CLEAN behind → succeeds, minting a NEW head that re-gates (PROGRESS,

@@ -186,13 +186,13 @@ finished", host-EXECUTED work you can drive through the ticket bus.
 5. INDEPENDENT FITNESS REVIEW — self-examination (item 4) is NOT sufficient.
    - RULE: a DIFFERENT agent-context than the author MUST score the change before it is presented to
      Arthur OR auto-merged. The author MUST NOT be its own sole judge.
-   - INPUT: the change + the requirements + `GOVERNANCE.md` (human expansion).
+   - INPUT: the change + the requirements + `00-GOVERNANCE.md` (human expansion).
    - THREE QUESTIONS (each is ASKED; severity — below — decides what a finding DOES):
      - Q1 ASKED-FOR — maps to a stated requirement; no unrequested surface.
      - Q2 NON-CONTRADICT — does not satisfy one requirement by breaking another.
      - Q3 FIT — advances the WHOLE objective AND satisfies EVERY doctrine mandate (checklist, the
        DOCTRINE block at top).
-   - **SEVERITY — MVP-FIRST** (Arthur's decision 2026-07-12, ledgered in `GOVERNANCE.md` §6(d)):
+   - **SEVERITY — MVP-FIRST** (Arthur's decision 2026-07-12, ledgered in `00-GOVERNANCE.md` §6(d)):
      *"Get it to work first. Where fitness finds something that could be better or improved but is NOT
      blocking, we continue to build and you make a note of it — later, when we ship a finished function
      or feature, we revisit and close those loops. Build your minimum viable product and prove your
@@ -222,12 +222,19 @@ fix the law". Authoritative classifier = `bin/tier-classify.sh`, now REPORTING-O
 - Merge authority = the `fedora-dev` poller ONLY (`fedora-bootstrap` is propose-only).
 - EVERY tier — control-plane class included — auto-merges on host-GREEN + independent-fitness-PASS via
   the poller. There is NO Tier-A human click; tier labels the digest/report, it does not route.
+- **THE ONE EXCEPTION — THE CONFIRMED SPEC (R1).** A PR that modifies `00-OBJECTIVES.md`,
+  `00-REQUIREMENTS.md`, `00-BUILDPRINCIPLE.md` or `00-GOVERNANCE.md` is **MAINTAINER-MERGE-ONLY**: the
+  loop MUST NOT merge it. Amending the confirmed spec is a NEW maintainer confirmation (R1), never an
+  autonomous merge — so `bin/auto-merge.sh` HOLDS such a PR (exit 4), assigns the maintainer and labels
+  it `maintainer-merge`, and the poller parks it QUIETLY (an expected hold, NOT a trust-boundary alarm).
+  This is the only carve-out from zero-gate; everything else still auto-merges. Mechanism: `00-DESIGN.md`
+  D2a. Decision record: `00-GOVERNANCE.md` §6(f).
 - Recoverability is AUTOMATIC, not human: host post-deploy health-gate + digest rollback, full
   git-revertability, and fitness's standing *preserve-recoverability* rule (a change that removes
   rollback or exfiltrates the merge/secret credential FAILS review).
 - A fitness ESCALATE still routes to Arthur — not as a merge click, but as the adjudication of a genuine
   policy ambiguity (this is the one human-judgment path that survives, by design). Editing the DOCTRINE
-  or `GOVERNANCE.md` remains maintainer-adjudicated through exactly that path.
+  or `00-GOVERNANCE.md` remains maintainer-adjudicated through exactly that path.
 
 RULE: a change is presentable/mergeable only when 1–5 hold. The human is engaged by ESCALATE (a
 question), never by a routine approve-to-merge.

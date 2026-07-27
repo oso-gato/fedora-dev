@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# auto-merge.sh — the DETERMINISTIC Tier-B/C merger (GOVERNANCE §4, Option 1).
+# auto-merge.sh — the DETERMINISTIC Tier-B/C merger (R7 + 00-GOVERNANCE §6(c) zero-gate).
 #
 # The ONLY thing besides Arthur that merges to main — and it is a DUMB, non-agent script, by design.
 # It holds merge power precisely BECAUSE it has no agency: it merges iff three machine-checkable gates
@@ -67,6 +67,29 @@ REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
 if ! "$REPO_SCOPE" check "$REPO"; then
   echo "[auto-merge] R16 REFUSE: repo '$REPO' is outside the maintainer-confirmed operating scope (policy/scope.conf) — no merge (fail-closed)"
   exit 1
+fi
+
+# TRINITY GUARD (R1 durability). A PR that modifies the CONFIRMED SPEC — 00-OBJECTIVES.md /
+# 00-REQUIREMENTS.md / 00-BUILDPRINCIPLE.md — or the maintainer's constitution 00-GOVERNANCE.md is a
+# MAINTAINER-MERGE-ONLY change: R1 makes amending the confirmed spec a NEW maintainer confirmation,
+# NEVER an autonomous merge. (Audit 2026-07-22 #16: PR #224 auto-merged a confirmed-spec edit — the
+# spec was immutable only on paper.) This is the ONE documented exception to the zero-gate model. The
+# loop HOLDS such a PR (exit 4 — never a merge), LABELS it, and ASSIGNS it to the maintainer so it
+# surfaces in their GitHub app under "assigned to me". Server-side CODEOWNERS + a branch-protection
+# "require Code Owner review" rule is the belt to this suspenders (.github/CODEOWNERS).
+TRINITY_PATHS="${TRINITY_PATHS:-00-OBJECTIVES.md 00-REQUIREMENTS.md 00-BUILDPRINCIPLE.md 00-GOVERNANCE.md}"
+MAINTAINER_LOGIN="${MAINTAINER_LOGIN:-oso-gato}"
+MAINTAINER_MERGE_LABEL="${MAINTAINER_MERGE_LABEL:-maintainer-merge}"
+_trinity_hit=""
+_pr_files="$(gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null)"
+for _tf in $TRINITY_PATHS; do printf '%s\n' "$_pr_files" | grep -qxF "$_tf" && _trinity_hit="$_trinity_hit $_tf"; done
+if [ -n "$_trinity_hit" ]; then
+  echo "[auto-merge] MAINTAINER-MERGE hold: $SLUG#$PR modifies the confirmed spec (${_trinity_hit# }) — R1, not an autonomous merge (exit 4)"
+  if [ "$COMMIT" = 1 ]; then
+    gh pr edit "$PR" --repo "$SLUG" --add-assignee "$MAINTAINER_LOGIN" --add-label "$MAINTAINER_MERGE_LABEL" >/dev/null 2>&1 \
+      || echo "[auto-merge] (could not assign/label $SLUG#$PR — the R1 hold still stands)"
+  fi
+  exit 4
 fi
 
 # UNFORGEABILITY (the gates are only as good as WHO posted them — the #92 review found both were
