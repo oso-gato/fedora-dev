@@ -89,8 +89,15 @@ is_confirmed(){
 
 # confirm_line1 <comment-line-1> → 1 iff the CONFIRMED token OPENS the line (G2 position discipline:
 # only LINE 1 of a comment is ever passed in, so a quoted/mid-prose/multi-line-embedded token is inert).
+# CASE-INSENSITIVE (2026-07-27): the token was uppercase-only, so a maintainer who wrote the obvious
+# `confirmed` was REJECTED and had to retype it in caps — a SECOND human interaction manufactured purely
+# by parser rigidity, against an objective whose whole bar is ONE. Caught live in the E2E-A run on
+# e2e-beta#1. The position discipline is what carries the safety here, not the shift key: the `^…\b`
+# anchor still makes a quoted or mid-prose token inert ("I have not confirmed this" never matches), and
+# only a role-checked maintainer's comment is ever passed in. Leading whitespace is tolerated for the
+# same reason — a human should not lose a run to an accidental space.
 confirm_line1(){
-  printf '%s' "$1" | grep -qE '^CONFIRMED\b' && printf 1 || printf 0
+  printf '%s' "$1" | grep -qiE '^[[:space:]]*CONFIRMED\b' && printf 1 || printf 0
 }
 
 # role_can_confirm <role_name> → 1 only for a repo maintainer (admin|maintain); write/triage/read/bot/
@@ -162,6 +169,14 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "bare token acts"              "$(confirm_line1 'CONFIRMED')" "1"
   ck "mid-prose token inert"        "$(confirm_line1 'I would say CONFIRMED')" "0"
   ck "prefix-glued token inert"     "$(confirm_line1 'CONFIRMEDx')" "0"
+  # CASE-INSENSITIVE (2026-07-27, caught live in the e2e-beta E2E-A run): a maintainer who writes the
+  # obvious lowercase form must NOT be forced to retype in caps — that manufactures a second human
+  # interaction against an objective whose bar is one. Position discipline still carries the safety.
+  ck "lowercase confirms"           "$(confirm_line1 'confirmed')" "1"
+  ck "mixed case confirms"          "$(confirm_line1 'Confirmed, ship it')" "1"
+  ck "leading space tolerated"      "$(confirm_line1 '  confirmed')" "1"
+  ck "lowercase mid-prose STILL inert" "$(confirm_line1 'I have not confirmed this')" "0"
+  ck "lowercase glued STILL inert"  "$(confirm_line1 'confirmedx')" "0"
   echo "== role_can_confirm (maintainer-bound: admin|maintain only) =="
   ck "admin confirms"               "$(role_can_confirm admin)" "1"
   ck "maintain confirms"            "$(role_can_confirm maintain)" "1"
