@@ -80,6 +80,33 @@ consequences*; each entry says what could bite, and why it is accepted for now.
 - **STATUS: ENACTED** via the PR carrying this entry. The App installation itself is unchanged — this
   records that the existing install IS the authorized scope.
 
+**(g) AUTONOMY IS THE TIE-BREAKER — server-enforced merge declined; the deploy-path human tap removed (the maintainer's decision, 2026-07-27).**
+- **DECISION (the maintainer, after a zero-base benchmark of the build and the requirements against the
+  objective):** autonomy is the foremost objective. Where a control would increase human involvement
+  beyond the single confirming interaction — and recovery from its absence is automatic — **the control
+  is declined.** Approved: the five autonomy-preservation requirements (R39–R43), the R7 restatement,
+  and the R14 sequencing.
+- **What it decides, concretely:**
+  1. **Server-side merge enforcement is DECLINED** (R7). Requiring the two gates as GitHub branch rules
+     would move gate control out of code the apparatus can fix and into a setting only the maintainer
+     can change: a broken gate would then be a human summons. Residual K2 accepted, bounded by automatic
+     recoverability. The confirmed spec remains the exception (R1), because there recovery is *not*
+     automatic — a silently rewritten objective cannot be rolled back by a health check.
+  2. **The standing human tap in the merged→live path is REMOVED** (R41) — including the `approved`
+     label gate on a deploy that requires a container recreate. **This SUPERSEDES the approval-gated
+     R17 design confirmed 2026-07-19.** The reasoning has changed with evidence: a deployment is
+     reversible by construction (health-gate + digest rollback + read-back), so gating it bought little
+     and cost a recurring human act on the normal path. **Approval governs GOALS, not deployments.**
+- **Why (the finding that drove it):** the requirement set specified ~19 ways for the loop to STOP and
+  none for it to recover from a stop. Every gate was fail-closed — correct in isolation, but a closed
+  gate with no self-heal is a human summons. Measured: one stalled gate produced 12 manual merges. The
+  drift was never "too much security"; it was **security without recovery** (now R39/R43).
+- **The limit of this ruling:** it is NOT "fewer gates". Machine gates cost nothing while they work and
+  are demanded by the objective's distrust-your-own-reports clause. It is that **every blocking gate
+  must carry a bounded automatic recovery** — detection may only be added together with recovery.
+- **STATUS: ENACTED** for the spec (R7/R14/R39–R43 in the PR carrying this entry). R41's build —
+  removing the live deploy tap — is the first implementation task.
+
 **(f) TRINITY = MAINTAINER-MERGE-ONLY — durable enforcement of R1 (the maintainer's decision, 2026-07-23).**
 - **DECISION (the maintainer, this session):** a PR that amends the confirmed spec (the Trinity —
   `00-OBJECTIVES.md` / `00-REQUIREMENTS.md` / `00-BUILDPRINCIPLE.md`) or this constitution
