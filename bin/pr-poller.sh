@@ -87,9 +87,9 @@
 #                     off the PR's own head — NEVER the shared clone (#152). Overridable for testing.
 #   FLEET_HALT        the R9 fleet HALT reader (default: bin/fleet-halt.sh — see its header; #151).
 #                     Read at the TOP of every tick, BEFORE any model run / merge / retire / comment.
-#                     rc 0 alone means GO; ANY other outcome (maintainer HALT, unreadable-signal PAUSE,
-#                     a missing/crashed checker) makes the whole tick OBSERVE-ONLY — fail-closed toward
-#                     stopping BY CONSTRUCTION. Overridable for testing.
+#                     rc 0 alone means GO; ANY other outcome (a maintainer HALT, or a missing/crashed
+#                     checker — rc 20/PAUSE is retired, an unreadable signal now reads GO) makes the
+#                     whole tick OBSERVE-ONLY BY CONSTRUCTION. Overridable for testing.
 #   FITNESS_REVIEW    the independent fitness harness the REVIEW arm runs (default: bin/fitness-review.sh).
 #                     Overridable for testing. Its exit code is a CONTRACT: 0 = verdict posted; 3 = the
 #                     reviewer could not be RUN / produced no verdict for this head; anything else = a
@@ -1539,12 +1539,12 @@ rebuild_request_tick(){
 #
 # R9 FLEET HALT (#151): the fleet-wide stop switch is read ONCE at the TOP of every tick — BEFORE any
 # model run is spawned, any merge taken, any retire close, any comment posted (R9's bound is "within
-# one sweep"). rc 0 alone means GO; ANY other outcome — a maintainer HALT, an unreadable-signal PAUSE,
-# a checker that is missing or crashed — makes the whole tick OBSERVE-ONLY: sweep_repo still enumerates
-# and logs what it WOULD do, so the operator sees the queue, but acts on nothing and writes no state
-# marker. That is fail-closed TOWARD STOPPING (R9's deliberate inversion of the loop's usual
-# fail-safe-toward-progress; the checker itself softens it — one blip PAUSES, only K consecutive
-# unreadable reads HALT: bin/fleet-halt.sh). The poller does NOT exit: HALT stops NEW action, not
+# one sweep"). rc 0 alone means GO; ANY other outcome — a maintainer HALT, or a checker that is missing
+# or crashed — makes the whole tick OBSERVE-ONLY: sweep_repo still enumerates and logs what it WOULD do,
+# so the operator sees the queue, but acts on nothing and writes no state marker. This branch is
+# unchanged by #274; what changed is UPSTREAM, inside the checker: an UNREADABLE signal no longer
+# escalates to HALT — it returns rc 0 (GO), loudly, so internet weather can no longer freeze the fleet
+# (935 halts, ZERO maintainer-thrown: bin/fleet-halt.sh). The poller does NOT exit: HALT stops NEW action, not
 # running work (in-flight fixer/merge completes; the hard kill is App-key revocation, per R9), and a
 # maintainer removing the label resumes action on the very next sweep — no restart, no re-arm.
 sweep(){

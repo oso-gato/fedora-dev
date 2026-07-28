@@ -21,7 +21,7 @@
 # maintainer's older `labeled` event is still the newest MAINTAINER event, so the fold stays HALT).
 # Empirically pinned 2026-07-13: the permission endpoint answers HTTP 200 + role_name "" for App bot
 # actors (`<app>[bot]`, the form the REST timeline reports), so App noise resolves DEFINITIVELY inert
-# and can never pause the fleet.
+# and can never stop the fleet.
 #
 # FAIL DIRECTION — the ONE gate that biases TOWARD STOPPING (R9's deliberate inversion of the loop's
 # usual fail-safe-toward-progress), softened so one dropped packet is not a fleet outage:
@@ -50,6 +50,12 @@
 # any merge taken): bin/pr-poller.sh (every tick) and bin/dev-loop.sh (every pass) in this repo; the
 # host's live-gate-watch.sh is the fedora-bootstrap half of #151 — this file is CANONICAL here and
 # meant to be mirrored there (the gh-app-provision.sh precedent; keep in lockstep).
+#   MIRROR DIVERGENCE, DISCLOSED (2026-07-28): fedora-bootstrap carries its own copy, which still fails
+#   CLOSED on an unreadable read. Until that copy is brought into lockstep by its own PR, the dev side
+#   fails open and the host side fails closed. Nothing is unsafe — the host retains the older, more
+#   conservative direction, and the host gate posts verdicts rather than merging — but the two halves
+#   of #151 are not identical today, and a reader of this "CANONICAL / keep in lockstep" line would
+#   otherwise assume they are.
 #
 # COST: 2 REST calls per check while the label has never been touched (1 search + 1 timeline); once it
 # has, + the permission lookups of the walked actors (memoized per actor; the walk stops at the first
