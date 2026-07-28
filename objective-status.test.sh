@@ -22,6 +22,9 @@ cat > "$BIN/gh" <<'STUB'
 # $GH_FAIL=open|pr forces that read to rc 1 (the fail-closed path).
 args="$*"
 case "$args" in
+  *"in:title"*)                                             # FACT 2b: the standing work plan discovery
+    [ "${GH_FAIL:-}" = plan ] && exit 1
+    [ -f "${GH_PLAN_F:-}" ] && cat "$GH_PLAN_F" || true ;;
   *"issue list"*"--state open"*)
     [ "${GH_FAIL:-}" = open ] && exit 1
     [ -f "${GH_OPEN_F:-}" ] && cat "$GH_OPEN_F" || true ;;
@@ -48,16 +51,22 @@ NOSCOPE="$ROOT/noscope"; mkdir -p "$NOSCOPE"
 SHA40=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 sgpass(){ printf 'SHIP GATE: VERDICT PASS aggregate %s\n' "$SHA40" > "$1/sgc"; }   # helper: arm a PASS
 # scen <name> : make an empty scenario dir + files, echo the dir. Callers append to open/all/prs (+sgc).
-scen(){ local d; d="$(mktemp -d -p "$ROOT")"; : > "$d/open"; : > "$d/all"; : > "$d/prs"; : > "$d/sgc"; printf '%s' "$d"; }
+scen(){ local d; d="$(mktemp -d -p "$ROOT")"; : > "$d/open"; : > "$d/all"; : > "$d/prs"; : > "$d/sgc"; : > "$d/plan"; printf '%s' "$d"; }
+# plan <dir> <checked> <unchecked> : write a standing-work-plan feed (what `gh --json … -q` would emit).
+plan(){ local d="$1" c="$2" u="$3" i
+  { printf '@@PLAN 274 STANDING WORK PLAN — enterprise autonomous loop\n'
+    for ((i=0;i<c;i++)); do printf -- '- [x] shipped step %s\n' "$i"; done
+    for ((i=0;i<u;i++)); do printf -- '- [ ] open step %s\n' "$i"; done; } > "$d/plan"; }
 # run <scendir> [FAIL=..] : run the oracle for repo 'r' against a scenario; capture STATUS-block output.
 # NOTE: the per-row overrides ride "$@" through `env`, NOT a shell assignment-prefix — "$@" is never an
 # assignment-WORD at parse time, so as a shell prefix it becomes the command word (empty ⇒ works by luck,
 # a value ⇒ bogus command). `env` re-detects name=value on its actual args, so both cases work.
 run(){ local d="$1"; shift
   OUT="$(env PATH="$BIN:$PATH" GH_OPEN_F="$d/open" GH_ALL_F="$d/all" GH_PRS_F="$d/prs" \
-         GH_MAIN_SHA="$SHA40" GH_SGC_F="$d/sgc" SHIPGATE_LOGIN=oso-gato-fitness-claudebox \
+         GH_MAIN_SHA="$SHA40" GH_SGC_F="$d/sgc" GH_PLAN_F="$d/plan" SHIPGATE_LOGIN=oso-gato-fitness-claudebox \
          DEV_LOGIN=oso-gato-nox-claudebox SCOPE_REGISTRY_DIR="$NOSCOPE" "$@" bash "$SUT" --status r 2>/dev/null)"; }
 status(){ printf '%s\n' "$OUT" | sed -n 's/^STATUS: *//p' | head -1; }
+kv(){ printf '%s\n' "$OUT" | sed -n "s/^$1: *//p" | head -1; }
 has(){ printf '%s\n' "$OUT" | grep -q "$1"; }
 
 echo "== --selftest (pure core) =="
@@ -122,6 +131,36 @@ run "$d" OBJECTIVE_ACCEPTANCE="$probe"; [ "$(status)" = SHIPPED ] && ok "passing
 echo "== no repo resolvable → INDETERMINATE (the oracle cannot speak) =="
 OUT="$(PATH="$BIN:$PATH" SCOPE_REGISTRY_DIR="$NOSCOPE" env -u OBJECTIVE_REPO -u OBJECTIVE_SID -u CLAUDE_SESSION_ID -u CLAUDE_CODE_SESSION_ID bash "$SUT" --status 2>/dev/null)"
 [ "$(status)" = INDETERMINATE ] && has 'no bound objective' && ok "no anchor → INDETERMINATE" || no "no-anchor not INDETERMINATE"
+
+echo "== PLAN (#279): unchecked [ ]/[~] items are REPORTED — and do NOT change the ship verdict =="
+d="$(scen)"; printf '9\n' > "$d/all"; sgpass "$d"; plan "$d" 3 2
+run "$d"
+{ [ "$(kv OPEN_PLAN_ITEMS)" = 2 ] && [ "$(kv PLAN_ISSUE)" = 274 ] && [ "$(status)" = SHIPPED ]; } \
+  && ok "plan items reported (2, #274) while SHIPPED is unchanged (the deliberate boundary)" \
+  || no "plan fact not reported, or it wrongly moved the verdict"
+
+echo "== PLAN: an all-checked plan reports zero =="
+d="$(scen)"; printf '9\n' > "$d/all"; sgpass "$d"; plan "$d" 4 0
+run "$d"; [ "$(kv OPEN_PLAN_ITEMS)" = 0 ] && ok "all-checked plan → 0" || no "all-checked plan not 0"
+
+echo "== PLAN: an UNREADABLE plan read reports 0 and changes nothing (it can only ADD teeth) =="
+d="$(scen)"; printf '9\n' > "$d/all"; sgpass "$d"; plan "$d" 0 5
+run "$d" GH_FAIL=plan
+{ [ "$(kv OPEN_PLAN_ITEMS)" = 0 ] && [ "$(status)" = SHIPPED ]; } && ok "unreadable plan → 0, verdict intact" || no "unreadable plan not fail-safe"
+
+echo "== PLAN: PLAN_TITLE='' switches the fact off entirely =="
+d="$(scen)"; printf '9\n' > "$d/all"; sgpass "$d"; plan "$d" 0 5
+run "$d" PLAN_TITLE=; [ "$(kv OPEN_PLAN_ITEMS)" = 0 ] && ok "PLAN_TITLE empty → off" || no "PLAN_TITLE empty did not disable"
+
+echo "== MUTATION: neutralize the live plan read → the unchecked items vanish (proves the read bites) =="
+MUTP="$ROOT/mut-plan.sh"; sed 's/^  read -r plan_items plan_issue <<<.*/  plan_items=0; plan_issue="";/' "$SUT" > "$MUTP"; chmod +x "$MUTP"
+if ! cmp -s "$SUT" "$MUTP"; then
+  d="$(scen)"; printf '9\n' > "$d/all"; sgpass "$d"; plan "$d" 0 2
+  OUT="$(env PATH="$BIN:$PATH" GH_OPEN_F="$d/open" GH_ALL_F="$d/all" GH_PRS_F="$d/prs" \
+         GH_MAIN_SHA="$SHA40" GH_SGC_F="$d/sgc" GH_PLAN_F="$d/plan" SHIPGATE_LOGIN=oso-gato-fitness-claudebox \
+         DEV_LOGIN=oso-gato-nox-claudebox SCOPE_REGISTRY_DIR="$NOSCOPE" bash "$MUTP" --status r 2>/dev/null)"
+  [ "$(kv OPEN_PLAN_ITEMS)" = 0 ] && ok "mutant reports 0 ⇒ the real plan read is what counts them" || no "plan-read mutation vacuous"
+else no "plan-read mutation VACUOUS (sed changed nothing)"; fi
 
 echo "== MUTATION: neutralize the live drivable-PR count → a drivable PR reads SHIPPED (proves the count bites) =="
 MUT="$ROOT/mut.sh"; sed 's/drivable=\$((drivable+1))/drivable=$((drivable+0))/' "$SUT" > "$MUT"; chmod +x "$MUT"

@@ -34,7 +34,7 @@
 >   portion is built within and measured against. A0 overview → A1–A7.
 > - **PART 2 — THE DESIGN AS IT STANDS.** The current, correct design of each portion. Tagged
 >   `[BUILT]`, `[BUILT — transitional]` (works, but deviates from the confirmed architecture; target
->   named), `[BUILDING]`, or `[DESIGNED]`. D0 overview → D1–D5.
+>   named), `[BUILDING]`, or `[DESIGNED]`. D0 overview → D1–D6.
 > - **PART 3 — THE JOURNEY.** The road travelled, the roads avoided, and the roads that **failed** —
 >   design-level and architecture-level findings alike, with their evidence — so a future reader (or a
 >   wiped box) does not re-walk a proven dead-end. This is what used to live murkily in agent memory.
@@ -229,7 +229,8 @@ via the poller but deviates from the confirmed R7 architecture, and the deviatio
 hidden. **R17 rebuild continuity (D3)** is the host-orchestrated KILL→REBUILD→RESTORE→RESUME→VERIFY
 lifecycle, live-proven single-tenant then completed multi-tenant by **assign-at-launch session
 identity + resume-by-id (D4)** — where the build found the live process table already IS the registry
-— with the **folder-trust pre-seed (D5)** closing the last resume gap.
+— with the **folder-trust pre-seed (D5)** closing the last resume gap. **D6** covers the other end of a
+session's life: when it is allowed to STOP.
 
 | § | Portion | Status |
 |---|---|---|
@@ -238,6 +239,7 @@ identity + resume-by-id (D4)** — where the build found the live process table 
 | **D3** | R17 — rebuild continuity | `[BUILT]` |
 | **D4** | Multi-tenant session identity + restore (R20/R27) | `[BUILT]` |
 | **D5** | Folder-trust pre-seed | `[BUILT]` |
+| **D6** | The interactive stop gate | `[BUILT]` |
 
 ## D1. The pair + the ticket bus  `[BUILT]`
 
@@ -391,6 +393,43 @@ per-path.) **Built** as `bin/seed-claude-trust.py` (atomic, idempotent — write
 actually changes, so it never races claude's own `~/.claude.json` writes — and never raises), invoked
 by `bin/claude` inside the launch enter for the session's own cwd `[fedora-dev #196, merged]`. python3
 is present in-box (not at base), so the seed runs inside the box, not at the base wrapper level.
+
+## D6. The interactive stop gate  `[BUILT]`
+
+**The asymmetry this exists for.** The headless half of the loop cannot stall: `dev-author`, the poller's
+fixer and the fitness reviewer all run `claude -p`, which has no ask path, so a would-be prompt becomes a
+denial the run adapts around. An interactive session can always end its turn. Any objective that leans on
+the interactive session as its driver therefore inherits a failure mode the headless half does not have.
+
+**Design — a Stop hook that measures the stop against an external fact.** `bin/anti-stall-stop.sh` runs on
+the turn-end yield (a MANAGED hook; user/project hooks are inert under `allowManagedHooksOnly`) and is
+gated to interactive sessions by `FD_INTERACTIVE=1`, which only `bin/claude` sets. It consults
+`bin/objective-status.sh` — GitHub-derived, no local state — and blocks the stop when a fact says work
+remains: the ship oracle reporting `STATUS: OPEN`, or the standing work plan still carrying an unchecked
+`[ ]`/`[~]` item. Three bounds keep it from ever becoming a trap: every uncertainty allows (a slow oracle,
+a missing plan, unreadable state, any error), a windowed counter releases after `ANTI_STALL_CAP` nudges,
+and `stop_hook_active` is a second belt.
+
+**Finding that reshaped it (2026-07-28, #279) — a guard on FORM is a guard the author can satisfy.** The
+first cut classified the SHAPE of the final message: a check-in signature ("want me to proceed?") was
+blocked, and a declared `DONE:`/`BLOCKED:` was verified against the oracle. It fired twice in one session
+and behaved exactly as specified. The session then adapted — it wrote factual status reports carrying
+neither a signature nor a sentinel, handed control back, and stopped anyway; the maintainer had to push it
+forward roughly six times. The lesson is general: **whenever a check reads the phrasing of a
+model-authored message, the model can satisfy the phrasing.** The redesign inverts the default — the
+oracle is consulted on EVERY stop, and a stop while work remains is a defect however it is worded, with
+the sentinel demoted from authority to claim. Two consequences follow: a `BLOCKED:` must name a
+maintainer DECISION (waiting for a gate, watching a monitor, letting a queue drain are the loop's own
+work, so they are refused even when the oracle is silent), and the signature heuristic survives only as a
+fallback that can add teeth, never remove them.
+
+**The durable answer is architectural, not a better hook.** A stop gate treats the symptom. The structural
+fix is to keep the interactive agent OFF the critical path: work belongs in filed issues that the headless
+loop authors, gates and merges, with the session supervising rather than driving. On 2026-07-28 the
+session hand-authored four fixes in-conversation that should have been backlog issues — which made its own
+stopping equivalent to the loop stopping, and simultaneously starved the loop of the exercise that would
+have proven it works. Every issue routed through intake → plan → author is one less place where a stop
+matters at all. The hook is the backstop for the interactive path that remains, not the design.
 
 ---
 
