@@ -1,0 +1,84 @@
+name: Agent task
+description: An objective for the autonomous loop. Normally filed FOR you by the intake agent — use this form only if you are filing by hand.
+title: "<one verb, one deliverable>"
+labels: ["backlog"]
+assignees: ["oso-gato"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **You normally should not be filling this in by hand.** Talk to the intake agent instead — it
+        interviews you, drafts the acceptance criteria for you, and files this on your behalf.
+
+        This form exists so that a hand-filed ticket cannot skip the fields the loop needs. Every
+        required field below is something the autonomous loop cannot proceed without.
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What and why, in your own words. Do not translate it into technical language.
+      placeholder: People keep asking finance for invoice data by email. They should be able to get it themselves.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is IN.
+      placeholder: |
+        - A button on the invoice list that downloads the current filtered view as CSV
+        - Columns: invoice number, customer, date, amount, status
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: What is deliberately NOT in this. The single most valuable field on this form — an unbounded ticket invites scope creep the agent cannot detect on its own.
+      placeholder: |
+        - Scheduled or emailed exports
+        - Any other file format
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance — an exact command a machine can run
+      description: >
+        One command per line, each starting with `$ `, plus what its output must show. This is the
+        load-bearing field: it is what lets the agent iterate WITHOUT a human — do the work, run the
+        check, read the failure, fix, run again. Without it, "looks done" is the only completion
+        signal and a person becomes the verification loop. Measured across ~9,900 agent runs,
+        45-48% of all failures were false claims of completion where nothing independent could
+        check; where an independent process could check, that fell to 3%.
+      value: |
+        $
+
+        Expected:
+      placeholder: |
+        $ npm test -- invoice-export
+        $ curl -sf localhost:3000/invoices/export.csv | head -1
+
+        Expected: the first exits 0; the second prints a header row starting invoice_number,customer
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything else useful. Optional.
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        **After filing:** apply the `approved` label to start the loop. The planner resolves *who*
+        applied it and accepts only a maintainer — that is what stops an agent authorising its own
+        work, and it is the only human gate in the pipeline.
