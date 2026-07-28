@@ -30,12 +30,28 @@
 # `dev-loop.sh`'s PLAN ARM is what carries an `approved`-labelled objective to `dev-plan.sh`. Nothing is
 # built from this issue until a MAINTAINER taps `approved`; the label is the gate, and that is the point.
 #
-# R16 SCOPE (a disclosed deferral, not an oversight): every other actuator calls `bin/repo-scope.sh`
-# first. This one deliberately does not YET — with no `policy/scope.conf` present the reader fails
-# closed to the apparatus's OWN two repos, which would refuse the front door for exactly the tenant
-# repos it exists to serve. The boundary still holds structurally: the App credential cannot reach a
-# repo it is not installed on, so a `gh issue create` there simply fails. Wiring the belt (once the
-# session-scope path is the norm) is a follow-up, tracked as a NOTE rather than done blind here.
+# R16 SCOPE — the belt IS wired, at the CEILING layer, and the layer choice is the deliberate part.
+# (This paragraph previously justified omitting the belt by asserting that with no `policy/scope.conf`
+# the reader "fails closed to the apparatus's OWN two repos", refusing exactly the tenant repos the
+# front door serves. That was FALSE, and the fitness gate returned 8ffd4d4 for it: `scope.conf` is
+# RETIRED and unread — `repo-scope.sh` enumerates the App INSTALLATION, so it ALLOWS tenant repos.
+# Measured: `repo-scope.sh check fedora-desktop` → rc 0. There was no obstacle to route around.)
+#
+# WHICH LAYER, AND WHY NOT THE PER-SESSION ONE. `repo-scope.sh` has two: the App-install CEILING (what
+# the maintainer authorised by installing the App) and — only when $SCOPE_SESSION is set — a per-SESSION
+# narrowing to that session's already-declared objective. This actuator pins the session layer INERT
+# (SCOPE_SESSION empty) and checks the CEILING alone, because THE FRONT DOOR EXISTS TO ACCEPT A *NEW*
+# OBJECTIVE — which is by definition not in the current session's declared scope. Engaging the session
+# layer would refuse every intake from an ordinary conversation: measured, an undeclared session is
+# DENIED every repo (SESSION_UNDECLARED, rc 3), so copying `dev-plan.sh`'s CLAUDE_SESSION_ID-derivation
+# block verbatim would have broken the front door for real — the failure the old rationale wrongly
+# blamed on scope.conf. The ceiling is the boundary that actually applies here, and it bites: an
+# out-of-scope repo is rc 3 and nothing is composed or filed.
+#
+# The App-install boundary is also the structural backstop — the credential cannot reach a repo it is
+# not installed on — so the belt is defence in depth, refusing EARLY and by NAME instead of as a `gh`
+# error after the body is built. Narrowing intake to a session's own declared scope, once every session
+# is objective-backed, is a real follow-up; it is named as one, not used as a reason to skip the belt.
 #
 # THE LOAD-BEARING VALIDATION IS THE ACCEPTANCE COMMAND. An issue without one leaves "looks done" as the
 # only completion signal, which puts a human at the end of every iteration. Measured across ~9,900 agent
@@ -45,6 +61,8 @@
 #   intake-file.sh --check <spec.md>            validate only; rc 0 = fileable, rc 1 = incomplete (says why)
 #   intake-file.sh --file <spec.md> --repo <r>  validate, then file the issue (assigned, labelled)
 #   intake-file.sh --selftest                   exercise the pure core; no network
+#   rc: 0 filed/fileable · 1 the SPEC is incomplete (or the create failed) · 2 usage · 4 the REPO is
+#       out of R16 scope (a distinct code: the spec is fine, the destination is not)
 #
 # SPEC FORMAT (what the agent drafts — see the skill for how it is elicited):
 #   # <title: one verb, one deliverable>
@@ -172,6 +190,16 @@ log "spec is READY ($(count_accept_cmds "$SPEC") acceptance command(s))"
 [ "$MODE" = check ] && exit 0
 
 [ -n "$REPO" ] || { log "--file needs --repo"; exit 2; }
+
+# R16 SCOPE BELT (see the header for WHICH layer and why). CEILING-ONLY: $SCOPE_SESSION is pinned EMPTY
+# for this one call so the per-session narrowing stays inert — a NEW objective is never inside the
+# current session's declared scope, and engaging that layer would refuse every intake from an ordinary
+# undeclared conversation. Any non-zero rc (a missing reader's 127 included) REFUSES: fail-closed, and
+# placed before the title/body are composed so an out-of-scope repo creates nothing at all.
+REPO_SCOPE="${REPO_SCOPE:-$(dirname "$(readlink -f "$0")")/repo-scope.sh}"
+SCOPE_SESSION="" "$REPO_SCOPE" check "$REPO" 2>/dev/null \
+  || { log "R16 SCOPE: '$REPO' is outside the apparatus's operating scope — the App is not installed on it, so the maintainer has not authorised work there. Refusing to file; nothing was created."; exit 4; }
+
 title="$(grep -m1 -E '^#[[:space:]]+' "$SPEC" | sed -E 's/^#[[:space:]]+//')"
 body="$(cat "$SPEC")"
 bodyfile="$(mktemp)"

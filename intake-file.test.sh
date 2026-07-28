@@ -37,6 +37,20 @@ exit 0
 EOF
 chmod +x "$BIN/gh"
 
+# repo-scope stub — the R16 belt's ONE seam. Records the $SCOPE_SESSION it was called with (the layer
+# assertion below) and denies exactly $SCOPE_DENY_REPO. Driven through the filer's REPO_SCOPE override
+# so the rows are deterministic: unstubbed, the real reader would answer from the live App installation
+# (and `fedora-dev` would pass only by accident, as one of the apparatus's OWN repos).
+SCOPE_STUB="$ROOT/repo-scope-stub.sh"
+cat > "$SCOPE_STUB" <<'EOF'
+#!/usr/bin/env bash
+printf 'session=[%s] argv=[%s]\n' "${SCOPE_SESSION-<unset>}" "$*" >> "$SCOPE_LOG"
+[ "${2:-}" = "${SCOPE_DENY_REPO:-}" ] && { echo "repo-scope: DENY: $2" >&2; exit 3; }
+exit 0
+EOF
+chmod +x "$SCOPE_STUB"
+export REPO_SCOPE="$SCOPE_STUB" SCOPE_LOG="$ROOT/scope.log"; : > "$SCOPE_LOG"
+
 # A complete, fileable spec — everything the validator demands, so any refusal below is about the FILING.
 SPEC="$ROOT/spec.md"
 cat > "$SPEC" <<'EOF'
@@ -121,6 +135,62 @@ ck "it names the approval tap as the thing that starts the work" \
    "$(grep -c 'until you apply the `%s` label' "$FILER")" "1"
 ck "it no longer claims the loop takes over on filing" \
    "$(grep -c 'the autonomous loop takes it from here' "$FILER")" "0"
+
+echo "== R16 SCOPE BELT: an out-of-scope repo files NOTHING (fitness RETURN on 8ffd4d4) =="
+# The header used to justify OMITTING this belt by asserting the reader fails closed to the apparatus's
+# own two repos without policy/scope.conf. That was false — scope.conf is retired and the reader
+# enumerates the App installation, so tenant repos are ALLOWED (verified against the real reader:
+# `check fedora-desktop` → rc 0, `check <uninstalled>` → rc 3). The belt is now wired; these rows are
+# what keep it wired.
+export GH_LOG="$ROOT/gh-scope.log"; : > "$GH_LOG"; : > "$SCOPE_LOG"
+SCOPE_DENY_REPO=someone-elses-repo PATH="$BIN:$PATH" \
+  bash "$FILER" --file "$SPEC" --repo someone-elses-repo >/dev/null 2>&1
+ck "an out-of-scope repo is refused with the distinct scope rc" "$?" "4"
+ck "…and NO issue was created" "$(grep -c '^issue create' "$GH_LOG")" "0"
+ck "…and not even the label was created (the belt runs before anything is composed)" \
+   "$(grep -c '^label create' "$GH_LOG")" "0"
+ck "the belt actually consulted the scope reader" "$(grep -c 'argv=\[check someone-elses-repo\]' "$SCOPE_LOG")" "1"
+
+echo "== …while an IN-SCOPE repo still files normally (the belt does not refuse the front door) =="
+export GH_LOG="$ROOT/gh-inscope.log"; : > "$GH_LOG"; : > "$SCOPE_LOG"
+SCOPE_DENY_REPO=someone-elses-repo PATH="$BIN:$PATH" \
+  bash "$FILER" --file "$SPEC" --repo fedora-desktop >/dev/null 2>&1
+ck "a tenant repo the App is installed on is filed" "$?" "0"
+ck "…as an objective" "$(label_of "$(create_args)")" "objective"
+
+echo "== the belt checks the CEILING, not the per-session layer (an undeclared session must still file) =="
+# repo-scope has two layers; the per-session one narrows to a session's ALREADY-declared objective and
+# answers SESSION_UNDECLARED (rc 3) for an ordinary conversation — which would refuse every intake, since
+# a NEW objective is by definition not in the current session's scope. The filer therefore pins
+# SCOPE_SESSION empty for this call. Verified against the real reader: with SCOPE_SESSION set to an
+# unregistered id, `check fedora-desktop` → rc 3; with it empty → rc 0.
+ck "the filer calls the reader with SCOPE_SESSION pinned empty" \
+   "$(grep -c 'session=\[\] ' "$SCOPE_LOG")" "1"
+ck "…even when a real session id is present in the environment" \
+   "$(: > "$SCOPE_LOG"; SCOPE_SESSION=deadbeef-0000-0000-0000-000000000000 PATH="$BIN:$PATH" \
+        bash "$FILER" --file "$SPEC" --repo fedora-desktop >/dev/null 2>&1; grep -c 'session=\[\] ' "$SCOPE_LOG")" "1"
+
+echo "== a MISSING scope reader refuses (fail-closed: rc 127 is never a go) =="
+export GH_LOG="$ROOT/gh-noreader.log"; : > "$GH_LOG"
+REPO_SCOPE="$ROOT/no-such-reader.sh" PATH="$BIN:$PATH" \
+  bash "$FILER" --file "$SPEC" --repo fedora-dev >/dev/null 2>&1
+ck "an unreadable/missing scope reader refuses" "$?" "4"
+ck "…and files nothing" "$(grep -c '^issue create' "$GH_LOG")" "0"
+
+# --- MUTATION, RUN IN-SUITE. Neutralize the belt so it always allows. The out-of-scope repo must then
+# --- be FILED — proving the rows above are carried by the belt and not by the stub refusing on its own.
+echo "== MUTATION: with the scope belt neutralized, an out-of-scope objective is filed =="
+MUTS="$ROOT/mut-scope-intake-file.sh"
+sed 's|^SCOPE_SESSION="" "\$REPO_SCOPE" check "\$REPO" 2>/dev/null \\$|SCOPE_SESSION="" true \\|' "$FILER" > "$MUTS"
+if cmp -s "$FILER" "$MUTS"; then
+  ck "the scope mutation sed genuinely changed the filer (else this row proves nothing)" no yes
+else
+  ck "the scope mutation sed genuinely changed the filer (else this row proves nothing)" yes yes
+fi
+export GH_LOG="$ROOT/gh-mutscope.log"; : > "$GH_LOG"
+SCOPE_DENY_REPO=someone-elses-repo PATH="$BIN:$PATH" \
+  bash "$MUTS" --file "$SPEC" --repo someone-elses-repo >/dev/null 2>&1
+ck "mutant: the out-of-scope objective IS filed" "$(grep -c '^issue create' "$GH_LOG")" "1"
 
 # --- MUTATION, RUN IN-SUITE. Restore the one word: INTAKE_LABEL defaulting to `backlog`. Every guard
 # --- above must then report the bypass — proving these rows are carried by the label the filer really
