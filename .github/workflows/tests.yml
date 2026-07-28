@@ -1,0 +1,99 @@
+name: tests
+
+# STEP 1 of the standing work plan (#274) — THE INSPECTOR.
+#
+# WHY THIS EXISTS. This repository contains ~7,100 lines of genuinely good tests — pure decision cores,
+# mutation-proven cases, real fixtures, several of which caught defects that had already shipped to a
+# branch. Before this workflow, CI ran essentially NONE of them as a gate: build.yml builds an image and
+# the only other workflows audit prose and check fleet parity. The entire test estate gated nothing, so
+# a change could break any pure core in the loop and still merge on two green gates that never ran it.
+#
+# It is also the precondition for everything else in the plan. The design's load-bearing claim is that
+# the agent should iterate WITHOUT a human — do the work, run the check, read the failure, fix, repeat.
+# That is only safe when a machine, not the agent's opinion, decides whether the code still works.
+# Measured across ~9,900 agent runs: 45-48% of all failures were FALSE CLAIMS OF COMPLETION where
+# nothing independent could check; where an independent process could check, that fell to 3%.
+#
+# NO SILENT TRUNCATION. Every test file and every --selftest is discovered and run. Nothing is excluded,
+# capped or sampled. If a test cannot run here it FAILS here — it is not quietly skipped. A gate that
+# silently drops coverage reads as "everything passed" when it means "we did not look".
+#
+# Probed before shipping: 43/43 test files and 24/24 selftests pass in a clean environment. The one
+# apparent failure (rebuild-request) was an AMBIENT ENV LEAK — the box exports DEVBOX_MANIFEST_V2=1 and
+# the test does not isolate itself from it; unset, it passes. That is a test-hygiene bug worth fixing,
+# not a reason to exclude it: CI does not export that variable, so it runs green here.
+#
+# TO MAKE THIS A REQUIRED CHECK (one-time, maintainer): Settings → Branches/Rulesets → require the
+# "tests" status check. Until that is done this workflow REPORTS but does not BLOCK — it is an
+# accelerator with no teeth. The teeth are one checkbox.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run every *.test.sh
+        run: |
+          set -uo pipefail
+          pass=0; fail=0; failed=""
+          shopt -s nullglob
+          for t in *.test.sh bin/*.test.sh; do
+            printf '\n\033[1m== %s ==\033[0m\n' "$t"
+            if timeout 120 bash "$t"; then
+              pass=$((pass+1))
+            else
+              fail=$((fail+1)); failed="$failed $t"
+            fi
+          done
+          printf '\n=== test files: %s passed, %s failed ===\n' "$pass" "$fail"
+          if [ "$fail" -ne 0 ]; then
+            printf 'FAILED:\n'; for f in $failed; do printf '  %s\n' "$f"; done
+            exit 1
+          fi
+          printf '%s test files passed\n' "$pass" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run every --selftest
+        run: |
+          set -uo pipefail
+          pass=0; fail=0; failed=""
+          shopt -s nullglob
+          for s in bin/*.sh *.sh; do
+            grep -q -- '--selftest' "$s" 2>/dev/null || continue
+            printf '\n\033[1m== %s --selftest ==\033[0m\n' "$s"
+            if timeout 120 bash "$s" --selftest; then
+              pass=$((pass+1))
+            else
+              fail=$((fail+1)); failed="$failed $s"
+            fi
+          done
+          printf '\n=== selftests: %s passed, %s failed ===\n' "$pass" "$fail"
+          if [ "$fail" -ne 0 ]; then
+            printf 'FAILED:\n'; for f in $failed; do printf '  %s\n' "$f"; done
+            exit 1
+          fi
+          printf '%s selftests passed\n' "$pass" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Every bin/*.sh must parse
+        # Cheap and absolute: a syntax error in any shipped script is a defect, and bash -n catches the
+        # class that has bitten this repo repeatedly (an escaped backtick inside a ${...} expansion, an
+        # apostrophe inside a ${VAR:-default}) where the parse error surfaces ~50 lines from its cause.
+        run: |
+          set -uo pipefail
+          fail=0
+          shopt -s nullglob
+          for s in bin/*.sh *.sh; do
+            bash -n "$s" || { printf 'SYNTAX ERROR: %s\n' "$s"; fail=1; }
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          printf 'all scripts parse\n'

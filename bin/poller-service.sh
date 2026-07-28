@@ -43,6 +43,13 @@ POLLER_RELOAD_RC="${POLLER_RELOAD_RC:-90}"               # SHARED CONTRACT with 
 # deferral can never again read as a healthy no-op (2026-07-13: four hours of `exited (rc=0) —
 # restarting in 30s` while the singleton was dead). SHARED CONTRACT with bin/pr-poller.sh.
 POLLER_DEFER_RC="${POLLER_DEFER_RC:-91}"
+# GENERATION FENCE (2026-07-28). The one rc this supervisor must NOT relaunch on: the service is inside
+# a container that no longer exists, so relaunching just re-enters the same corpse. Exiting lets the
+# `distrobox enter` child unwind so the BASE-level supervise loop in entrypoint.sh re-enters the LIVE
+# box. Six days of wedge (poller-service, deadman and dev-loop all orphaned in a torn-down container,
+# every gh call failing, every health signal reading HEALTHY) is what this rc exists to end.
+POLLER_ORPHAN_RC="${POLLER_ORPHAN_RC:-92}"
+BOX_GENERATION="${BOX_GENERATION:-$HERE/box-generation.sh}"
 SELF_REFRESH_CLONE="${SELF_REFRESH_CLONE:-$(dirname "$HERE")}"  # bin/ sits inside the clone
 SELF_REFRESH_REMOTE="${SELF_REFRESH_REMOTE:-origin}"
 SELF_REFRESH_BRANCH="${SELF_REFRESH_BRANCH:-main}"
@@ -97,8 +104,20 @@ log "up — repo=${POLLER_REPO:-fedora-dev} armed=${POLLER_ARMED:-1} interval=${
 #    - Any OTHER exit is an unexpected death → bounded backoff so a transient failure (network blip, API
 #      5xx) self-heals without spinning.
 while :; do
+  # GENERATION FENCE, checked BEFORE each launch. A supervisor that keeps relaunching a service into a
+  # destroyed container is not resilience, it is a wedge with a heartbeat — which is exactly how the
+  # 2026-07-28 outage stayed invisible for six days while reporting healthy. Advisory by construction:
+  # box-generation.sh returns 0 on ANY uncertainty, so this can never take down a working loop.
+  if [ -x "$BOX_GENERATION" ] && ! "$BOX_GENERATION" check; then
+    log "GENERATION-ORPHAN — this service is in a container that is no longer live; EXITING (rc=$POLLER_ORPHAN_RC) so the base supervise loop re-enters the LIVE box. NOT relaunching here: that would re-enter the same corpse."
+    exit "$POLLER_ORPHAN_RC"
+  fi
   "$HERE/pr-poller.sh" --watch
   rc=$?
+  if [ "$rc" = "$POLLER_ORPHAN_RC" ]; then
+    log "pr-poller detected it is generation-orphaned (rc=$rc) — EXITING so the base supervise loop can relaunch it in the LIVE box (a relaunch here would re-enter the dead container)"
+    exit "$POLLER_ORPHAN_RC"
+  fi
   if [ "$rc" = "$POLLER_RELOAD_RC" ]; then
     log "pr-poller requested a self-refresh reload (rc=$rc) — ff-pulling the clone + relaunching on the new code"
     self_refresh_pull

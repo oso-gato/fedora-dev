@@ -93,6 +93,16 @@ freshstate(){ local d="$ROOT/state.$RANDOM"; mkdir -p "$d"; printf '%s' "$d"; }
 agelog(){ touch -d "@$(( $(date +%s) - ${2:-1000} ))" "$1"; }     # $1=log $2=age-seconds (default 1000)
 freshlog(){ : > "$1"; touch "$1"; }
 
+# no_gh_writes → true when the recorded gh calls contain no ISSUE-MUTATING verb.
+#
+# The quiet-when-healthy contract is "the deadman does not FILE/UPDATE/COMMENT/CLOSE an issue unless an
+# anomaly stands" — it was written as "the calls file is empty" because the deadman made no gh READS at
+# all. The work-progress axis (R18 idle-with-work-pending) adds one: it must read the open-PR state to
+# tell a loop that is MOVING from one that is merely RUNNING, and that read happens on every check by
+# design. So the rows assert the contract itself — no write verb — rather than the old proxy. A read is
+# recorded and ignored; any `issue create|edit|comment|close` still fails the row, which is the guard.
+no_gh_writes(){ ! grep -qE '^issue (create|edit|comment|close)' "$GH_CALLS" 2>/dev/null; }
+
 # dm → run one --check with scenario env; captures OUT + RC. Common knobs default here, override via env.
 # DEADMAN_POLLER_NAME=fake-poller.sh keeps the deadman blind to the box's REAL running pr-poller.sh.
 dm(){   # args: KEY=VAL … (extra env)
@@ -139,7 +149,7 @@ echo "== quiet-when-healthy, dedup, clear =="
 S="$ROOT/ok"; new_origin_and_clone "$S"; ST="$(freshstate)"; LOG="$ROOT/ok.log"; freshlog "$LOG"
 : > "$GH_CALLS"; start_genuine
 dm DEADMAN_CLONE="$S" DEADMAN_STATE="$ST" DEADMAN_EXPECT_POLLER=1 DEADMAN_POLLER_LOG="$LOG" DEADMAN_SWEEP_MAX=300
-{ [ "$RC" = 0 ] && echo "$OUT" | grep -q '^HEALTHY' && [ ! -s "$GH_CALLS" ]; } \
+{ [ "$RC" = 0 ] && echo "$OUT" | grep -q '^HEALTHY' && no_gh_writes; } \
   && ok "all-healthy (current clone, live poller, fresh log) ⇒ rc 0 and ZERO gh writes" \
   || bad "healthy-quiet" "rc=$RC out=[$OUT] calls=[$(cat "$GH_CALLS")]"
 stop_procs
@@ -188,7 +198,7 @@ S="$ROOT/unr"; new_origin_and_clone "$S"; git -C "$S" remote set-url origin /non
 ST="$(freshstate)"; : > "$GH_CALLS"
 dm DEADMAN_CLONE="$S" DEADMAN_STATE="$ST" DEADMAN_EXPECT_POLLER=0 DEADMAN_UNREADABLE_MAX=2   # check 1
 r1_rc="$RC"; r1_cv=0; echo "$OUT" | grep -q CANNOT_VERIFY && r1_cv=1
-r1_empty=1; [ -s "$GH_CALLS" ] && r1_empty=0                                                  # no gh write on the blip
+r1_empty=1; no_gh_writes || r1_empty=0                                                        # no gh write on the blip
 dm DEADMAN_CLONE="$S" DEADMAN_STATE="$ST" DEADMAN_EXPECT_POLLER=0 DEADMAN_UNREADABLE_MAX=2   # check 2 → bound
 { [ "$r1_cv" = 0 ] && [ "$r1_rc" = 0 ] && [ "$r1_empty" = 1 ] \
   && echo "$OUT" | grep -q CANNOT_VERIFY && [ "$RC" != 0 ] && grep -q '^issue create' "$GH_CALLS"; } \

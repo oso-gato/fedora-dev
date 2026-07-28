@@ -195,6 +195,9 @@ esac
 # THE LABEL CONTRACT (2026-07-27): establish the pipeline vocabulary BEFORE authoring, or `--add-label
 # live-validate` fails silently on a repo that has never seen it, the PR is never enrolled in the host
 # gate, and the poller NOOPs on it forever. Idempotent; additive — a failure here logs and falls through.
+# COMPLEMENTARY TO, NOT A DUPLICATE OF, the poller's enroll_pr (R39/#278): that one repairs an ALREADY
+# OPEN unlabelled PR reactively, one label, after the fact. This declares the whole vocabulary up front
+# so the label EXISTS at `--add-label` time and the PR is enrolled on its first push.
 REPO_LABELS="${REPO_LABELS:-$HERE/repo-labels.sh}"
 [ -x "$REPO_LABELS" ] && { "$REPO_LABELS" ensure "$REPO" >&2 2>/dev/null || log "label contract could not be established on $SLUG — the PR may not enrol (continuing)"; }
 CLONE_ROOT="${CLONE_ROOT:-$HOME/repos}"
@@ -316,14 +319,33 @@ if [ "$committed" = 0 ]; then
   fi
 fi
 
-# 4b) IN-BOX GATE — cheap build+assembly+lint before spending a host build. RED here → surface, no push.
+# 4b) IN-BOX GATE — cheap build+assembly+lint before spending a host build.
+#
+# A RED HERE USED TO BE A DEAD END, AND A DISHONEST ONE (fixed 2026-07-28, MOVE 2 of #274). The old path
+# did NOT push, then told the maintainer "the branch '<name>' holds the attempt" — but the branch existed
+# only inside the throwaway worktree, which is reaped on exit. So the work was DESTROYED and the report
+# was UNTRUE: `gh api repos/.../contents?ref=feat/6-...` returned 404 for a branch the loop said it had.
+# e2e-beta issue #6 (the `.live-gate` contract, the 7th task of the acceptance run) died here TWICE, and
+# was mistaken for a planner that had silently dropped a task.
+#
+# It is also a BRAKE WITH NO RELEASE — the exact class MOVE 2 exists to kill. A failing first draft is
+# the NORMAL case in real development; it is not a question for a human. The loop already owns machinery
+# for "the gates say this is broken": the host gate reports RED and the auto-fixer iterates it. So an
+# in-box RED now HANDS OFF to that machinery instead of stopping: push the work (so it survives and is
+# inspectable), open the PR, enrol it, and let the existing repair path do what it is for.
+#
+# WHY THIS IS SAFE: the branch is a feature branch (main is protected by the require-PR ruleset), the PR
+# is honestly labelled as failing in-box validation, and NOTHING can merge it — the host gate must go
+# GREEN and an INDEPENDENT fitness review must PASS first, neither of which a broken change can obtain.
+# The fixer's existing no-progress stop bounds the iteration, so this cannot churn.
 log "in-box validate.sh before push…"
+inbox_red=0
 if ! ( cd "$WT" && DISCARD=1 "$VALIDATE" "$WT" >/dev/null 2>&1 ); then
-  log "in-box validate RED — not pushing; surfacing for iteration"
-  surface_blocked "the authored change failed in-box validation (build/assembly/lint). Re-run or refine the issue; the branch '$branch' holds the attempt."
-  exit 6
+  inbox_red=1
+  log "in-box validate RED — pushing anyway and handing off to the host gate + auto-fixer (a failing first draft is normal work, not a human decision)"
+else
+  log "in-box validate GREEN"
 fi
-log "in-box validate GREEN"
 
 # 5) HAND OFF — push, open the PR (draft at first push per R3 → ready), label live-validate.
 git -C "$WT" push -q origin "$branch" \
@@ -331,11 +353,28 @@ git -C "$WT" push -q origin "$branch" \
 
 pr_title="AUTHOR_DONE"; [ "${sentinel#DONE }" != "$sentinel" ] && pr_title="${sentinel#DONE }"
 [ -n "$pr_title" ] && [ "$pr_title" != "AUTHOR_DONE" ] || pr_title="$title"
+_red_note=""
+if [ "$inbox_red" = 1 ]; then
+  _red_note="
+> **⚠️ This change FAILED in-box validation (build/assembly/lint).** It is pushed and enrolled anyway,
+> deliberately: a failing first draft is normal development, not a question for the maintainer. The host
+> live-gate will report RED and the auto-fixer will iterate it. It CANNOT merge while broken — that needs
+> a host GREEN *and* an independent fitness PASS. Previously this path discarded the work and asked a
+> human, while claiming a branch held an attempt that was never pushed.
+"
+fi
+# THE FOOTER STATES WHAT ACTUALLY HAPPENED. It used to assert "in-box validated GREEN" UNCONDITIONALLY,
+# which on the RED hand-off path put a false claim a few lines under the ⚠️ RED block — in the very
+# artifact the independent fitness reviewer and the maintainer read to judge the PR's state. A body
+# saying both FAILED and validated-GREEN is precisely the false-claim defect this hand-off exists to
+# kill, so the claim is CONDITIONAL on the gate's real outcome (dev-author.test.sh asserts BOTH ways).
+_validate_claim="in-box validated GREEN"
+[ "$inbox_red" = 1 ] && _validate_claim="in-box validation RED (enrolled anyway, for the host gate + auto-fixer)"
 pr_body="Autonomously authored by \`dev-author.sh\` (R3) for issue #$ISSUE.
-
+$_red_note
 Backlog-ticket: #$ISSUE
 
-<sub>Draft-opened at first push, in-box validated GREEN, then marked ready + labelled \`$AUTHOR_LABEL\` to enrol in the host live-gate → fitness → poller pipeline. No human in this loop. NOTE: this is a \`Backlog-ticket:\` linkage, NOT a \`Closes\` keyword — the backlog issue is closed by \`bin/reconcile.sh\` on OBSERVED proof (merge + host GREEN + CI published + live read-back), never auto-closed at merge before the change is proven live (task #19).</sub>"
+<sub>Draft-opened at first push, $_validate_claim, then marked ready + labelled \`$AUTHOR_LABEL\` to enrol in the host live-gate → fitness → poller pipeline. No human in this loop. NOTE: this is a \`Backlog-ticket:\` linkage, NOT a \`Closes\` keyword — the backlog issue is closed by \`bin/reconcile.sh\` on OBSERVED proof (merge + host GREEN + CI published + live read-back), never auto-closed at merge before the change is proven live (task #19).</sub>"
 bodyfile="$(mktemp)"; printf '%s' "$pr_body" > "$bodyfile"
 
 # draft at first push (R3: state visible in GitHub immediately, resumable), then flip to ready so the
@@ -349,7 +388,11 @@ gh pr edit "$pr_num" --repo "$SLUG" --add-label "$AUTHOR_LABEL" >/dev/null 2>&1 
 
 # R5 audit loop — confirm the ship ON the backlog issue (symmetric with surface_blocked). Best-effort
 # BY DESIGN: the PR is already the source of truth, so a failed comment logs a WARN, never fails the run.
-ship_body="**dev-author → shipped:** authored and enrolled #$pr_num in the live-gate → fitness → poller pipeline. $pr_url"$'\n\n<sub>autonomous feature-author (R3). No merge taken — the two-gate pipeline decides.</sub>'
+if [ "$inbox_red" = 1 ]; then
+  ship_body="**dev-author → handed off (in-box validation RED):** authored #$pr_num and enrolled it in the live-gate → fitness → poller pipeline. The first draft does NOT pass in-box validation; the host gate will report RED and the auto-fixer iterates from there. No maintainer decision is needed — it cannot merge until both gates are satisfied. $pr_url"$'\n\n<sub>autonomous feature-author (R3). No merge taken — the two-gate pipeline decides.</sub>'
+else
+  ship_body="**dev-author → shipped:** authored and enrolled #$pr_num in the live-gate → fitness → poller pipeline. $pr_url"$'\n\n<sub>autonomous feature-author (R3). No merge taken — the two-gate pipeline decides.</sub>'
+fi
 gh issue comment "$ISSUE" --repo "$SLUG" --body "$ship_body" >/dev/null 2>&1 || log "WARN: could not post shipped comment on #$ISSUE"
 
 : > "$marker"   # idempotent replay guard — this issue is now authored

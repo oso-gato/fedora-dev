@@ -36,7 +36,14 @@ case "$sub" in
       *) printf '{}';;
     esac ;;
   "pr list")   printf '%s' "${FAKE_PRLIST:-}";;                 # empty = no existing PR
-  "pr create") printf 'PRCREATE %s\n' "$*" >> "$GH_LOG"; printf 'https://github.com/oso-gato/%s/pull/999\n' "${FAKE_REPO:-fedora-dev}";;
+  "pr create")
+    printf 'PRCREATE %s\n' "$*" >> "$GH_LOG"
+    # The BODY rides --body-file, so "$*" shows only the PATH — and the body is the artifact the
+    # downstream fitness reviewer + the maintainer read to judge the PR's state. Log its CONTENT so the
+    # rows can assert what the PR actually CLAIMS about itself (the in-box GREEN/RED honesty rows).
+    bf=""; prev=""; for a in "$@"; do [ "$prev" = "--body-file" ] && bf="$a"; prev="$a"; done
+    [ -n "$bf" ] && [ -f "$bf" ] && printf 'PRBODY %s\n' "$(tr '\n' ' ' < "$bf")" >> "$GH_LOG"
+    printf 'https://github.com/oso-gato/%s/pull/999\n' "${FAKE_REPO:-fedora-dev}";;
   "pr ready")  printf 'PRREADY %s\n' "$*" >> "$GH_LOG";;
   "pr edit")   printf 'PREDIT %s\n' "$*" >> "$GH_LOG";;
   "issue comment") printf 'ISSUECOMMENT %s\n' "$*" >> "$GH_LOG";;
@@ -136,7 +143,36 @@ run(){ # <desc> <env-assignments> <expect: PRCREATE|ISSUECOMMENT|NONE> <extra-gr
                   grep -q '^PROMPT .*AUTHOR_DONE' "$GH_LOG" \
                                                           || { ok=0; echo "  FAIL $desc: the author prompt did not reach the model on STDIN"; }
                   grep -qx 'CLAUDEARGV -p' "$GH_LOG" \
-                                                          || { ok=0; echo "  FAIL $desc: the prompt rode ARGV — E2BIG past 128 KiB (#155)"; } ;;
+                                                          || { ok=0; echo "  FAIL $desc: the prompt rode ARGV — E2BIG past 128 KiB (#155)"; }
+                  # …and on the GREEN path the body's validation claim is TRUE (the other half of the
+                  # conditional the RED rows pin — a claim that never varies proves nothing either way).
+                  grep -q '^PRBODY.*in-box validated GREEN' "$GH_LOG" \
+                                                          || { ok=0; echo "  FAIL $desc: the PR body does not state the in-box GREEN it actually got"; } ;;
+    # A RED first draft HANDS OFF (MOVE 2 of #274): the work is PUSHED (it used to die with the throwaway
+    # worktree while the loop reported a branch that was never pushed — a 404), the PR is opened + enrolled
+    # so the host gate + auto-fixer can iterate it, and NO question is asked of the maintainer. The body
+    # must DISCLOSE the RED and must NOT also claim it validated GREEN — a body asserting both is the
+    # false-claim defect this whole change exists to kill, in the artifact the reviewer reads.
+    PRCREATE_RED) grep -q '^GITPUSH'     "$GH_LOG" || { ok=0; echo "  FAIL $desc: the RED draft was never pushed — the work dies with the worktree (the #274 defect)"; }
+                  grep -q '^PRCREATE'    "$GH_LOG" || { ok=0; echo "  FAIL $desc: the RED draft was not enrolled (no PR)"; }
+                  grep -q '^PRREADY'     "$GH_LOG" || { ok=0; echo "  FAIL $desc: PR not marked ready"; }
+                  grep -q 'live-validate' "$GH_LOG" || { ok=0; echo "  FAIL $desc: not labelled live-validate — the host gate never sees it"; }
+                  grep -q '^PRBODY.*FAILED in-box validation' "$GH_LOG" \
+                                                          || { ok=0; echo "  FAIL $desc: the PR body does not disclose the in-box RED"; }
+                  grep -q '^PRBODY.*in-box validated GREEN' "$GH_LOG" \
+                     && { ok=0; echo "  FAIL $desc: the PR body claims 'in-box validated GREEN' on a RED hand-off — the false claim, beside its own ⚠️ RED block"; }
+                  # a hand-off is NOT a question: exactly one comment, and it says handed-off, not shipped.
+                  grep -q '^ISSUECOMMENT.*handed off (in-box validation RED)' "$GH_LOG" \
+                                                          || { ok=0; echo "  FAIL $desc: no hand-off confirmation on the issue"; }
+                  [ "$(grep -c '^ISSUECOMMENT' "$GH_LOG")" -eq 1 ] \
+                                                          || { ok=0; echo "  FAIL $desc: expected exactly one issue comment (the hand-off) — a RED draft must ask the maintainer nothing"; }
+                  grep -q 'dev-author → shipped' "$GH_LOG" \
+                     && { ok=0; echo "  FAIL $desc: claimed 'shipped' for a change that failed in-box validation"; } ;;
+    # Used ONLY by the mutation row: proves the PRCREATE_RED body assertion above discriminates.
+    PRCREATE_RED_LIE)
+                  grep -q '^PRCREATE'    "$GH_LOG" || { ok=0; echo "  FAIL $desc: mutant never enrolled — the row is VACUOUS, it proves nothing"; }
+                  grep -q '^PRBODY.*in-box validated GREEN' "$GH_LOG" \
+                                                          || { ok=0; echo "  FAIL $desc: the mutation did not reinstate the false claim — the real row proves nothing"; } ;;
     ISSUECOMMENT) grep -q '^ISSUECOMMENT' "$GH_LOG" || { ok=0; echo "  FAIL $desc: no BLOCKED comment on issue"; }
                   grep -q '^PRCREATE'    "$GH_LOG" && { ok=0; echo "  FAIL $desc: opened a PR when it should have blocked"; }
                   # a not-DONE outcome must NEVER push a branch — the reviewer's headline assertion.
@@ -204,8 +240,31 @@ else
 fi
 rm -f "$MUT177"
 
-echo "== in-box RED: author commits but validate.sh fails → surfaced, NO PR, NO push =="
-run "in-box RED blocks the push" "FAKE_AUTHOR=done FAKE_VALIDATE=RED" ISSUECOMMENT
+echo "== in-box RED: author commits but validate.sh fails → HANDS OFF (push + PR + enrol), asks nobody =="
+# MOVE 2 of #274. This row asserted the OPPOSITE until 2026-07-28 ("surfaced, NO PR, NO push"), which is
+# what the old dead end did: it discarded the work with the throwaway worktree, told the maintainer "the
+# branch '<name>' holds the attempt" (a 404 — it was never pushed), and waited for a human who never came.
+# A failing first draft is normal development, not a decision: it now reaches the gates that exist to
+# judge it. The body honesty is asserted inside PRCREATE_RED.
+run "in-box RED hands off to the gates, work preserved" "FAKE_AUTHOR=done FAKE_VALIDATE=RED" PRCREATE_RED
+
+echo "== MUTATION: restore the unconditional 'in-box validated GREEN' footer → the RED body lies again =="
+# The blocker the fitness gate returned this change for: the footer asserted GREEN on EVERY path, so a RED
+# hand-off shipped a body saying both "FAILED in-box validation" and "in-box validated GREEN" — in the
+# artifact the independent reviewer and the maintainer read to judge its state. Reinstate it and the row
+# above must go red.
+MUTG="$HERE/bin/.dev-author-mutgreen-$$.sh"
+sed 's/^\[ "\$inbox_red" = 1 \] && _validate_claim=.*$/:/' "$AUTHOR" > "$MUTG"
+if grep -q '^\[ "\$inbox_red" = 1 \] && _validate_claim=' "$MUTG" || ! grep -q '_validate_claim="in-box validated GREEN"' "$MUTG"; then
+  echo "  FAIL mutation VACUOUS (sed did not change the copy)"; fail=$((fail+1))
+else
+  _SG="$AUTHOR"; AUTHOR="$MUTG"
+  run "mutant: the RED body claims 'in-box validated GREEN' (the returned blocker)" \
+      "FAKE_AUTHOR=done FAKE_VALIDATE=RED" PRCREATE_RED_LIE
+  AUTHOR="$_SG"   # restore — the rows below must run against the REAL script
+fi
+rm -f "$MUTG"
+
 echo "== guard: a closed issue is never authored =="
 run "closed issue → skip" "FAKE_STATE=CLOSED FAKE_AUTHOR=done" NONE
 echo "== guard: a non-backlog-labelled issue is never authored =="

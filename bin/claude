@@ -123,6 +123,14 @@ while :; do
     flock -s "$state/session.lock" \
         distrobox enter claudebox -- bash -lc '
             SEED_CWD="$1"; SID="$2"; shift 2
+            # SKILL SELF-INSTALL (STEP 2 of #274). The intake skill is the maintainer'"'"'s front door; it
+            # must survive every box rebuild, so it is installed from the live clone on EVERY launch
+            # rather than baked into an image. Idempotent (cp -r over the same path) and fail-safe
+            # (|| true, output swallowed) — a skill that will not install must never block a session.
+            for _sk in "$HOME/.local/share/fedora-dev/skills"/*/; do
+              [ -d "$_sk" ] || continue
+              mkdir -p "$HOME/.claude/skills" 2>/dev/null && cp -r "$_sk" "$HOME/.claude/skills/" 2>/dev/null || true
+            done
             s="$HOME/.local/share/fedora-dev/bin/seed-claude-trust.py"
             [ -f "$s" ] && command -v python3 >/dev/null 2>&1 && python3 "$s" "$SEED_CWD" 2>/dev/null || true
             export FD_INTERACTIVE=1   # marks THIS as an interactive session for the anti-stall Stop hook; headless `claude -p` (which bypasses this wrapper) never sets it, so the hook never touches a bounded headless run
