@@ -355,11 +355,18 @@ if [ "$inbox_red" = 1 ]; then
 > human, while claiming a branch held an attempt that was never pushed.
 "
 fi
+# THE FOOTER STATES WHAT ACTUALLY HAPPENED. It used to assert "in-box validated GREEN" UNCONDITIONALLY,
+# which on the RED hand-off path put a false claim a few lines under the ⚠️ RED block — in the very
+# artifact the independent fitness reviewer and the maintainer read to judge the PR's state. A body
+# saying both FAILED and validated-GREEN is precisely the false-claim defect this hand-off exists to
+# kill, so the claim is CONDITIONAL on the gate's real outcome (dev-author.test.sh asserts BOTH ways).
+_validate_claim="in-box validated GREEN"
+[ "$inbox_red" = 1 ] && _validate_claim="in-box validation RED (enrolled anyway, for the host gate + auto-fixer)"
 pr_body="Autonomously authored by \`dev-author.sh\` (R3) for issue #$ISSUE.
 $_red_note
 Backlog-ticket: #$ISSUE
 
-<sub>Draft-opened at first push, in-box validated GREEN, then marked ready + labelled \`$AUTHOR_LABEL\` to enrol in the host live-gate → fitness → poller pipeline. No human in this loop. NOTE: this is a \`Backlog-ticket:\` linkage, NOT a \`Closes\` keyword — the backlog issue is closed by \`bin/reconcile.sh\` on OBSERVED proof (merge + host GREEN + CI published + live read-back), never auto-closed at merge before the change is proven live (task #19).</sub>"
+<sub>Draft-opened at first push, $_validate_claim, then marked ready + labelled \`$AUTHOR_LABEL\` to enrol in the host live-gate → fitness → poller pipeline. No human in this loop. NOTE: this is a \`Backlog-ticket:\` linkage, NOT a \`Closes\` keyword — the backlog issue is closed by \`bin/reconcile.sh\` on OBSERVED proof (merge + host GREEN + CI published + live read-back), never auto-closed at merge before the change is proven live (task #19).</sub>"
 bodyfile="$(mktemp)"; printf '%s' "$pr_body" > "$bodyfile"
 
 # draft at first push (R3: state visible in GitHub immediately, resumable), then flip to ready so the
@@ -374,9 +381,9 @@ gh pr edit "$pr_num" --repo "$SLUG" --add-label "$AUTHOR_LABEL" >/dev/null 2>&1 
 # R5 audit loop — confirm the ship ON the backlog issue (symmetric with surface_blocked). Best-effort
 # BY DESIGN: the PR is already the source of truth, so a failed comment logs a WARN, never fails the run.
 if [ "$inbox_red" = 1 ]; then
-  ship_body="**dev-author → handed off (in-box validation RED):** authored #$pr_num and enrolled it in the live-gate → fitness → poller pipeline. The first draft does NOT pass in-box validation; the host gate will report RED and the auto-fixer iterates from there. No maintainer decision is needed — it cannot merge until both gates are satisfied. $pr_url"
+  ship_body="**dev-author → handed off (in-box validation RED):** authored #$pr_num and enrolled it in the live-gate → fitness → poller pipeline. The first draft does NOT pass in-box validation; the host gate will report RED and the auto-fixer iterates from there. No maintainer decision is needed — it cannot merge until both gates are satisfied. $pr_url"$'\n\n<sub>autonomous feature-author (R3). No merge taken — the two-gate pipeline decides.</sub>'
 else
-ship_body="**dev-author → shipped:** authored and enrolled #$pr_num in the live-gate → fitness → poller pipeline. $pr_url"$'\n\n<sub>autonomous feature-author (R3). No merge taken — the two-gate pipeline decides.</sub>'
+  ship_body="**dev-author → shipped:** authored and enrolled #$pr_num in the live-gate → fitness → poller pipeline. $pr_url"$'\n\n<sub>autonomous feature-author (R3). No merge taken — the two-gate pipeline decides.</sub>'
 fi
 gh issue comment "$ISSUE" --repo "$SLUG" --body "$ship_body" >/dev/null 2>&1 || log "WARN: could not post shipped comment on #$ISSUE"
 
