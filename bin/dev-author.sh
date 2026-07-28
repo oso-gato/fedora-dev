@@ -192,6 +192,11 @@ esac
 # fresh-tree to fail exactly as before — it never introduces a new failure path of its own.
 # SAFE BY CONSTRUCTION: it runs AFTER the R16 scope check, so only a repo the App is already installed
 # on can be cloned or seeded — it can never be used to REACH an out-of-scope repo (the #165 lesson).
+# THE LABEL CONTRACT (2026-07-27): establish the pipeline vocabulary BEFORE authoring, or `--add-label
+# live-validate` fails silently on a repo that has never seen it, the PR is never enrolled in the host
+# gate, and the poller NOOPs on it forever. Idempotent; additive — a failure here logs and falls through.
+REPO_LABELS="${REPO_LABELS:-$HERE/repo-labels.sh}"
+[ -x "$REPO_LABELS" ] && { "$REPO_LABELS" ensure "$REPO" >&2 2>/dev/null || log "label contract could not be established on $SLUG — the PR may not enrol (continuing)"; }
 CLONE_ROOT="${CLONE_ROOT:-$HOME/repos}"
 _src="$REPO"; [ -d "$_src/.git" ] || _src="$CLONE_ROOT/$REPO"
 if [ ! -d "$_src/.git" ]; then
