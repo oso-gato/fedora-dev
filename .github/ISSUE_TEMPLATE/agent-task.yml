@@ -1,7 +1,10 @@
 name: Agent task
 description: An objective for the autonomous loop. Normally filed FOR you by the intake agent — use this form only if you are filing by hand.
 title: "<one verb, one deliverable>"
-labels: ["backlog"]
+# NOT `backlog`: that label is swept straight into autonomous implementation by dev-loop → dev-author,
+# which would build an objective nobody has confirmed. `objective` waits for the maintainer's `approved`
+# tap, which is what hands it to the planner. The label IS the gate.
+labels: ["objective"]
 assignees: ["oso-gato"]
 body:
   - type: markdown
@@ -79,6 +82,7 @@ body:
     attributes:
       value: |
         ---
-        **After filing:** apply the `approved` label to start the loop. The planner resolves *who*
-        applied it and accepts only a maintainer — that is what stops an agent authorising its own
-        work, and it is the only human gate in the pipeline.
+        **After filing:** nothing acts on this issue until you apply the `approved` label. That tap is
+        what hands it to the planner, which decomposes it into feature tickets the loop then implements
+        and ships. The planner resolves *who* applied the label and accepts only a maintainer — that is
+        what stops an agent authorising its own work, and it is the only human gate in the pipeline.

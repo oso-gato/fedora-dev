@@ -20,6 +20,23 @@
 #     is the correct trust boundary (R1: confirming the spec is a human act) and this script does not
 #     try to route around it — it files the issue ASSIGNED to him so it lands in his GitHub app.
 #
+# THE LABEL IS THE GATE, AND IT MUST NOT BE `backlog` (fitness RETURN on d339476 — the defect this
+# script shipped with). `backlog` is not "a ticket to look at": it is the label `dev-loop.sh` sweeps and
+# hands STRAIGHT to `dev-author.sh`, which implements it, opens a PR, labels it `live-validate` and lets
+# the poller auto-merge it. Filing an un-confirmed objective under it therefore routes PAST R1 entirely —
+# the maintainer's `approved` tap is never consulted, because the only component that checks it
+# (`dev-plan.sh`) is not in that path at all. So an intake objective is filed under its OWN label
+# ($INTAKE_LABEL, default `objective`), which the feature author deliberately does not sweep, and
+# `dev-loop.sh`'s PLAN ARM is what carries an `approved`-labelled objective to `dev-plan.sh`. Nothing is
+# built from this issue until a MAINTAINER taps `approved`; the label is the gate, and that is the point.
+#
+# R16 SCOPE (a disclosed deferral, not an oversight): every other actuator calls `bin/repo-scope.sh`
+# first. This one deliberately does not YET — with no `policy/scope.conf` present the reader fails
+# closed to the apparatus's OWN two repos, which would refuse the front door for exactly the tenant
+# repos it exists to serve. The boundary still holds structurally: the App credential cannot reach a
+# repo it is not installed on, so a `gh issue create` there simply fails. Wiring the belt (once the
+# session-scope path is the norm) is a follow-up, tracked as a NOTE rather than done blind here.
+#
 # THE LOAD-BEARING VALIDATION IS THE ACCEPTANCE COMMAND. An issue without one leaves "looks done" as the
 # only completion signal, which puts a human at the end of every iteration. Measured across ~9,900 agent
 # runs: 45-48% of ALL failures were false claims of completion where nothing independent could check;
@@ -42,7 +59,11 @@
 set -uo pipefail
 
 ORG="${ORG:-oso-gato}"
-INTAKE_LABEL="${INTAKE_LABEL:-backlog}"
+# The intake label — see THE LABEL IS THE GATE above. It MUST NOT be the author loop's $BACKLOG_LABEL
+# (`backlog`): that one is swept straight into autonomous implementation, and this issue has not been
+# confirmed by anybody yet.
+INTAKE_LABEL="${INTAKE_LABEL:-objective}"
+APPROVED_LABEL="${APPROVED_LABEL:-approved}"
 MAINTAINER="${MAINTAINER:-oso-gato}"
 
 # ---- PURE CORE (--selftest covers exactly this) ----------------------------------------------------
@@ -62,9 +83,13 @@ spec_verdict(){
 
 # count_accept_cmds <file> → number of `$ ` command lines inside the ## Acceptance section only.
 # Scoped to the section ON PURPOSE: a `$ ` example elsewhere in the prose is illustration, not a check.
+# UNREADABLE IS NOT ZERO. Both counters emit the literal `unreadable` when they cannot actually count,
+# which spec_verdict rejects — the header's "never file on missing evidence" and the selftest's refusal
+# rows are then true of the I/O layer too, not just of the pure core. (Emitting 0 was fail-OPEN: an
+# unreadable spec would have read as "no clarification markers", i.e. as a clean interview.)
 count_accept_cmds(){
   local f="${1-}" in=0 n=0 line
-  [ -r "$f" ] || { printf 0; return; }
+  [ -r "$f" ] || { printf 'unreadable'; return; }
   while IFS= read -r line; do
     case "$line" in
       '## Acceptance'*) in=1; continue ;;
@@ -85,8 +110,11 @@ has_title(){   grep -qE '^#[[:space:]]+\S' "$1" 2>/dev/null && printf 1 || print
 # non-numeric, which the pure core correctly rejects as unreadable and which refused every clean spec.
 # Caught only by running a real file through it; the selftest passed because it hand-fed the counts.
 count_clarify(){
-  local n; n="$(grep -c 'NEEDS CLARIFICATION' "$1" 2>/dev/null)"
-  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  local n rc
+  n="$(grep -c 'NEEDS CLARIFICATION' "$1" 2>/dev/null)"; rc=$?
+  # rc 0 = matched, 1 = no match (a real count of 0), anything else = grep could not read the file.
+  [ "$rc" -le 1 ] || { printf 'unreadable'; return; }
+  case "$n" in ''|*[!0-9]*) printf 'unreadable'; return ;; esac
   printf '%s' "$n"
 }
 
@@ -110,6 +138,12 @@ if [ "${1:-}" = "--selftest" ]; then
   echo "== fail-safe: unreadable counts REFUSE (never file on missing evidence) =="
   ck "unreadable cmd count"     "$(v 1 x 0 1 1 | cut -c1-24)" "INCOMPLETE: acceptance-c"
   ck "unreadable marker count"  "$(v 1 1 x 1 1 | cut -c1-26)" "INCOMPLETE: clarification-"
+  # …and the I/O layer actually EMITS that unreadable token, so the rows above are reachable in real
+  # life rather than only from hand-fed arguments. (They were not: both counters used to answer 0.)
+  ck "count_clarify on an unreadable file"     "$(count_clarify /nonexistent/spec.md)" "unreadable"
+  ck "count_accept_cmds on an unreadable file" "$(count_accept_cmds /nonexistent/spec.md)" "unreadable"
+  echo "== the intake label is NOT the label the feature author sweeps (fitness RETURN, d339476) =="
+  ck "INTAKE_LABEL default is not 'backlog'" "$INTAKE_LABEL" "objective"
   echo; echo "intake-file selftest: $p passed, $f failed"; [ "$f" -eq 0 ]; exit
 fi
 
@@ -146,14 +180,24 @@ bodyfile="$(mktemp)"
   printf '<sub>Drafted conversationally with the maintainer and filed by `intake-file.sh` (R31). '
   printf 'Validated: has a title, a bounded scope, and at least one **runnable acceptance command**; '
   printf 'no unresolved clarification markers.</sub>\n\n'
-  printf '**@%s — this is waiting on you.** Apply the `approved` label (one tap) and the autonomous loop takes it from here.\n' "$MAINTAINER"
+  printf '**@%s — this is waiting on you.** Nothing is built from this issue until you apply the `%s` label.\n' \
+         "$MAINTAINER" "$APPROVED_LABEL"
+  printf 'It is filed as `%s`, which the feature author does not sweep; the one tap is what hands it to the planner\n' "$INTAKE_LABEL"
+  printf '(`dev-plan.sh` decomposes it into feature tickets, which the loop then implements, gates and ships).\n'
   printf 'The agent deliberately cannot self-approve: `dev-plan.sh` resolves WHO applied the label and binds that actor to a maintainer role.\n'
 } > "$bodyfile"
+
+# CREATE-ON-USE the intake label (the dev-plan.sh / host-ticket.sh precedent): `gh issue create --label`
+# HARD-FAILS on a label the repo does not carry, and `$INTAKE_LABEL` is deliberately NOT one of the
+# labels the fleet already uses — so without this, the very first intake into any repo fails outright.
+gh label create "$INTAKE_LABEL" --repo "$ORG/$REPO" --color 5319e7 \
+   --description "a drafted objective awaiting the maintainer's '$APPROVED_LABEL' tap (R31 intake)" \
+   --force >/dev/null 2>&1 || true
 
 url="$(gh issue create --repo "$ORG/$REPO" --title "$title" --body-file "$bodyfile" \
         --label "$INTAKE_LABEL" --assignee "$MAINTAINER" 2>&1)" || {
   log "FAILED to file the issue: $url"; rm -f "$bodyfile"; exit 1; }
 rm -f "$bodyfile"
 log "FILED: $url"
-log "next: the maintainer applies the 'approved' label; dev-plan.sh then decomposes it into feature issues"
+log "next: the maintainer applies the '$APPROVED_LABEL' label — dev-loop's plan arm then hands it to dev-plan.sh, which decomposes it into backlog feature issues. Until that tap, nothing acts on it."
 printf '%s\n' "$url"

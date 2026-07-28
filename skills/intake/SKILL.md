@@ -110,10 +110,16 @@ argue with it and do not work around it.
 
 ## Step 5 — hand over, and stop
 
+The filer labels the issue `objective` — deliberately **not** `backlog`. `backlog` is the label the
+feature author sweeps straight into implementation, so filing an unconfirmed objective under it would
+build it without anybody having agreed to it. `objective` waits. His `approved` tap is what moves it:
+`dev-loop` then hands it to `dev-plan.sh`, which decomposes it into `backlog` feature tickets.
+
 Tell him plainly:
 
-> Filed as `<url>`. It's assigned to you — **tap the `approved` label** and the loop takes it from
-> there. I can't approve it myself: the planner checks who applied the label and only accepts a
+> Filed as `<url>`. It's assigned to you and nothing happens to it until you **tap the `approved`
+> label** — that hands it to the planner, which breaks it into feature tickets the loop then builds
+> and ships. I can't approve it myself: the planner checks who applied the label and only accepts a
 > maintainer, which is what stops an agent authorising its own work.
 
 Then **stop**. Do not start implementing. Do not open a branch. The whole point of the order desk is
@@ -123,7 +129,7 @@ session ends.
 
 ## What this skill is deliberately not
 
-It is not a planner — `dev-plan.sh` decomposes the objective into feature issues.
+It is not a planner — `dev-plan.sh` decomposes the objective into feature issues, once he has approved it.
 It is not an implementer — `dev-author.sh` writes the code.
 It is not a reviewer — the host gate and the independent fitness review decide.
 
