@@ -702,6 +702,11 @@ if [ "${1:-}" = "--selftest" ]; then
   ar "a GLOBAL reviewer outage is NOT repairable"  review-infra-down 0 3 INFRA
   ar "a per-head reviewer failure is NOT repairable" review-failed   0 3 INFRA
   ar "a deliberate fitness ESCALATE is not repairable" review        0 3 INFRA
+  # enroll_pr names its kind `enroll-infra` SO THAT the existing *infra* family catches it — a missing
+  # label-write is a credential fact no code change repairs. That naming is load-bearing, so pin it here:
+  # rename the kind without the -infra suffix and the poller answers "I cannot label" by summoning a model
+  # that cannot label either. Charged at att=0, i.e. it never depends on the budget to reach the human.
+  ar "an un-addable label is NOT repairable"    enroll-infra   0 3 INFRA
   ar "unreadable attempts -> human"             stalled        x 3 INFRA
   ar "unreadable budget -> human"               stalled        0 x INFRA
   ar "repair disabled (0) -> human"             stalled        0 0 INFRA
@@ -745,6 +750,12 @@ POLLER_ARMED="${POLLER_ARMED:-1}"   # ARMED BY DEFAULT (gate-free objective; #96
 POLL_INTERVAL="${POLL_INTERVAL:-30}"   # fixed sweep cadence (a gentler 30s; no adaptive machinery)
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
 POLLER_REPAIR_MAX="${POLLER_REPAIR_MAX:-3}"   # R39/#278: bounded repair attempts before the maintainer
+# R39/#278 UNENROLLED-PR SELF-HEAL. DEV_LOGIN is the author identity whose PRs the loop owns and may
+# therefore enrol; ENROLL_LABEL is the host live-gate's ONLY discovery signal and must stay in lockstep
+# with bin/dev-author.sh's AUTHOR_LABEL (the two are the same enrolment, at author-time and after).
+DEV_LOGIN="${DEV_LOGIN:-oso-gato-nox-claudebox}"
+ENROLL_LABEL="${ENROLL_LABEL:-live-validate}"
+POLLER_ENROLL_MAX="${POLLER_ENROLL_MAX:-3}"   # consecutive failed enrolments before the maintainer hears about it
 # GENERATION FENCE (2026-07-28) — SHARED CONTRACT with bin/poller-service.sh: rc 92 means "I am running
 # in a container that no longer exists", and the supervisor must EXIT on it rather than relaunch.
 POLLER_ORPHAN_RC="${POLLER_ORPHAN_RC:-92}"
@@ -1058,6 +1069,54 @@ surface_or_repair(){
 #   * review (PRESENT) — a fitness ESCALATE is the reviewer DEFERRING a judgment call to the maintainer
 #     BY DESIGN. That is the one human path zero-gate keeps on purpose; repairing around it would route
 #     a deliberate escalation back into the machine.
+
+# UNENROLLED-PR SELF-HEAL (R39 / #278) -----------------------------------------------------------------
+# The host live-gate discovers work ORG-WIDE by the `live-validate` label and by NOTHING ELSE. So a PR the
+# loop authored but never labelled can never receive a verdict: host stays NONE, plan() stays NOOP, and the
+# poller sweeps past it in silence for as long as it stays open. Not hypothetical — the maintainer-facing
+# agent forgot the label on THREE PRs in one session (#271, #277, bootstrap#283). Enrolment must therefore
+# not depend on anyone remembering, which is exactly the #278 thesis applied to its own front door.
+#
+# DETERMINISTIC, NOT A MODEL RUN. The repair here is one idempotent label add, and the no-offload doctrine
+# cuts both ways: we do not hand the maintainer a command we can run ourselves, and we do not summon a
+# model for one either. run_fixer commits code in a worktree — it could not add a label if we asked it to.
+#
+# CREATE-ON-USE. `gh pr edit --add-label` HARD-FAILS on a label the repo does not carry, and a brand-new
+# repo carries none — that exact miss is one of the seven stalls behind #278 (it cost 12 SILENT hours). So
+# a failed add is retried ONCE behind a `gh label create`, the dev-plan.sh / host-ticket.sh precedent.
+#
+# ONE SHOT PER PR, and that is a boundary, not a bound. We heal an OMISSION; we do not fight a DECISION. If
+# the label is gone after we enrolled it, somebody removed it on purpose, and re-adding it every 30s would
+# be the loop arguing with a human. The marker is per-PR (enrolment is a PR property, not a head one); a
+# wiped box re-enrols once, which is harmless and idempotent.
+#
+# FAILURE IS BOUNDED, NOT SILENT (R4). A transient API blip must not ping the maintainer, and a permanent
+# one (no label-write on this repo) must not re-spin at sweep cadence forever telling nobody. Consecutive
+# failures are counted; at POLLER_ENROLL_MAX the state goes to surface_or_repair under the kind
+# `enroll-infra`, which anomaly_route's existing `*infra*` family already routes straight to the human —
+# correctly, because the missing capability is a credential fact no code change repairs.
+enroll_pr(){ # <pr> <ref> <sha> — rc 0 = enrolled (or already handled); rc 1 = could not
+  local pr="$1" ref="$2" sha="$3"
+  local mark="$STATE/enrolled-${pr}.done" budget="$STATE/enroll-${pr}.n" n=0
+  [ -f "$mark" ] && return 0
+  if gh pr edit "$pr" --repo "$SLUG" --add-label "$ENROLL_LABEL" >/dev/null 2>&1 \
+     || { gh label create "$ENROLL_LABEL" --repo "$SLUG" --color 1d76db \
+            --description "enrols a PR in the host live-gate — the gate discovers work by this label" \
+            --force >/dev/null 2>&1
+          gh pr edit "$pr" --repo "$SLUG" --add-label "$ENROLL_LABEL" >/dev/null 2>&1; }; then
+    : > "$mark"; rm -f "$budget"
+    log "SELF-HEAL $SLUG#$pr @ ${sha:0:7}: enrolled in the host live-gate ($ENROLL_LABEL) — a dev-authored PR that was never labelled can NEVER be verdicted, so it would have sat at host=NONE in silence"
+    return 0
+  fi
+  [ -f "$budget" ] && n="$(cat "$budget" 2>/dev/null || echo 0)"
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  n=$((n+1)); printf '%s' "$n" > "$budget" 2>/dev/null
+  log "SELF-HEAL $SLUG#$pr: could not add '$ENROLL_LABEL' (attempt $n/$POLLER_ENROLL_MAX; label create+retry also failed)"
+  if [ "$n" -ge "$POLLER_ENROLL_MAX" ]; then
+    surface_or_repair "$pr" "$ref" "$sha" "enroll-infra" "this dev-authored PR carries no \`$ENROLL_LABEL\` label, so the host live-gate will never discover it and the PR can never reach a verdict — and the poller could not add the label itself after $n attempts (a \`gh label create\` + retry included). That is a CREDENTIAL/permission fact, not a code defect: the App identity appears to lack label-write on \`$SLUG\`. REMEDIATION: grant it Issues:write on this repo, or add the \`$ENROLL_LABEL\` label to the PR by hand — either one re-enters the normal gate → fitness → merge path with no further action."
+  fi
+  return 1
+}
 
 # The rc-3 question — asked ONCE per head, and ONLY once the bounded retries are exhausted (review_due).
 # It carries the reviewer harness's REAL stderr: a question that shrugs is not a question. Re-callable on
@@ -1482,16 +1541,26 @@ sweep_repo(){
   # re-fetches duplicated fields this same list already carried (2 calls/PR saved). Branch names
   # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
   # number (no torn read across a mid-sweep push).
+  #
+  # author + isDraft ride this SAME call (R39/#278 unenrolled self-heal needs both, and a second list
+  # call for two scalars the snapshot already holds would be pure waste).
+  #
+  # FIELD ORDER IS LOAD-BEARING. `IFS=$'\t' read` COLLAPSES runs of tabs — tab is IFS whitespace — so an
+  # EMPTY field in the MIDDLE folds away and slides every later field one slot left (the hazard already
+  # documented in bin/dev-loop.sh, where it slid a release count into an empty timestamp's slot). `labels`
+  # is empty on most PRs, so it must stay LAST, where a trailing tab is merely stripped and the variable
+  # reads empty — exactly as before. The two new fields therefore sit BEFORE it and neither can ever be
+  # empty: `.author.login // "-"` has a placeholder for a deleted account, and `.isDraft` is a bare bool.
   local rows
-  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid,labels \
-          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\([.labels[].name]|join(","))"' 2>/dev/null)" \
+  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid,author,isDraft,labels \
+          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\(.author.login // "-")\t\(.isDraft)\t\([.labels[].name]|join(","))"' 2>/dev/null)" \
     || { log "pr list failed — skipping sweep"; return 0; }
   [ -n "$rows" ] || return 0                       # zero open PRs — quiet (rc 0 distinguishes it)
   # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
   # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
   # --watch flock; FD 3 is free.
-  local pr ref sha labels comments host tier fit action files fitraw ferr frc nf ef n last now since
-  while IFS=$'\t' read -r -u 3 pr ref sha labels; do
+  local pr ref sha author draft labels comments host tier fit action files fitraw ferr frc nf ef n last now since
+  while IFS=$'\t' read -r -u 3 pr ref sha author draft labels; do
     [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
     # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — bound to THIS
@@ -1575,7 +1644,8 @@ sweep_repo(){
         # almost certainly SKIPPED this sha (a stale host .done marker, or a transient fetch-failure
         # deduped as delivered) and will NOT re-gate on its own — SURFACE it once rather than NOOP
         # forever. Age = the head commit's committer date (GitHub truth). One `gh api` per stuck head
-        # until surfaced, then the surface marker suppresses it. Unlabelled host=NONE stays a quiet NOOP.
+        # until surfaced, then the surface marker suppresses it. An UNLABELLED head is no longer a quiet NOOP —
+        # it takes the self-heal arm below (R39/#278), because unlabelled means the gate will never look.
         case ",$labels," in
           *,live-validate,*)
             [ -f "$STATE/surfaced-${pr}-${sha}-stalled.done" ] && continue
@@ -1590,6 +1660,22 @@ sweep_repo(){
               # POLLER_REPAIR_MAX attempts, and run_fixer's no-progress stop if a repair changes nothing.
               surface_or_repair "$pr" "$ref" "$sha" "stalled" "this \`live-validate\`-labelled head has had NO host live-gate verdict for ~$((age/60))m (surfacing bound $((POLLER_STALL_MAX/60))m). The host gate produced no GREEN/RED for \`${sha:0:7}\` and will not re-gate on its own — most likely it SKIPPED this sha (a stale per-(repo,sha) \`.done\` marker on the host, or a transient PR-head fetch-failure deduped as a delivered SKIP; audit CAT-01/CAT-04). REMEDIATION: on the host, remove \`~/.local/state/live-gate/$(basename "$SLUG")-${sha}.done\` to force a re-gate, or push a new commit. (R18 idle-with-work-pending — the poller had been silently NOOPing on this since the head was pushed.)"
             fi
+            ;;
+          *)
+            # R39/#278 — UNENROLLED-PR SELF-HEAL. host=NONE on an UNLABELLED PR is not "the gate has not
+            # got to it yet": the gate discovers work by this label alone, so it will never look. The old
+            # comment above called this "a quiet NOOP" — quiet is precisely the defect, and it is the same
+            # shape as every other #278 stall (a state with no rule, answered by silence). See enroll_pr:
+            # dev-authored only (never a foreign contributor's PR), never a draft (dev-author opens draft →
+            # ready → label, so a draft is mid-authoring, not forgotten), one shot per PR.
+            # NORMALISE THE AUTHOR BEFORE COMPARING (bin/objective-status.sh does the same, for the same
+            # reason): gh renders an App author as `app/<login>`, and some paths append `[bot]`. Every PR
+            # this self-heal exists for is App-authored, so a raw `=` against DEV_LOGIN would match NONE
+            # of them — the feature would ship green, dead, and silent, which is the #278 defect itself.
+            local pauthor="${author#app/}"; pauthor="${pauthor%\[bot\]}"
+            [ "$pauthor" = "$DEV_LOGIN" ] || continue
+            [ "$draft" = false ] || continue
+            enroll_pr "$pr" "$ref" "$sha" || true
             ;;
         esac
         ;;

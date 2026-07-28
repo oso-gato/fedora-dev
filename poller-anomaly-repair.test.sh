@@ -25,20 +25,38 @@ command -v git >/dev/null || { echo "FATAL: git required"; exit 2; }
 ROOT="$(mktemp -d)"; trap 'rm -rf "$ROOT"' EXIT
 BIN="$ROOT/bin"; mkdir -p "$BIN"
 
-# ---- stub gh: ONE open PR, live-validate-labelled, NO host/fitness verdict (host=NONE → plan()=NOOP),
-# ---- with a controllable head-commit date so the R18 stall clock can be driven past its bound.
+# ---- stub gh: ONE open PR, NO host/fitness verdict (host=NONE → plan()=NOOP), with a controllable
+# ---- head-commit date so the R18 stall clock can be driven past its bound.
+# ----
+# ---- The row is SIX tab-separated fields, matching the poller's real list query exactly. That framing
+# ---- is part of what is under test: `IFS=$'\t' read` collapses runs of tabs, so `labels` — empty on
+# ---- most real PRs, and empty in every enrolment row below — must be LAST or it slides the fields
+# ---- after it one slot left. Note `${FAKE_LABELS-…}` (not `:-`): an explicitly EMPTY FAKE_LABELS must
+# ---- mean "no labels", which is the whole unenrolled fixture, while unset still means labelled.
 cat > "$BIN/gh" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
   "pr list")
     case "$*" in
       *"--state merged"*) : ;;                                   # retire pass: nothing merged
-      *"--state open"*)   printf '%s\t%s\t%s\t%s\n' 1 "$FAKE_REF" "$FAKE_SHA" "${FAKE_LABELS:-live-validate}";;
+      *"--state open"*)   printf '%s\t%s\t%s\t%s\t%s\t%s\n' 1 "$FAKE_REF" "$FAKE_SHA" \
+                            "${FAKE_AUTHOR:-oso-gato-nox-claudebox}" "${FAKE_DRAFT:-false}" \
+                            "${FAKE_LABELS-live-validate}";;
     esac ;;
   "pr view") : ;;                                                # no verdict comments at all → host=NONE
   "api "*)   case "$*" in *"/commits/"*) printf '%s\n' "$FAKE_COMMIT_DATE";; esac ;;
   "pr comment") printf 'SURFACE %s\n' "$*" >> "$FIX_LOG";;
   "issue create") printf 'ISSUE %s\n' "$*" >> "$FIX_LOG";;
+  "pr edit")
+    printf 'PREDIT %s\n' "$*" >> "$FIX_LOG"
+    # ENROLL_FAIL models the two ways a label add fails for real: `always` = no label-write on the repo
+    # (a credential fact), `until-create` = the label does not exist YET (a brand-new repo — the miss
+    # that cost 12 silent hours), so the add succeeds only once `gh label create` has run.
+    case "${ENROLL_FAIL:-}" in
+      always)       exit 1 ;;
+      until-create) [ -f "${LABEL_CREATED:-/nonexistent}" ] || exit 1 ;;
+    esac ;;
+  "label create") printf 'LABELCREATE %s\n' "$*" >> "$FIX_LOG"; : > "${LABEL_CREATED:-/dev/null}" ;;
   *) printf 'GH %s\n' "$*" >> "$FIX_LOG";;
 esac
 exit 0
@@ -84,6 +102,7 @@ setup_case(){
   done
   STATEDIR="$HOMEDIR/.local/state/pr-poller"; mkdir -p "$STATEDIR"
   WTDIR="$CASE/wt"
+  LABEL_CREATED="$CASE/label-created"
 }
 
 sweep(){ # <script> [env…]
@@ -91,13 +110,14 @@ sweep(){ # <script> [env…]
   env PATH="$BIN:$PATH" HOME="$HOMEDIR" FIX_LOG="$FIX_LOG" FD_WORKTREES="$WTDIR" \
       POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FIXER_TIMEOUT=60 \
       POLLER_FIXER="claude -p" FLEET_HALT=true FAKE_REF=feat/x FAKE_SHA="$SHA" \
-      FAKE_COMMIT_DATE="$OLD" "$@" \
+      FAKE_COMMIT_DATE="$OLD" LABEL_CREATED="$LABEL_CREATED" "$@" \
       bash "$script" --once > "$CASE/out.log" 2>&1
 }
 
 ran(){    grep -q '^FIXERCWD' "$FIX_LOG"; }
 stalled_surfaced(){ grep -q 'SURFACE.*\[stalled\]' "$FIX_LOG"; }
 origin_sha(){ git -C "$ORIGIN" rev-parse "refs/heads/$1" 2>/dev/null; }
+enrolled(){ grep -q 'PREDIT.*--add-label live-validate' "$FIX_LOG"; }
 
 OLD="$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -134,6 +154,100 @@ setup_case
 sweep "$POLLER" POLLER_REPAIR_MAX=0
 ck "$(ran && echo 0 || echo 1)" "the model ran with repair DISABLED"
 ck "$(stalled_surfaced && echo 1 || echo 0)" "with repair disabled the anomaly reached nobody — it must still surface"
+done_case
+
+# ===================================================================================================
+# UNENROLLED-PR SELF-HEAL (#278 task 5). The host live-gate discovers work by the `live-validate` label
+# and by nothing else, so an unlabelled PR is not "waiting" — it is unreachable, forever, in silence.
+# ===================================================================================================
+echo "== SELF-HEAL: an UNLABELLED dev-authored PR enrols itself =="
+DESC="an unenrolled dev PR gets the live-validate label added, with no human involved"; OK=1
+setup_case
+sweep "$POLLER" POLLER_REPAIR_MAX=3 FAKE_LABELS=
+ck "$(enrolled && echo 1 || echo 0)" "the PR was NEVER enrolled — an unlabelled PR can never be verdicted, so it stays invisible to the gate forever (the exact #271/#277/bootstrap#283 stall)"
+ck "$(grep -q 'SELF-HEAL.*enrolled in the host live-gate' "$CASE/out.log" && echo 1 || echo 0)" "the self-heal was not logged — a silent repair is indistinguishable from the silence it replaced"
+ck "$([ -f "$STATEDIR/enrolled-1.done" ] && echo 1 || echo 0)" "no one-shot marker written — without it the loop re-adds a label a human may have deliberately removed"
+ck "$(grep -q 'SURFACE' "$FIX_LOG" && echo 0 || echo 1)" "it bothered the maintainer with something it could fix itself"
+ck "$(ran && echo 0 || echo 1)" "it summoned the MODEL to add a label — run_fixer commits code in a worktree; it cannot label anything"
+done_case
+
+echo "== SELF-HEAL is ONE SHOT: we heal an omission, we do not fight a decision =="
+DESC="a second sweep does not re-add a label that was removed after we enrolled it"; OK=1
+setup_case
+: > "$STATEDIR/enrolled-1.done"                    # we already enrolled this PR once
+sweep "$POLLER" POLLER_REPAIR_MAX=3 FAKE_LABELS=
+ck "$(enrolled && echo 0 || echo 1)" "it re-enrolled an already-enrolled PR — the label is gone because somebody removed it, and re-adding it every 30s is the loop arguing with a human"
+done_case
+
+# The form gh ACTUALLY renders for the identity that authors every PR this self-heal exists for. A raw
+# `=` against DEV_LOGIN matches none of them, so without normalisation the feature ships green and DEAD —
+# which is #278's own defect. This row is the one that catches that, and it is not hypothetical: it is
+# why bin/objective-status.sh already carries the same two-line normalisation.
+echo "== SELF-HEAL normalises the App author form: 'app/<login>' is the dev login =="
+DESC="an App-rendered author (app/… and [bot]) still enrols — else the feature is dead on arrival"; OK=1
+setup_case
+sweep "$POLLER" POLLER_REPAIR_MAX=3 FAKE_LABELS= FAKE_AUTHOR="app/oso-gato-nox-claudebox"
+ck "$(enrolled && echo 1 || echo 0)" "the app/-prefixed author did not match DEV_LOGIN, so NO App-authored PR would ever self-enrol — the feature would be green, wired, and inert"
+setup_case
+sweep "$POLLER" POLLER_REPAIR_MAX=3 FAKE_LABELS= FAKE_AUTHOR="oso-gato-nox-claudebox[bot]"
+ck "$(enrolled && echo 1 || echo 0)" "the [bot]-suffixed author form did not match DEV_LOGIN"
+done_case
+
+echo "== SELF-HEAL is DEV-SCOPED: a foreign contributor's PR is never touched =="
+DESC="an unlabelled PR authored by someone else is left alone"; OK=1
+setup_case
+sweep "$POLLER" POLLER_REPAIR_MAX=3 FAKE_LABELS= FAKE_AUTHOR=some-human
+ck "$(enrolled && echo 0 || echo 1)" "it enrolled a PR the loop does not own — labelling a stranger's PR into an autonomous merge pipeline is not ours to do"
+done_case
+
+echo "== SELF-HEAL skips DRAFTS: dev-author opens draft → ready → label, so a draft is mid-authoring =="
+DESC="a draft dev PR is not enrolled out from under its author"; OK=1
+setup_case
+sweep "$POLLER" POLLER_REPAIR_MAX=3 FAKE_LABELS= FAKE_DRAFT=true
+ck "$(enrolled && echo 0 || echo 1)" "it enrolled a DRAFT — that races dev-author's own R3 draft→ready→label handoff"
+done_case
+
+echo "== SELF-HEAL creates the label on use: the miss that cost 12 SILENT hours =="
+DESC="a repo that does not carry the label yet gets it created, then the PR enrols"; OK=1
+setup_case
+sweep "$POLLER" POLLER_REPAIR_MAX=3 FAKE_LABELS= ENROLL_FAIL=until-create
+ck "$(grep -q 'LABELCREATE.*live-validate' "$FIX_LOG" && echo 1 || echo 0)" "it never tried to CREATE the missing label — \`gh pr edit --add-label\` hard-fails on an unknown label, which is precisely the 12-hour stall"
+ck "$(enrolled && echo 1 || echo 0)" "the retry behind the create never ran, so a brand-new repo can still never enrol a PR"
+ck "$([ -f "$STATEDIR/enrolled-1.done" ] && echo 1 || echo 0)" "create-on-use succeeded but was not recorded as enrolled"
+done_case
+
+echo "== SELF-HEAL bounded: a PERMANENT label-write failure reaches the human, and not the model =="
+DESC="an un-addable label escalates as enroll-infra after its bounded attempts"; OK=1
+setup_case
+sweep "$POLLER" POLLER_REPAIR_MAX=3 POLLER_ENROLL_MAX=1 FAKE_LABELS= ENROLL_FAIL=always
+ck "$(grep -q 'SURFACE.*\[enroll-infra\]' "$FIX_LOG" && echo 1 || echo 0)" "a permanently un-enrollable PR reached nobody — it would re-try at sweep cadence forever, silently (R4)"
+ck "$(ran && echo 0 || echo 1)" "it summoned the model to fix a credential fact — anomaly_route's *infra* family exists to stop exactly this"
+ck "$([ -f "$STATEDIR/enrolled-1.done" ] && echo 0 || echo 1)" "it marked a FAILED enrolment as done, which would suppress every future retry"
+ck "$([ "$(cat "$STATEDIR/enroll-1.n" 2>/dev/null)" = 1 ] && echo 1 || echo 0)" "the failure counter was not charged, so the bound can never be reached"
+done_case
+
+echo "== SELF-HEAL does not fire on a transient blip =="
+DESC="a first failure under a bound of 3 retries quietly instead of paging the maintainer"; OK=1
+setup_case
+sweep "$POLLER" POLLER_REPAIR_MAX=3 POLLER_ENROLL_MAX=3 FAKE_LABELS= ENROLL_FAIL=always
+ck "$(grep -q 'SURFACE' "$FIX_LOG" && echo 0 || echo 1)" "one transient API blip paged the maintainer — the bound exists so a blip self-heals on the next sweep"
+ck "$([ "$(cat "$STATEDIR/enroll-1.n" 2>/dev/null)" = 1 ] && echo 1 || echo 0)" "the attempt was not counted toward the bound"
+done_case
+
+echo "== MUTATION: un-wire the enrolment call site → the label is never added =="
+DESC="mutation: dropping the enroll_pr call restores the silent unlabelled NOOP"; OK=1
+EMUTBIN="$ROOT/emutbin"; rm -rf "$EMUTBIN"; cp -a "$HERE/bin" "$EMUTBIN"
+EMUT="$EMUTBIN/pr-poller.sh"
+sed 's/^            enroll_pr "$pr" "$ref" "$sha" || true$/            : ;/' "$POLLER" > "$EMUT"
+chmod +x "$EMUT"
+# grep -F for the same reason the row below uses it: these literals carry `$`, which BRE would mangle.
+if grep -qF 'enroll_pr "$pr" "$ref" "$sha" || true' "$EMUT"; then
+  ck 0 "mutation VACUOUS — the enrol call site did not change shape (sed matched nothing), so this row proves nothing"
+else
+  setup_case
+  sweep "$EMUT" POLLER_REPAIR_MAX=3 FAKE_LABELS=
+  ck "$(enrolled && echo 0 || echo 1)" "the un-wired mutant STILL enrolled the PR — so the SELF-HEAL row above is not testing the call site"
+fi
 done_case
 
 echo "== MUTATION: un-wire the call site (the shipped dead-code state) → the model must never run =="
