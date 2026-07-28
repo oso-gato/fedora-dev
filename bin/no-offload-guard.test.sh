@@ -47,6 +47,16 @@ ck "permission wording is ALLOWED" \
 
 ! gh --version')" "ALLOW"
 
+echo "== a markdown code span is the natural hand-over shape and must still be caught =="
+ck "backticked command is BLOCKED" \
+   "$(run 'Please run:
+
+! `gh` --version')" "BLOCK"
+ck "code span wrapping the whole ask is BLOCKED" \
+   "$(run 'Please run:
+
+`! gh --version`')" "BLOCK"
+
 echo "== must never block ordinary messages =="
 ck "no ask at all"                 "$(run 'The loop is healthy and merging normally.')" "ALLOW"
 ck "prose naming a command"        "$(run 'The gh CLI is what the poller uses to reach GitHub.')" "ALLOW"
@@ -55,6 +65,16 @@ ck "an ask that does NOT resolve here" \
 
 ! this-command-does-not-exist-anywhere --flag')" "ALLOW"
 ck "an exclamation is not an ask"  "$(run 'That worked!')" "ALLOW"
+# THE ROWS THAT MAKE THAT HEADING TRUE. Every one of these is a realistic turn-end message whose word
+# after the exclamation resolves on this box (test/time/true/kill/echo/more all sit in /usr/bin), so a
+# guard matching '! ' anywhere on the line fires on all six. The heading claimed this property; only the
+# end-of-string 'That worked!' row exercised it, which is the one shape that cannot collide.
+ck "exclamation then 'test'" "$(run 'All green! test coverage is at 100% and the PR is up.')" "ALLOW"
+ck "exclamation then 'time'" "$(run 'Fixed and merged! time to move on to the next issue.')" "ALLOW"
+ck "exclamation then 'true'" "$(run 'It works! true to the original design, nothing else changed.')" "ALLOW"
+ck "exclamation then 'kill'" "$(run 'Nice catch! kill the branch when you get a chance.')" "ALLOW"
+ck "exclamation then 'echo'" "$(run 'Deployed! echo of the old behaviour is gone now.')" "ALLOW"
+ck "exclamation then 'more'" "$(run 'Shipped it! more detail in the PR body.')" "ALLOW"
 
 echo "== ANTI-TRAP — a stop must always be reachable =="
 sid="capped$$"
@@ -74,5 +94,32 @@ ck "empty stdin"           "$(one '')" "ALLOW"
 ck "not JSON"              "$(one 'this is not json at all')" "ALLOW"
 ck "missing transcript"    "$(one '{"session_id":"x","transcript_path":"/nonexistent/nope.jsonl"}')" "ALLOW"
 ck "stop_hook_active=true" "$(one '{"session_id":"x","transcript_path":"/etc/hostname","stop_hook_active":true}')" "ALLOW"
+
+echo "== MUTATION RUN IN-SUITE — prove the LINE-START ANCHOR is what spares prose =="
+# Mechanically restore the un-anchored match ('! ' anywhere on the line) on a COPY and re-run the same
+# prose message through it. If it does not BLOCK, the ALLOW rows above are passing for some other reason
+# and this suite is not testing the discrimination it claims to.
+MUT="$TMP/mutant.sh"
+sed -e "s/^      '! '\*) : ;;/      *'! '*) : ;;/" \
+    -e "s/local rest=\"\${line#'! '}\"/local rest=\"\${line#*'! '}\"/" "$GUARD" > "$MUT"
+if cmp -s "$GUARD" "$MUT"; then
+  f=$((f+1)); printf '  FAIL mutation is VACUOUS — the sed changed nothing; the anchor moved\n'
+else
+  mrun(){ local tr="$TMP/m$RANDOM.jsonl"
+    python3 - "$tr" "$1" <<'PY'
+import json,sys
+open(sys.argv[1],"w",encoding="utf-8").write(json.dumps({
+  "type":"assistant","message":{"content":[{"type":"text","text":sys.argv[2]}]}})+"\n")
+PY
+    local out; out="$(printf '{"session_id":"mut%s","transcript_path":"%s","stop_hook_active":false}' "$RANDOM" "$tr" \
+          | bash "$MUT" 2>/dev/null)"
+    case "$out" in *'"block"'*) printf 'BLOCK' ;; *) printf 'ALLOW' ;; esac; }
+  ck "un-anchored match BLOCKS a plain status report (the defect)" \
+     "$(mrun 'Nice catch! kill the branch when you get a chance.')" "BLOCK"
+  ck "the anchored guard still catches the real ask" \
+     "$(run 'Please run:
+
+! gh --version')" "BLOCK"
+fi
 
 echo; echo "no-offload-guard e2e: $p passed, $f failed"; [ "$f" -eq 0 ]
