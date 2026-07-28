@@ -106,6 +106,13 @@ DEADMAN_UNREADABLE_MAX="${DEADMAN_UNREADABLE_MAX:-3}"  # consecutive unreadable 
 DEADMAN_EXPECT_POLLER="${DEADMAN_EXPECT_POLLER:-1}"    # 1 = a poller SHOULD be running (alarm when absent)
 DEADMAN_CLONE="${DEADMAN_CLONE:-$(dirname "$HERE")}"   # bin/ sits inside the live clone
 DEADMAN_REMOTE="${DEADMAN_REMOTE:-origin}"
+# The watcher's OWN durable log. Lives in the deadman's state dir, NOT the poller's: the stale
+# ~/.local/state/pr-poller/deadman.log is a leftover of an older arrangement and reading it to judge
+# liveness is what made this outage invisible. Set empty to disable the file (stderr still gets it) —
+# hence the NON-COLON `${DEADMAN_LOG-…}`: the colon form substitutes the default for an EMPTY value too,
+# so `DEADMAN_LOG=` would silently write to the default path instead of disabling the file (and would
+# make the `[ -n "$DEADMAN_LOG" ]` guards below dead code). Do not "tidy" it back to `:-`.
+DEADMAN_LOG="${DEADMAN_LOG-$HOME/.local/state/apparatus-deadman/deadman.log}"
 # SELF-REFRESH (2026-07-28): the clone HEAD this watcher LAUNCHED on. The loop compares against it and
 # exits for a supervised relaunch once poller-service.sh has ff-pulled past it. Test seam: inject it.
 DEADMAN_LAUNCH_HEAD="${DEADMAN_LAUNCH_HEAD:-}"
@@ -395,6 +402,21 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "MERGED_NOT_LIVE → SURFACE (never pull)" "$(respond_plan MERGED_NOT_LIVE 0 - 1)" SURFACE
   ck "CANNOT_VERIFY → SURFACE"               "$(respond_plan CANNOT_VERIFY 0 - 1)" SURFACE
 
+  # The documented `DEADMAN_LOG=` disable hatch. log() itself sits below the I/O boundary and never runs
+  # here, so this exercises the thing that DECIDES the hatch: the REAL assignment line, lifted verbatim
+  # out of this file (never a replica — a replica would only prove bash's own semantics) and evaluated in
+  # a clean child. The colon form silently substitutes the default for an EMPTY value too, which would
+  # make `DEADMAN_LOG=` write to the default path and leave the `[ -n "$DEADMAN_LOG" ]` guards dead code.
+  echo "== DEADMAN_LOG disable hatch (the real assignment line, evaluated) =="
+  _asgn="$(grep -m1 '^DEADMAN_LOG=' "$(readlink -f "$0")")"
+  ck "set-but-EMPTY → stays empty (the file is DISABLED)" \
+     "$(DEADMAN_LOG= HOME=/fakehome bash -c "$_asgn"'; printf %s "$DEADMAN_LOG"')" ""
+  ck "UNSET → the default path under \$HOME" \
+     "$(env -u DEADMAN_LOG HOME=/fakehome bash -c "$_asgn"'; printf %s "$DEADMAN_LOG"')" \
+     "/fakehome/.local/state/apparatus-deadman/deadman.log"
+  ck "explicit path → honoured verbatim" \
+     "$(DEADMAN_LOG=/tmp/x.log HOME=/fakehome bash -c "$_asgn"'; printf %s "$DEADMAN_LOG"')" /tmp/x.log
+
   echo "== refresh_verdict — the watcher must deploy its OWN merged fixes =="
   rv(){ ck "$1" "$(refresh_verdict "$2" "$3")" "$4"; }
   rv "same head stays"                       abc123 abc123 STAY
@@ -422,12 +444,34 @@ if [ "${1:-}" = "--selftest" ]; then
      "$(deadman_verdict 0 0 0 "" 1 99999 0 0 1 3 x 3 | grep -c POLLER_FROZEN)" "0"
   ck "a REAL wedge still alarms (the axis is not dead)" \
      "$(deadman_verdict 0 0 0 "" 1 900 0 0 1 3 300 3 | grep -c POLLER_FROZEN)" "1"
+
   echo; echo "apparatus-deadman selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
 fi
 
 # ── I/O LAYER — gather LIVE facts, act on the verdict. Never runs under --selftest. ───────────────────
-log(){ echo "[$(date -u +%FT%TZ 2>/dev/null || date)] apparatus-deadman: $*" >&2; }
+# log — stderr AND a durable file.
+#
+# WHY THE FILE (2026-07-28). This wrote to STDERR ONLY. Nothing redirects it: entrypoint.sh launches the
+# watcher as `distrobox enter … -- bash -lc "exec apparatus-deadman.sh --watch"` with no redirection, so
+# every line went to the container log that nobody reads. The consequence was severe and lasted a week:
+# `~/.local/state/pr-poller/deadman.log` (a leftover of an older arrangement) last gained an entry on
+# 2026-07-21, so on 2026-07-28 the watchdog SIGTERMed the poller repeatedly — aborting fitness reviews
+# and preventing self-refresh from ever deploying merged code — and left NO on-box trace of having done
+# it. Both the fault and its cause were invisible: `RESPOND POLLER_FROZEN: SIGTERM` was written to a
+# stream with no reader. The poller has had a durable log all along (`~/.local/state/pr-poller/*.log`);
+# its WATCHDOG did not, which is the wrong way round — the component that acts on the others is the one
+# whose actions most need an audit trail.
+#
+# FAIL-SAFE: the file is best-effort. An unwritable/full/missing path must NEVER break the watchdog, so
+# every write is `|| true` and stderr always gets the line regardless. Appending only — this never
+# rotates or truncates (a watchdog silently discarding its own history is the defect above).
+log(){
+  local _m="[$(date -u +%FT%TZ 2>/dev/null || date)] apparatus-deadman: $*"
+  echo "$_m" >&2
+  [ -n "${DEADMAN_LOG:-}" ] && { echo "$_m" >> "$DEADMAN_LOG" 2>/dev/null || true; }
+  return 0
+}
 now_iso(){ date -u +%FT%TZ 2>/dev/null || date; }
 read_int(){ local v; v="$(cat "$1" 2>/dev/null)"; case "$v" in ''|*[!0-9]*) printf 0;; *) printf '%s' "$v";; esac; }
 
@@ -725,6 +769,7 @@ clear_anomaly(){
 run_check(){
   local respond="${1:-0}"
   mkdir -p "$DEADMAN_STATE" 2>/dev/null || true
+  if [ -n "${DEADMAN_LOG:-}" ]; then mkdir -p "$(dirname "$DEADMAN_LOG")" 2>/dev/null || true; fi
   git_facts
   local unreadable_now="$G_UNREAD" behind="$G_BEHIND" dirty="$G_DIRTY" why="$G_WHY"
   local pids alive lage
