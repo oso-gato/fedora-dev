@@ -56,16 +56,42 @@ grep -qF -- 'dev-author → needs a decision' "$LOOP" \
 
 # --- gh stub: the BUS ---------------------------------------------------------------------------------
 # `issue list --json number,comments` → one TSV row per backlog issue: number, NEWEST comment's author,
-# NEWEST comment's line 1 (empty fields when the issue has no comments) — the exact shape the real jq
-# emits. STORE/<n> is the issue's comment stream, appended to by whoever "comments".
+# NEWEST comment's line 1, NEWEST comment's createdAt, then the two IDENTITY+LINE-1-BOUND counts the
+# bounded release runs on — how many RELEASE announcements and how many ESCALATIONS $DEV_LOGIN has
+# already left on the thread (empty/zero fields when the issue has no comments) — the exact shape the
+# real jq emits. STORE/<n> is the issue's comment stream (author \t line-1 \t createdAt per line),
+# appended to by whoever "comments".
+#
+# THE CLOCK IS PART OF THE BUS, so the stub carries it: a comment is written backdated by
+# $FAKE_COMMENT_AGE seconds, which is how a row ages a park past its cool-off DETERMINISTICALLY (no
+# sleeps, no wall-clock flake). `issue comment` is served too — the driver's release announcement and
+# its escalation are real posts onto this same store, and counting them back off it is what bounds the
+# budget. $FAKE_COMMENT_FAILS makes that post FAIL, the case where a release must NOT be taken.
 cat > "$BIN/gh" <<'EOF'
 #!/usr/bin/env bash
+iso(){ date -u -d "@$(( $(date -u +%s) - ${1:-0} ))" +%Y-%m-%dT%H:%M:%SZ; }
 case "${1:-} ${2:-}" in
   "issue list")
     for n in ${FAKE_BACKLOG:-}; do
       f="$STORE/$n"
-      if [ -s "$f" ]; then tail -1 "$f" | sed "s|^|$n\t|"; else printf '%s\t\t\n' "$n"; fi
+      if [ -s "$f" ]; then
+        rel="$(awk -F'\t' -v me="$DEV_LOGIN" -v a="$RELEASE_ANCHOR"  '$1==me && index($2,a)==1' "$f" | wc -l)"
+        esc="$(awk -F'\t' -v me="$DEV_LOGIN" -v a="$ESCALATE_ANCHOR" '$1==me && index($2,a)==1' "$f" | wc -l)"
+        # TAB-separated, exactly as the real @tsv emits — INCLUDING an empty createdAt field, which is
+        # the shape that breaks `IFS=$'\t' read` (it folds the two delimiters into one and slides the
+        # counts left). The driver must split by hand; these rows are what prove it does.
+        tail -1 "$f" | awk -F'\t' -v n="$n" -v r="$rel" -v e="$esc" \
+          '{printf "%s\t%s\t%s\t%s\t%s\t%s\n", n, $1, $2, $3, r, e}'
+      else
+        printf '%s\t\t\t\t0\t0\n' "$n"
+      fi
     done ;;
+  "issue comment")
+    [ -n "${FAKE_COMMENT_FAILS:-}" ] && exit 1
+    n="$3"; body=""; shift 3
+    while [ $# -gt 0 ]; do case "$1" in --body) body="$2"; shift 2;; *) shift;; esac; done
+    # the driver comments as its OWN App identity; a release/escalation lands FRESH (age 0)
+    printf '%s\t%s\t%s\n' "$DEV_LOGIN" "$(printf '%s' "$body" | head -1)" "$(iso 0)" >> "$STORE/$n" ;;
   *) : ;;
 esac
 exit 0
@@ -87,7 +113,9 @@ printf 'AUTHOR %s %s\n' "$1" "$2" >> "$AUTHOR_LOG"
 [ -n "${FAKE_TOUCH_HALT:-}" ] && : > "$HALT_FLAG"   # a HALT thrown while THIS pass is already in flight
 post_question(){   # what surface_blocked() does: one comment, line 1 = the machine-owned anchor
   [ -n "${FAKE_POST_FAILS:-}" ] && return 0
-  printf '%s\t%s the author run could not finish.\n' "$DEV_LOGIN" "$ANCHOR" >> "$STORE/$2"
+  # backdated by $FAKE_COMMENT_AGE so a row can age this park past its cool-off with no sleep
+  printf '%s\t%s the author run could not finish.\t%s\n' "$DEV_LOGIN" "$ANCHOR" \
+    "$(date -u -d "@$(( $(date -u +%s) - ${FAKE_COMMENT_AGE:-0} ))" +%Y-%m-%dT%H:%M:%SZ)" >> "$STORE/$2"
 }
 for s in ${FAKE_AUTHOR_SKIP:-}; do [ "$2" = "$s" ] && exit 0; done
 for m in ${FAKE_AUTHOR_RC:-}; do
@@ -113,6 +141,28 @@ echo RUN; exit 0
 EOF
 chmod +x "$BIN"/*
 export ANCHOR
+# The driver's OWN anchors (#277), pinned here in LOCKSTEP with bin/dev-loop.sh exactly as $ANCHOR is
+# pinned against bin/dev-author.sh: the stub counts the release budget off these literals, so a reword
+# on the driver side that this file did not follow must FAIL rather than silently un-bound the budget.
+export RELEASE_ANCHOR='**dev-loop → bounded release:**'
+export ESCALATE_ANCHOR='**dev-loop → release budget spent (needs a decision):**'
+echo "== the driver's release/escalation anchors are the literals this suite counts (#277) =="
+grep -qF -- "$RELEASE_ANCHOR" "$LOOP" \
+  && ck "bin/dev-loop.sh still emits the line-1 RELEASE anchor" yes yes \
+  || ck "bin/dev-loop.sh still emits the line-1 RELEASE anchor" no yes
+grep -qF -- "$ESCALATE_ANCHOR" "$LOOP" \
+  && ck "bin/dev-loop.sh still emits the line-1 ESCALATION anchor" yes yes \
+  || ck "bin/dev-loop.sh still emits the line-1 ESCALATION anchor" no yes
+# The SOURCEABLE guard the wiring depends on: bin/dev-loop.sh sources the library and has its own
+# --selftest, so an unguarded `[ "${1:-}" = --selftest ]` in the library would hijack it and exit.
+if [ -f "$HERE/bin/stop-release.sh" ]; then
+  grep -qF 'BASH_SOURCE[0]' "$HERE/bin/stop-release.sh" \
+    && ck "bin/stop-release.sh guards its selftest on BASH_SOURCE (safe to source)" yes yes \
+    || ck "bin/stop-release.sh guards its selftest on BASH_SOURCE (safe to source)" no yes
+  ( set -- --selftest; . "$HERE/bin/stop-release.sh" >/dev/null 2>&1; declare -F release_verdict >/dev/null ) \
+    && ck "…sourcing it with the caller's \$1 = --selftest defines the function and does NOT exit" yes yes \
+    || ck "…sourcing it with the caller's \$1 = --selftest defines the function and does NOT exit" no yes
+fi
 
 # fresh — a clean BUS (empty comment stores) + author log + default fakes for an INDEPENDENT scenario.
 fresh(){
@@ -120,18 +170,27 @@ fresh(){
   export STORE="$ROOT/bus-$RANDOM"; rm -rf "$STORE"; mkdir -p "$STORE"
   export FAKE_BACKLOG="" FAKE_AUTHOR_FAIL="" FAKE_AUTHOR_SKIP="" FAKE_AUTHOR_RC="" FAKE_POST_FAILS=""
   export FAKE_HALT="" HALT_FLAG="$ROOT/halt-flag-$RANDOM" FAKE_TOUCH_HALT=""
+  export FAKE_COMMENT_AGE=0 FAKE_COMMENT_FAILS=""
+  # a cool-off far past any row's ageing, so the pre-#277 rows keep their terminal-park semantics
+  export PARK_COOLOFF=999999 PARK_MAX_RELEASES=2
   rm -f "$HALT_FLAG"
   unset MAX_PER_PASS
 }
 # reply <issue> <login> — a REPLY lands on the issue AFTER the question: the answer that un-parks it.
-reply(){ printf '%s\t%s\n' "$2" "thanks — scope it to one probe." >> "$STORE/$1"; }
+reply(){ printf '%s\t%s\t%s\n' "$2" "thanks — scope it to one probe." \
+                 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$STORE/$1"; }
+# count_anchor <issue> <anchor> — how many of OUR anchored comments are on the thread (the bus budget).
+count_anchor(){ awk -F'\t' -v me="$DEV_LOGIN" -v a="$2" '$1==me && index($2,a)==1' "$STORE/$1" | wc -l | tr -d ' '; }
 # drive — run ONE pass and assert exactly which issues the author was INVOKED for. Successive drive()
 # calls WITHOUT fresh() are successive passes over the same BUS (that is how parking is proven).
 drive(){ # <desc> <expected-author-invocations, space-separated>
   local desc="$1" want="$2"
   : > "$AUTHOR_LOG"
+  # REPO_SCOPE/STOP_RELEASE are pinned to the REAL siblings so a driver copy run from elsewhere (the
+  # mutation row) still resolves them and dies for the RIGHT reason, never a scope refusal.
   PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$BIN/fleet-halt-stub" \
-    bash "$LOOP" fedora-dev >/dev/null 2>&1 || true
+    REPO_SCOPE="$HERE/bin/repo-scope.sh" STOP_RELEASE="$HERE/bin/stop-release.sh" \
+    bash "${DRIVE_SCRIPT:-$LOOP}" fedora-dev >/dev/null 2>&1 || true
   local got; got="$(awk '{print $3}' "$AUTHOR_LOG" | sort -n | tr '\n' ' ' | sed 's/ $//')"
   ck "$desc" "$got" "$want"
 }
@@ -306,6 +365,139 @@ fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_FAIL=7; export FAKE_POST_FAILS=1
 drive "pass 1: 7 goes BLOCKED but the comment never lands" "3 7 12"
 drive "pass 2: 7 is re-offered — nothing on the bus says a question is open" "3 7 12"
 unset FAKE_POST_FAILS
+
+# --- R39 BOUNDED RELEASE OF THE PARK (#277). The rows above prove the park HOLDS; these prove it is no
+# --- longer TERMINAL. A park is allowed; a park with no way out is a machine that has stopped and cannot
+# --- restart — and a large share of what parks an issue (dev-author rc 3 worktree / 7 push / 8 PR-create)
+# --- is ENVIRONMENTAL and never needed a human at all. The whole arc is driven off the BUS: the question's
+# --- own createdAt is the clock, and the release announcements ON THE THREAD are the budget.
+echo "== a park HOLDS inside its cool-off — a release is the exception, not the cadence =="
+fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_FAIL=7
+export PARK_COOLOFF=3600 PARK_MAX_RELEASES=2 FAKE_COMMENT_AGE=0
+drive "pass 1: 7 goes BLOCKED" "3 7 12"
+drive "pass 2: 7 is parked INSIDE the cool-off — not re-attempted" "3 12"
+ck "…and nothing was announced on the bus" "$(count_anchor 7 "$RELEASE_ANCHOR")" "0"
+
+echo "== past the cool-off the park RELEASES ITSELF — re-attempted with NO human in the loop =="
+fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_FAIL=7
+export PARK_COOLOFF=3600 PARK_MAX_RELEASES=2 FAKE_COMMENT_AGE=7200
+drive "pass 1: 7 goes BLOCKED (its question is aged past the cool-off)" "3 7 12"
+drive "pass 2: 7 RELEASES and is re-attempted — the stop is not terminal" "3 7 12"
+ck "…exactly ONE release recorded on the bus (the budget lives there, not on disk)" \
+   "$(count_anchor 7 "$RELEASE_ANCHOR")" "1"
+drive "pass 3: one release of budget remains — re-attempted again" "3 7 12"
+ck "…two releases recorded" "$(count_anchor 7 "$RELEASE_ANCHOR")" "2"
+drive "pass 4: budget SPENT → escalate; 7 is NOT re-attempted" "3 12"
+ck "…the maintainer is asked exactly once" "$(count_anchor 7 "$ESCALATE_ANCHOR")" "1"
+drive "pass 5: the escalation itself PARKS the issue — no further model run" "3 12"
+ck "…and the escalation is not repeated (ONCE is the contract)" "$(count_anchor 7 "$ESCALATE_ANCHOR")" "1"
+ck "…and no release is taken past the bound"  "$(count_anchor 7 "$RELEASE_ANCHOR")" "2"
+
+echo "== a REPLY still un-parks an ESCALATED issue — the human path is never closed =="
+reply 7 arthur
+drive "pass 6: 7 is re-offered once the maintainer replies" "3 7 12"
+
+# R14 E2E-KILL again, now for the BUDGET: it is a count of comments on the thread, so a wiped box must
+# neither re-release past the bound nor re-ask a question already asked.
+echo "== E2E-KILL (R14): the budget is on the BUS — a wiped box neither re-releases nor re-asks =="
+WIPEDR="$ROOT/wiped-release-$RANDOM"; mkdir -p "$WIPEDR"
+HOME="$WIPEDR" drive "pass 7 (box wiped, fresh HOME): still parked, budget still spent" "3 12"
+ck "…no duplicate escalation from the wiped box" "$(count_anchor 7 "$ESCALATE_ANCHOR")" "1"
+ck "…and it wrote no local state" "$(find "$WIPEDR" -mindepth 1 | wc -l | tr -d ' ')" "0"
+
+# THE FAIL-CLOSED EDGE: the announcement IS the budget record, so a release that cannot be announced must
+# not be taken. Taken anyway, `used` would never advance and the issue would re-spend a bounded model run
+# on EVERY pass — the unbounded spin R4 forbids, introduced by the very thing meant to prevent it.
+echo "== a release that cannot be ANNOUNCED is NOT taken (no record ⇒ no bound ⇒ an unbounded spin) =="
+fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_FAIL=7
+export PARK_COOLOFF=3600 PARK_MAX_RELEASES=2 FAKE_COMMENT_AGE=7200
+drive "pass 1: 7 goes BLOCKED" "3 7 12"
+export FAKE_COMMENT_FAILS=1
+drive "pass 2: the announcement fails → 7 HOLDS, no re-attempt" "3 12"
+ck "…and nothing was recorded" "$(count_anchor 7 "$RELEASE_ANCHOR")" "0"
+export FAKE_COMMENT_FAILS=""
+drive "pass 3: with the bus writable again the release proceeds" "3 7 12"
+ck "…and is recorded" "$(count_anchor 7 "$RELEASE_ANCHOR")" "1"
+
+echo "== R9 HALT gates the release too — a halted pass announces nothing and spawns nothing =="
+fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_FAIL=7
+export PARK_COOLOFF=3600 PARK_MAX_RELEASES=2 FAKE_COMMENT_AGE=7200
+drive "pass 1: 7 goes BLOCKED" "3 7 12"
+export FAKE_HALT=1
+drive "pass 2 (HALTED): no release, no author run" ""
+ck "…and nothing was filed on the bus" "$(count_anchor 7 "$RELEASE_ANCHOR")" "0"
+export FAKE_HALT=""
+drive "pass 3 (un-halted): the release is still due and fires — nothing was lost" "3 7 12"
+
+# The disclosed residual, asserted rather than assumed: a broken clock must not drive a model run.
+echo "== an UNREADABLE age HOLDS — the release never fires on a clock it cannot read =="
+fresh; FAKE_BACKLOG=$'7'
+printf '%s\t%s stuck.\t%s\n' "$DEV_LOGIN" "$ANCHOR" "" >> "$STORE/7"
+export PARK_COOLOFF=1 PARK_MAX_RELEASES=2
+drive "a park with no readable createdAt stays parked" ""
+ck "…and announces no release" "$(count_anchor 7 "$RELEASE_ANCHOR")" "0"
+
+echo "== PARK_MAX_RELEASES=0 declares 'this stop has NO automatic release' — it escalates at once =="
+fresh; FAKE_BACKLOG=$'7'; FAKE_AUTHOR_FAIL=7
+export PARK_COOLOFF=3600 PARK_MAX_RELEASES=0 FAKE_COMMENT_AGE=7200
+drive "pass 1: 7 goes BLOCKED" "7"
+drive "pass 2: no release configured → escalate, never re-attempt" ""
+ck "…told once, and no release taken" \
+   "$(count_anchor 7 "$ESCALATE_ANCHOR")/$(count_anchor 7 "$RELEASE_ANCHOR")" "1/0"
+
+# --- THE BOUND IS READ BEFORE THE CLOCK, so a park whose budget is already spent escalates even when its
+# --- age cannot be read — it must not wait out a cool-off it can never use. This is also the fixture that
+# --- discriminates the TSV FIELD-SPLIT: the row carries an EMPTY createdAt between two populated fields,
+# --- which is precisely the shape `IFS=$'\t' read` destroys (tab is IFS whitespace, so the two delimiters
+# --- fold into one and the RELEASE COUNT slides into the timestamp's slot — the budget is then read from
+# --- the wrong column and an exhausted stop looks unspent).
+echo "== an EXHAUSTED park escalates even on an unreadable clock (the bound is read before the clock) =="
+seed_spent_park(){   # 2 releases already taken, then a question whose createdAt is unreadable
+  printf '%s\t%s first.\t%s\n'  "$DEV_LOGIN" "$RELEASE_ANCHOR" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$STORE/7"
+  printf '%s\t%s second.\t%s\n' "$DEV_LOGIN" "$RELEASE_ANCHOR" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$STORE/7"
+  printf '%s\t%s stuck.\t%s\n'  "$DEV_LOGIN" "$ANCHOR" "" >> "$STORE/7"
+}
+fresh; FAKE_BACKLOG=$'7'; export PARK_COOLOFF=3600 PARK_MAX_RELEASES=2
+seed_spent_park
+drive "budget spent + unreadable clock → escalates, never re-attempts" ""
+ck "…and the maintainer is told" "$(count_anchor 7 "$ESCALATE_ANCHOR")" "1"
+
+# --- MUTATION #1: restore the collapsing read. The row above must then fail — the budget is read out of
+# --- the wrong column, the exhausted park looks unspent, and nobody is ever told.
+echo "== MUTATION: the collapsing \`IFS=\$'\\t' read\` loses the empty field and mis-reads the budget =="
+MUTR="$ROOT/mut-read-dev-loop.sh"
+cat > "$ROOT/collapse.sed" <<'SED'
+/while IFS= read -r ln; do/,/nrel=.*nesc=/c\
+  while IFS=$'\\t' read -r num w rest ts nrel nesc; do
+SED
+sed -f "$ROOT/collapse.sed" "$LOOP" > "$MUTR"
+if cmp -s "$LOOP" "$MUTR"; then
+  ck "the field-split mutation sed genuinely changed the driver" no yes
+else
+  ck "the field-split mutation sed genuinely changed the driver" yes yes
+fi
+fresh; FAKE_BACKLOG=$'7'; export PARK_COOLOFF=3600 PARK_MAX_RELEASES=2
+seed_spent_park
+DRIVE_SCRIPT="$MUTR" drive "mutant: the spent park is still not re-attempted" ""
+ck "…but its budget is mis-read, so the maintainer is NEVER told (the bug the hand-split removes)" \
+   "$(count_anchor 7 "$ESCALATE_ANCHOR")" "0"
+
+# --- MUTATION #2, RUN IN-SUITE. Neutralize the RELEASE arm (restoring the pre-#277 terminal park) and the
+# --- aged-park row above must FAIL — proving those rows are carried by the release wiring itself and not
+# --- by the harness. The sed must genuinely change the copy, else the row is vacuous.
+echo "== MUTATION: with the release arm neutralized, an aged park is TERMINAL again (pre-#277) =="
+MUT="$ROOT/mut-dev-loop.sh"
+sed 's|verdict="$(release_verdict .*)"|verdict=HOLD|' "$LOOP" > "$MUT"
+if cmp -s "$LOOP" "$MUT"; then
+  ck "the mutation sed genuinely changed the driver (else this row proves nothing)" no yes
+else
+  ck "the mutation sed genuinely changed the driver (else this row proves nothing)" yes yes
+fi
+fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_FAIL=7
+export PARK_COOLOFF=3600 PARK_MAX_RELEASES=2 FAKE_COMMENT_AGE=7200
+DRIVE_SCRIPT="$MUT" drive "mutant pass 1: 7 goes BLOCKED" "3 7 12"
+DRIVE_SCRIPT="$MUT" drive "mutant pass 2: the aged park is NOT released — the defect #277 removes" "3 12"
+ck "…and the mutant announces no release" "$(count_anchor 7 "$RELEASE_ANCHOR")" "0"
 
 echo
 echo "dev-loop-dryrun: $pass passed, $fail failed"
