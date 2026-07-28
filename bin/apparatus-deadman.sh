@@ -105,8 +105,11 @@ DEADMAN_CLONE="${DEADMAN_CLONE:-$(dirname "$HERE")}"   # bin/ sits inside the li
 DEADMAN_REMOTE="${DEADMAN_REMOTE:-origin}"
 # The watcher's OWN durable log. Lives in the deadman's state dir, NOT the poller's: the stale
 # ~/.local/state/pr-poller/deadman.log is a leftover of an older arrangement and reading it to judge
-# liveness is what made this outage invisible. Set empty to disable the file (stderr still gets it).
-DEADMAN_LOG="${DEADMAN_LOG:-$HOME/.local/state/apparatus-deadman/deadman.log}"
+# liveness is what made this outage invisible. Set empty to disable the file (stderr still gets it) —
+# hence the NON-COLON `${DEADMAN_LOG-…}`: the colon form substitutes the default for an EMPTY value too,
+# so `DEADMAN_LOG=` would silently write to the default path instead of disabling the file (and would
+# make the `[ -n "$DEADMAN_LOG" ]` guards below dead code). Do not "tidy" it back to `:-`.
+DEADMAN_LOG="${DEADMAN_LOG-$HOME/.local/state/apparatus-deadman/deadman.log}"
 # GENERATION FENCE (2026-07-28): a watchdog orphaned in a destroyed container reports healthy forever.
 DEADMAN_BOX_GENERATION="${DEADMAN_BOX_GENERATION:-$(dirname "$(readlink -f "$0")")/box-generation.sh}"
 DEADMAN_ORPHAN_RC="${DEADMAN_ORPHAN_RC:-92}"
@@ -337,6 +340,21 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "FITNESS_TOKEN_STALE → SURFACE (no in-box fix)" "$(respond_plan FITNESS_TOKEN_STALE 0 - 0)" SURFACE
   ck "MERGED_NOT_LIVE → SURFACE (never pull)" "$(respond_plan MERGED_NOT_LIVE 0 - 1)" SURFACE
   ck "CANNOT_VERIFY → SURFACE"               "$(respond_plan CANNOT_VERIFY 0 - 1)" SURFACE
+
+  # The documented `DEADMAN_LOG=` disable hatch. log() itself sits below the I/O boundary and never runs
+  # here, so this exercises the thing that DECIDES the hatch: the REAL assignment line, lifted verbatim
+  # out of this file (never a replica — a replica would only prove bash's own semantics) and evaluated in
+  # a clean child. The colon form silently substitutes the default for an EMPTY value too, which would
+  # make `DEADMAN_LOG=` write to the default path and leave the `[ -n "$DEADMAN_LOG" ]` guards dead code.
+  echo "== DEADMAN_LOG disable hatch (the real assignment line, evaluated) =="
+  _asgn="$(grep -m1 '^DEADMAN_LOG=' "$(readlink -f "$0")")"
+  ck "set-but-EMPTY → stays empty (the file is DISABLED)" \
+     "$(DEADMAN_LOG= HOME=/fakehome bash -c "$_asgn"'; printf %s "$DEADMAN_LOG"')" ""
+  ck "UNSET → the default path under \$HOME" \
+     "$(env -u DEADMAN_LOG HOME=/fakehome bash -c "$_asgn"'; printf %s "$DEADMAN_LOG"')" \
+     "/fakehome/.local/state/apparatus-deadman/deadman.log"
+  ck "explicit path → honoured verbatim" \
+     "$(DEADMAN_LOG=/tmp/x.log HOME=/fakehome bash -c "$_asgn"'; printf %s "$DEADMAN_LOG"')" /tmp/x.log
 
   echo; echo "apparatus-deadman selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
@@ -637,7 +655,8 @@ clear_anomaly(){
 # (the --watch default) activates the autonomous responder; respond=0 (the --check default) is READ-ONLY.
 run_check(){
   local respond="${1:-0}"
-  mkdir -p "$DEADMAN_STATE" 2>/dev/null; [ -n "${DEADMAN_LOG:-}" ] && mkdir -p "$(dirname "$DEADMAN_LOG")" 2>/dev/null || true
+  mkdir -p "$DEADMAN_STATE" 2>/dev/null || true
+  if [ -n "${DEADMAN_LOG:-}" ]; then mkdir -p "$(dirname "$DEADMAN_LOG")" 2>/dev/null || true; fi
   git_facts
   local unreadable_now="$G_UNREAD" behind="$G_BEHIND" dirty="$G_DIRTY" why="$G_WHY"
   local pids alive lage
