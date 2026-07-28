@@ -696,6 +696,8 @@ RECONCILE_TICKS=0
 # piece, then announce the ship. Rarer cadence than the other ticks because a gate run costs a model
 # call; 0 disables. See ship_actuator_tick() for the fail-safe contract.
 SHIP_ACTUATOR="${SHIP_ACTUATOR:-$HERE/ship-actuator.sh}"
+AUTHOR_LABEL="${AUTHOR_LABEL:-live-validate}"      # the label that enrols a PR in the host live-gate
+REPO_LABELS="${REPO_LABELS:-$HERE/repo-labels.sh}" # the label CONTRACT (schema + ensure + drift audit)
 SHIP_ACTUATOR_EVERY="${SHIP_ACTUATOR_EVERY:-60}"
 SHIP_ACTUATOR_TICKS=0
 # ── DEV-LOOP LAUNCH (self-arm the authoring loop, 2026-07-19) ────────────────────────────────────────
@@ -1306,6 +1308,27 @@ sweep_repo(){
     # dedup: act on each (pr,sha,host-verdict) at most once for the terminal actions; REVIEW/FIX manage
     # their own re-entry (fitness marker; progress signature), so only gate the whole sweep-action here.
     local done="$STATE/acted-${pr}-${sha}-${host}.done"
+    # R39 SELF-HEAL — UNENROLLED PR (2026-07-27). An open PR with NO live-validate label can never get a
+    # host verdict, so the gate is never reached and this sweep logs `host=NONE ⇒ NOOP` forever. That is
+    # exactly what happened on e2e-beta: 6 authored PRs, 1,142 sweeps, 12 hours, ZERO alarms — and the
+    # stall detector could not see it either, because it watches PRs that CARRY the label. The label is
+    # a mutable marker being used as pipeline state; its absence is a MECHANICAL condition the loop can
+    # repair, not a human question. So: establish the label contract and enrol the PR. Bounded by a
+    # per-PR marker so a repo that genuinely refuses the label is tried once, then surfaced — never a
+    # silent spin. Additive: on failure it logs and falls through to the existing behaviour.
+    if [ "$host" = NONE ] && ! printf '%s' ",$labels," | grep -qF ",${AUTHOR_LABEL:-live-validate},"; then
+      local enrol="$STATE/enrol-${pr}.tried"
+      if [ ! -e "$enrol" ]; then
+        : > "$enrol"
+        log "#$pr ${sha:0:7} — UNENROLLED (no ${AUTHOR_LABEL:-live-validate} label ⇒ can never be gated); repairing"
+        "${REPO_LABELS:-$HERE/repo-labels.sh}" ensure "$POLLER_REPO" >/dev/null 2>&1 || true
+        if gh pr edit "$pr" --repo "$SLUG" --add-label "${AUTHOR_LABEL:-live-validate}" >/dev/null 2>&1; then
+          log "#$pr enrolled in the host live-gate — it will be gated on the next sweep"
+        else
+          surface "$pr" "$sha" "unenrolled" "this PR carries no \`${AUTHOR_LABEL:-live-validate}\` label, so the host live-gate can never see it and the loop would NOOP on it forever. Auto-enrolment FAILED (the label could not be applied). The pipeline vocabulary is declared in bin/repo-labels.sh — run \`repo-labels.sh ensure ${POLLER_REPO}\` and re-label." || true
+        fi
+      fi
+    fi
     # TERMINAL-STATE SKIP: once (pr,sha,GREEN) has ACTED (PRESENT posted / dry-run decided / merge
     # attempted), no further action exists for this tuple — the case arms below would only hit
     # their own `[ -f "$done" ] && continue`. Skip the GREEN-moment fetches too, so a PARKED GREEN
