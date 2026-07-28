@@ -87,9 +87,9 @@
 #                     off the PR's own head — NEVER the shared clone (#152). Overridable for testing.
 #   FLEET_HALT        the R9 fleet HALT reader (default: bin/fleet-halt.sh — see its header; #151).
 #                     Read at the TOP of every tick, BEFORE any model run / merge / retire / comment.
-#                     rc 0 alone means GO; ANY other outcome (maintainer HALT, unreadable-signal PAUSE,
-#                     a missing/crashed checker) makes the whole tick OBSERVE-ONLY — fail-closed toward
-#                     stopping BY CONSTRUCTION. Overridable for testing.
+#                     rc 0 alone means GO; ANY other outcome (a maintainer HALT, or a missing/crashed
+#                     checker — rc 20/PAUSE is retired, an unreadable signal now reads GO) makes the
+#                     whole tick OBSERVE-ONLY BY CONSTRUCTION. Overridable for testing.
 #   FITNESS_REVIEW    the independent fitness harness the REVIEW arm runs (default: bin/fitness-review.sh).
 #                     Overridable for testing. Its exit code is a CONTRACT: 0 = verdict posted; 3 = the
 #                     reviewer could not be RUN / produced no verdict for this head; anything else = a
@@ -158,7 +158,38 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # extract the newest host live-gate verdict (GREEN|RED) from header lines on stdin. LINE-START
 # anchored: a verdict string quoted mid-line (embedded candidate log, prose) never matches — the
 # same G2 discipline as bin/auto-merge.sh, applied to ROUTING so forged strings can't even misroute.
-host_verdict(){ grep -oE '^\**Host live-gate \(Gate B\): VERDICT (GREEN|RED)' | grep -oE '(GREEN|RED)$' | tail -1; }
+# SKIPPED is a REAL verdict, not the absence of one (2026-07-28, MOVE 1b of #274). The host answers
+# GREEN / RED / SKIPPED, and SKIPPED means "there is nothing here for me to build or probe against this
+# base" — its own comment says "Neutral skip, not a failure". But it was matched by NOTHING here, so it
+# read as NONE ⇒ plan() returned NOOP ⇒ the PR froze SILENTLY AND FOREVER. Four of the six PRs in the
+# e2e-beta acceptance run (#11 run.sh, #12 Quadlet, #13 CI, #14 README) sat exactly there for 24h+.
+# A gate is allowed to say "not applicable"; it is NOT allowed to say nothing.
+host_verdict(){ grep -oE '^\**Host live-gate \(Gate B\): (VERDICT (GREEN|RED)|SKIPPED)' | grep -oE '(GREEN|RED|SKIPPED)$' | tail -1; }
+
+# gate_relevant <changed-files-newline-list> → 1 if this PR touches anything that DEFINES the runtime
+# the host gate exists to validate, else 0. PURE + selftested.
+#
+# This is the safety hinge of MOVE 1b. Treating SKIPPED as merge-eligible is correct for a PR the gate
+# genuinely cannot judge (a README, a CI workflow) — the host has no objection because there is nothing
+# to object to. It would be UNSAFE for a PR that changes the image, the run contract or the gate
+# contract itself: there, a SKIP means the gate could not evaluate a change it SHOULD have evaluated,
+# and merging on "no objection" would let a change dodge the gate by removing what the gate reads.
+gate_relevant(){
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      Containerfile*|*/Containerfile*) printf 1; return 0 ;;
+      .live-gate|*/.live-gate)         printf 1; return 0 ;;
+      run.sh|*/run.sh)                 printf 1; return 0 ;;
+      spin-up.sh|*/spin-up.sh)         printf 1; return 0 ;;
+      entrypoint.sh|*/entrypoint.sh)   printf 1; return 0 ;;
+      *.container)                     printf 1; return 0 ;;
+      install.sh|*/install.sh)         printf 1; return 0 ;;
+    esac
+  done
+  printf 0
+}
 # extract the newest fitness verdict (PASS|RETURN|ESCALATE) from header lines on stdin (line-start
 # anchored, same rationale).
 fitness_verdict(){ grep -oE '^Fitness review: VERDICT (PASS|RETURN|ESCALATE)' | grep -oE '(PASS|RETURN|ESCALATE)$' | tail -1; }
@@ -178,10 +209,24 @@ supersede_targets(){ tr -d '\r' | awk '/^ {0,3}(```|~~~)/{f=!f; next} !f' | grep
 # The single source of truth for "given the gates, what does the poller DO". Fail-closed toward the
 # human: any ambiguity (unknown tier, no host verdict) resolves to NOOP or PRESENT, never to a merge.
 plan(){
-  local host="$1" tier="$2" fit="$3" armed="$4"
+  local host="$1" tier="$2" fit="$3" armed="$4" gaterel="${5:-0}"
   case "$host" in
     RED)  echo FIX; return;;                          # host says broken → iterate a fix
     GREEN) : ;;                                        # fall through to the merge decision
+    SKIPPED)
+      # MOVE 1b (#274). The host had nothing to build or probe. EVERY outcome a gate can return must map
+      # to an action — merge, fix, or escalate once. Silence froze four acceptance-run PRs for 24h+.
+      #   * touches NOTHING the gate validates (docs, CI) ⇒ a genuine NOT-APPLICABLE. The host has no
+      #     objection because there is nothing to object to, so this is a NEUTRAL PASS: fall through and
+      #     let the INDEPENDENT fitness review decide. The merge still needs two identities to agree —
+      #     one of them simply has nothing to say, which is an honest answer.
+      #   * touches the image / run contract / gate contract ⇒ the gate could not evaluate a change it
+      #     SHOULD have. Merging on "no objection" would let a change dodge the gate by deleting what
+      #     the gate reads. Wait instead — the existing IDLE-WITH-WORK-PENDING surfacer alarms on it,
+      #     and an R25 base advance re-gates it (which is the real cure: these SKIP because their base
+      #     has no Containerfile YET, and gain one the moment the image PR lands).
+      [ "$gaterel" = 1 ] && { echo NOOP; return; }
+      : ;;
     *)    echo NOOP; return;;                          # no host verdict yet (NONE) → wait
   esac
   # ZERO-GATE (2026-07-10, Arthur's decision): tier NO LONGER routes to a human PRESENT. Every GREEN
@@ -424,6 +469,74 @@ fitness_login_default(){ # <same_identity> <current_login>
   else printf 'oso-gato-fitness-claudebox'; fi
 }
 
+# GENERAL ANOMALY REPAIR (R39 / #278) ------------------------------------------------------------------
+# WHY: seven distinct stalls in one session (2026-07-27/28), none predicted, each hand-patched after the
+# fact. The pattern was never the individual bugs. It was the DEFAULT: the pipeline's answer to "a state
+# I have no rule for" was its answer to every surprise — log it, mark it blocked, wait for a human.
+# Enumerating every way the world can surprise a machine does not converge; the tail is unbounded.
+#
+# THE CURE WAS ALREADY BUILT AND WIRED SHUT. run_fixer summons a model to diagnose and repair, and could
+# only be reached from TWO anticipated states (host RED, fitness RETURN). Every other surprise took the
+# road to the maintainer. The machine was never lacking the ability to unstick itself; it was only
+# PERMITTED to for two problems somebody thought of in advance.
+#
+# anomaly_route <kind> <attempts> <max> -> INFRA | ESCALATE | REPAIR   (pure; --selftest covers it)
+#   INFRA    - the anomaly IS the repair machinery, or a budget we cannot read. Fixing a broken tool with
+#              itself loops, so these go STRAIGHT to the maintainer. Anything unparseable lands here.
+#   ESCALATE - the bounded attempts are spent. The human is the LAST resort, never the first.
+#   REPAIR   - hand it to the fixer.
+# THE DEFAULT IS REPAIR, so a future call site that surfaces some new anomaly inherits self-repair
+# without anyone remembering to wire it up. That inversion is the entire point.
+#
+# THE INFRA LIST IS MATCHED BY PATTERN, NOT BY EXACT NAME. An exact-match list is the wrong shape for a
+# default-REPAIR router: every kind it fails to recognise falls through to the model, so a MISS here is a
+# miss toward handing the fixer a tool that is itself broken. The live `review-infra-down` kind (a GLOBAL
+# `claude -p` outage) proved it — under exact matching it missed `infra` and routed to REPAIR, i.e. the
+# poller's answer to "the model is unreachable" would have been to summon the model, once per PR. Every
+# review-* kind is the FITNESS GATE's own machinery and every *infra*/*trust* kind is the pipeline's, so
+# both are matched as families. Fail direction is deliberately inverted HERE and only here: for the
+# infra question a false INFRA costs one human ping, a false REPAIR loops a broken tool on itself.
+anomaly_route(){
+  local kind="${1-}" att="${2-}" max="${3-}"
+  case "$kind" in
+    *infra*|*trust*|refused|escalate|review|review-*) printf 'INFRA\n'; return 0 ;;
+  esac
+  case "$att" in ''|*[!0-9]*) printf 'INFRA\n'; return 0 ;; esac
+  case "$max" in ''|*[!0-9]*) printf 'INFRA\n'; return 0 ;; esac
+  [ "$max" -le 0 ] && { printf 'INFRA\n'; return 0; }
+  [ "$att" -ge "$max" ] && { printf 'ESCALATE\n'; return 0; }
+  printf 'REPAIR\n'
+}
+
+# marker_live <age-seconds> <ttl-seconds> → LIVE | EXPIRED   (pure; --selftest covers it)
+#
+# EVERY STOP MUST BE A PAUSE WITH A TIMER (STEP 3 of #274). The `acted-<pr>-<sha>-<host>` marker exists
+# so one sweep does not re-act on a head it already handled. But it had NO EXPIRY, so any head whose
+# action was interrupted mid-flight stayed parked FOREVER — the marker outlived the work it recorded.
+#
+# Observed directly on 2026-07-28: PR #270 was reviewed, its marker written, the poller was SIGTERMed
+# mid-sweep, and every later sweep logged `acted, parked` and skipped it. It sat with **host GREEN and
+# fitness PASS** — both gates satisfied, nothing left to decide — and could never merge, because the
+# merge arm short-circuits on the same marker. It took a human moving the file to release it. The
+# skip line had by then been re-logged 15,368 times: a stop with no release, announcing itself.
+#
+# EXPIRY IS SAFE BECAUSE EVERY DOWNSTREAM ACTION IS IDEMPOTENT OR BOUNDED: a re-attempted MERGE on an
+# already-merged PR is a no-op; a re-REVIEW is bounded by the review budget; a re-FIX is bounded by the
+# existing no-progress stop (same signature + unadvanced head ⇒ surface, never churn). So the worst
+# case of a too-short TTL is a little repeated work; the worst case of no TTL is a PR parked forever
+# with both gates green, which is what actually happened.
+#
+# FAIL DIRECTION: an unreadable age or TTL yields LIVE — keep the existing skip rather than invent a
+# re-attempt from missing evidence. TTL 0 disables expiry entirely (the old behaviour).
+marker_live(){
+  local age="${1-}" ttl="${2-}"
+  case "$age" in ''|*[!0-9]*) printf 'LIVE\n'; return 0 ;; esac
+  case "$ttl" in ''|*[!0-9]*) printf 'LIVE\n'; return 0 ;; esac
+  [ "$ttl" -le 0 ] && { printf 'LIVE\n'; return 0; }
+  [ "$age" -ge "$ttl" ] && { printf 'EXPIRED\n'; return 0; }
+  printf 'LIVE\n'
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -574,6 +687,67 @@ if [ "${1:-}" = "--selftest" ]; then
   tc "tier unterminated last" $'README.md\npolicy/CLAUDE.md' 'A'
   tc "tier terminated parity" $'README.md\n'                 'C'
   tc "tier empty stdin"       ''                             'NONE'
+  # ── MOVE 1b (#274): SKIPPED is a verdict, and every verdict maps to an action ──────────────────────
+  hv(){ printf '%s\n' "$2" | host_verdict; }
+  ck2(){ if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "FAIL: $1 got=[$2] want=[$3]"; fail=1; fi; }
+  ck2 "host_verdict reads GREEN"   "$(hv _ '**Host live-gate (Gate B): VERDICT GREEN** - repo @ abc')" "GREEN"
+  ck2 "host_verdict reads RED"     "$(hv _ '**Host live-gate (Gate B): VERDICT RED** - repo @ abc')" "RED"
+  ck2 "THE 1b BUG: SKIPPED was invisible, now read" "$(hv _ '**Host live-gate (Gate B): SKIPPED** - `e2e-beta` @ `a5ee7f7` carries no top-level Containerfile')" "SKIPPED"
+  ck2 "prose mentioning skipped is not a verdict"   "$(hv _ 'the gate skipped it earlier')" ""
+
+  gr(){ printf '%s\n' "$2" | gate_relevant; }
+  ck2 "README is not gate-relevant"      "$(gr _ 'README.md')" "0"
+  ck2 "CI workflow is not gate-relevant" "$(gr _ '.github/workflows/build.yml')" "0"
+  ck2 "Containerfile IS gate-relevant"   "$(gr _ 'Containerfile')" "1"
+  ck2 ".live-gate IS gate-relevant"      "$(gr _ '.live-gate')" "1"
+  ck2 "run.sh IS gate-relevant"          "$(gr _ 'run.sh')" "1"
+  ck2 "Quadlet IS gate-relevant"         "$(gr _ 'e2e-beta.container')" "1"
+  ck2 "any gate-relevant file in a set taints it" "$(printf 'README.md\nrun.sh\n' | gate_relevant)" "1"
+  ck2 "empty file list is not gate-relevant"      "$(printf '' | gate_relevant)" "0"
+
+  pl(){ plan "$2" "$3" "$4" "$5" "$6"; }
+  ck2 "SKIPPED + docs-only + unreviewed -> REVIEW (unfrozen)" "$(pl _ SKIPPED A NONE 1 0)" "REVIEW"
+  ck2 "SKIPPED + docs-only + PASS -> MERGE (the freeze is over)" "$(pl _ SKIPPED A PASS 1 0)" "MERGE"
+  ck2 "SKIPPED + docs-only + RETURN -> FIX"                  "$(pl _ SKIPPED A RETURN 1 0)" "FIX"
+  ck2 "SKIPPED + GATE-RELEVANT -> NOOP (must NOT dodge the gate)" "$(pl _ SKIPPED A PASS 1 1)" "NOOP"
+  ck2 "GREEN unaffected by the new arg"   "$(pl _ GREEN A PASS 1 1)" "MERGE"
+  ck2 "RED still fixes"                   "$(pl _ RED A NONE 1 0)" "FIX"
+  ck2 "NONE still waits"                  "$(pl _ NONE A NONE 1 0)" "NOOP"
+  ck2 "back-compat: 4-arg call still works" "$(plan GREEN A PASS 1)" "MERGE"
+  ar(){ local got; got="$(anomaly_route "$2" "$3" "$4")"; [ "$got" = "$5" ] && echo "ok: $1" || { echo "FAIL: $1 anomaly_route($2,$3,$4)=$got want=$5"; fail=1; }; }
+  # The KINDS below are the ones the poller ACTUALLY emits (grep surface_or_repair/surface): asserting a
+  # route for a kind nothing can produce is a green row naming a feature that is not there.
+  ar "a brand-new anomaly repairs by DEFAULT"   stalled        0 3 REPAIR
+  ar "the wired 'cannot tell which gate' repairs" blocked      0 3 REPAIR
+  ar "the wired rebase-conflict repairs"        rebase         0 3 REPAIR
+  ar "an unknown FUTURE kind repairs"           some-new-thing 0 3 REPAIR
+  ar "mid-budget still repairs"                 stalled        2 3 REPAIR
+  ar "budget spent escalates to the human"      stalled        3 3 ESCALATE
+  ar "infra failure goes straight to human"     infra          0 3 INFRA
+  ar "a refusal is not repairable"              refused        0 3 INFRA
+  ar "a trust-boundary event is not repairable" trust          0 3 INFRA
+  # The review-* family IS the fitness gate's own machinery: summoning the model to fix "the model is
+  # unreachable" loops a broken tool on itself. These fell through to REPAIR under exact-match.
+  ar "a GLOBAL reviewer outage is NOT repairable"  review-infra-down 0 3 INFRA
+  ar "a per-head reviewer failure is NOT repairable" review-failed   0 3 INFRA
+  ar "a deliberate fitness ESCALATE is not repairable" review        0 3 INFRA
+  # enroll_pr names its kind `enroll-infra` SO THAT the existing *infra* family catches it — a missing
+  # label-write is a credential fact no code change repairs. That naming is load-bearing, so pin it here:
+  # rename the kind without the -infra suffix and the poller answers "I cannot label" by summoning a model
+  # that cannot label either. Charged at att=0, i.e. it never depends on the budget to reach the human.
+  ar "an un-addable label is NOT repairable"    enroll-infra   0 3 INFRA
+  ar "unreadable attempts -> human"             stalled        x 3 INFRA
+  ar "unreadable budget -> human"               stalled        0 x INFRA
+  ar "repair disabled (0) -> human"             stalled        0 0 INFRA
+  # STEP 3 (#274) — every stop is a PAUSE WITH A TIMER, never a dead end.
+  ml(){ local got; got="$(marker_live "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 marker_live($2,$3)=$got want=$4"; fail=1; }; }
+  ml "fresh marker still parks"                 10   1800 LIVE
+  ml "just under the TTL still parks"           1799 1800 LIVE
+  ml "at the TTL expires"                       1800 1800 EXPIRED
+  ml "THE #270 CASE: hours parked with both gates green -> expires" 20000 1800 EXPIRED
+  ml "TTL 0 disables expiry (old park-forever behaviour)" 99999 0 LIVE
+  ml "unreadable age -> LIVE (never invent a re-attempt)" x 1800 LIVE
+  ml "unreadable ttl -> LIVE"                   10   x    LIVE
   [ "$fail" = 0 ] && echo "ALL POLLER SELFTESTS PASS" || echo "POLLER SELFTESTS FAILED"
   exit "$fail"
 fi
@@ -613,6 +787,20 @@ FITNESS_LOGIN="$(fitness_login_default "$FITNESS_SAME_IDENTITY" "${FITNESS_LOGIN
 POLLER_ARMED="${POLLER_ARMED:-1}"   # ARMED BY DEFAULT (gate-free objective; #96 explicit-arm retired) — the merge-trust boundary is the distinct-App gates + auto-merge's fail-closed re-check, not this flag; POLLER_ARMED=0 is a deliberate dry-run soak
 POLL_INTERVAL="${POLL_INTERVAL:-30}"   # fixed sweep cadence (a gentler 30s; no adaptive machinery)
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
+POLLER_REPAIR_MAX="${POLLER_REPAIR_MAX:-3}"   # R39/#278: bounded repair attempts before the maintainer
+# STEP 3 of #274: how long an `acted` marker suppresses re-evaluation before it EXPIRES. Every stop is
+# a pause with a timer; 0 disables expiry (the old park-forever behaviour).
+POLLER_ACTED_TTL="${POLLER_ACTED_TTL:-1800}"
+# R39/#278 UNENROLLED-PR SELF-HEAL. DEV_LOGIN is the author identity whose PRs the loop owns and may
+# therefore enrol; ENROLL_LABEL is the host live-gate's ONLY discovery signal and must stay in lockstep
+# with bin/dev-author.sh's AUTHOR_LABEL (the two are the same enrolment, at author-time and after).
+DEV_LOGIN="${DEV_LOGIN:-oso-gato-nox-claudebox}"
+ENROLL_LABEL="${ENROLL_LABEL:-live-validate}"
+POLLER_ENROLL_MAX="${POLLER_ENROLL_MAX:-3}"   # consecutive failed enrolments before the maintainer hears about it
+# GENERATION FENCE (2026-07-28) — SHARED CONTRACT with bin/poller-service.sh: rc 92 means "I am running
+# in a container that no longer exists", and the supervisor must EXIT on it rather than relaunch.
+POLLER_ORPHAN_RC="${POLLER_ORPHAN_RC:-92}"
+BOX_GENERATION="${BOX_GENERATION:-$HERE/box-generation.sh}"
 FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
 # the isolator the fixer runs in (#152). Overridable so poller-fixer.test.sh can drive the REAL sweep.
@@ -696,8 +884,6 @@ RECONCILE_TICKS=0
 # piece, then announce the ship. Rarer cadence than the other ticks because a gate run costs a model
 # call; 0 disables. See ship_actuator_tick() for the fail-safe contract.
 SHIP_ACTUATOR="${SHIP_ACTUATOR:-$HERE/ship-actuator.sh}"
-AUTHOR_LABEL="${AUTHOR_LABEL:-live-validate}"      # the label that enrols a PR in the host live-gate
-REPO_LABELS="${REPO_LABELS:-$HERE/repo-labels.sh}" # the label CONTRACT (schema + ensure + drift audit)
 SHIP_ACTUATOR_EVERY="${SHIP_ACTUATOR_EVERY:-60}"
 SHIP_ACTUATOR_TICKS=0
 # ── DEV-LOOP LAUNCH (self-arm the authoring loop, 2026-07-19) ────────────────────────────────────────
@@ -869,6 +1055,110 @@ surface(){ # <pr> <sha> <kind> <message>
   gh pr comment "$pr" --repo "$SLUG" --body "**Poller → Arthur [$kind]:** $msg"$'\n\n<sub>dev-side poller (Step 5); no merge taken — needs your decision.</sub>' >/dev/null 2>&1 && : > "$m"
 }
 
+# surface_or_repair <pr> <ref> <sha> <kind> <reason> — THE NEW DEFAULT for an unexpected state.
+# Bounded self-repair FIRST; the maintainer only when repair is inapplicable (INFRA) or spent (ESCALATE).
+# A repair needs a real branch to commit to, so an empty ref degrades to surface() — honest, never silent.
+#
+# CONTRACT WITH THE CALLER (two channels, both load-bearing):
+#   rc        - passed through from whatever it did, so a caller that parks on a SUCCESSFUL POST keeps
+#               doing exactly that (a throttled comment must never silence a human touchpoint).
+#   SOR_ROUTE - the road actually taken (REPAIR|ESCALATE|INFRA). A caller that parks its head must NOT
+#               park a REPAIR: a repair mints a NEW head that re-gates on its own, which is PROGRESS,
+#               and parking it would strand the very PR the repair just unstuck.
+SOR_ROUTE=""
+surface_or_repair(){
+  local pr="$1" ref="$2" sha="$3" kind="$4" reason="$5"
+  local budget="$STATE/repair-${pr}-${kind}.n" att=0
+  [ -f "$budget" ] && att="$(cat "$budget" 2>/dev/null || echo 0)"
+  case "$att" in ''|*[!0-9]*) att=0 ;; esac
+  local route; route="$(anomaly_route "$kind" "$att" "$POLLER_REPAIR_MAX")"
+  [ -n "$ref" ] || route=INFRA
+  # A repair that cannot be ISOLATED is not a repair. Without a local clone to bolt a throwaway worktree
+  # off, run_fixer refuses (fail-closed, correctly) and surfaces its OWN "check the repo clone" message —
+  # which would REPLACE this anomaly's diagnosis with a note about the repair machinery, leaving the
+  # maintainer told nothing about WHY the PR is stuck. The poller sweeps repos it may hold no clone of,
+  # so this is a live state, not a hypothetical. Degrade to surface() with the REAL reason, and charge
+  # NO budget: an attempt that could never happen must not consume one of the attempts.
+  [ "$route" != REPAIR ] || clone_for "$POLLER_REPO" >/dev/null 2>&1 || route=INFRA
+  SOR_ROUTE="$route"
+  case "$route" in
+    REPAIR)
+      att=$((att+1)); printf '%s' "$att" > "$budget" 2>/dev/null
+      log "ANOMALY $SLUG#$pr @ ${sha:0:7} [$kind] repair attempt $att/$POLLER_REPAIR_MAX: $reason"
+      run_fixer "$pr" "$ref" "$sha" "ANOMALY" "$reason" ;;
+    ESCALATE)
+      log "ANOMALY $SLUG#$pr @ ${sha:0:7} [$kind] — $att/$POLLER_REPAIR_MAX attempts spent; escalating"
+      surface "$pr" "$sha" "$kind" "$reason - the loop attempted bounded self-repair $att time(s) and could not clear it; this is now a maintainer decision." ;;
+    *)
+      surface "$pr" "$sha" "$kind" "$reason" ;;
+  esac
+}
+
+# WHICH surface() CALL SITES STAY surface() — a boundary, not an oversight. The default is REPAIR, so
+# every site left alone below is left alone for a REASON, recorded here because "nobody wired it up" is
+# exactly how the first cut of this feature shipped as unreachable code:
+#   * anything INSIDE run_fixer/fix_in_tree (no-progress, no clone, unenterable worktree, FIXER_BLOCKED,
+#     no-commit, push-failed, did-not-land) — surface_or_repair CALLS run_fixer, so wiring these would
+#     re-enter the fixer from within itself. They are also, every one of them, the fixer reporting that
+#     the fixer could not run: the broken tool cannot be the repair for its own breakage.
+#   * review-failed / review-infra-down — the FITNESS GATE's own machinery. anomaly_route classifies the
+#     review-* family INFRA for the same reason; the call sites match, so neither layer stands alone.
+#   * refused — the MERGE-TRUST boundary disagreeing with the poller. A model must never be summoned to
+#     make a trust refusal go away. INFRA in anomaly_route, and it stays surface() here.
+#   * merge-failed (rc 3) — NOT stuck. It deliberately does not park and the poller re-attempts the merge
+#     every sweep until it lands; spending a model run on a state that is already self-healing is churn.
+#   * review (PRESENT) — a fitness ESCALATE is the reviewer DEFERRING a judgment call to the maintainer
+#     BY DESIGN. That is the one human path zero-gate keeps on purpose; repairing around it would route
+#     a deliberate escalation back into the machine.
+
+# UNENROLLED-PR SELF-HEAL (R39 / #278) -----------------------------------------------------------------
+# The host live-gate discovers work ORG-WIDE by the `live-validate` label and by NOTHING ELSE. So a PR the
+# loop authored but never labelled can never receive a verdict: host stays NONE, plan() stays NOOP, and the
+# poller sweeps past it in silence for as long as it stays open. Not hypothetical — the maintainer-facing
+# agent forgot the label on THREE PRs in one session (#271, #277, bootstrap#283). Enrolment must therefore
+# not depend on anyone remembering, which is exactly the #278 thesis applied to its own front door.
+#
+# DETERMINISTIC, NOT A MODEL RUN. The repair here is one idempotent label add, and the no-offload doctrine
+# cuts both ways: we do not hand the maintainer a command we can run ourselves, and we do not summon a
+# model for one either. run_fixer commits code in a worktree — it could not add a label if we asked it to.
+#
+# CREATE-ON-USE. `gh pr edit --add-label` HARD-FAILS on a label the repo does not carry, and a brand-new
+# repo carries none — that exact miss is one of the seven stalls behind #278 (it cost 12 SILENT hours). So
+# a failed add is retried ONCE behind a `gh label create`, the dev-plan.sh / host-ticket.sh precedent.
+#
+# ONE SHOT PER PR, and that is a boundary, not a bound. We heal an OMISSION; we do not fight a DECISION. If
+# the label is gone after we enrolled it, somebody removed it on purpose, and re-adding it every 30s would
+# be the loop arguing with a human. The marker is per-PR (enrolment is a PR property, not a head one); a
+# wiped box re-enrols once, which is harmless and idempotent.
+#
+# FAILURE IS BOUNDED, NOT SILENT (R4). A transient API blip must not ping the maintainer, and a permanent
+# one (no label-write on this repo) must not re-spin at sweep cadence forever telling nobody. Consecutive
+# failures are counted; at POLLER_ENROLL_MAX the state goes to surface_or_repair under the kind
+# `enroll-infra`, which anomaly_route's existing `*infra*` family already routes straight to the human —
+# correctly, because the missing capability is a credential fact no code change repairs.
+enroll_pr(){ # <pr> <ref> <sha> — rc 0 = enrolled (or already handled); rc 1 = could not
+  local pr="$1" ref="$2" sha="$3"
+  local mark="$STATE/enrolled-${pr}.done" budget="$STATE/enroll-${pr}.n" n=0
+  [ -f "$mark" ] && return 0
+  if gh pr edit "$pr" --repo "$SLUG" --add-label "$ENROLL_LABEL" >/dev/null 2>&1 \
+     || { gh label create "$ENROLL_LABEL" --repo "$SLUG" --color 1d76db \
+            --description "enrols a PR in the host live-gate — the gate discovers work by this label" \
+            --force >/dev/null 2>&1
+          gh pr edit "$pr" --repo "$SLUG" --add-label "$ENROLL_LABEL" >/dev/null 2>&1; }; then
+    : > "$mark"; rm -f "$budget"
+    log "SELF-HEAL $SLUG#$pr @ ${sha:0:7}: enrolled in the host live-gate ($ENROLL_LABEL) — a dev-authored PR that was never labelled can NEVER be verdicted, so it would have sat at host=NONE in silence"
+    return 0
+  fi
+  [ -f "$budget" ] && n="$(cat "$budget" 2>/dev/null || echo 0)"
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  n=$((n+1)); printf '%s' "$n" > "$budget" 2>/dev/null
+  log "SELF-HEAL $SLUG#$pr: could not add '$ENROLL_LABEL' (attempt $n/$POLLER_ENROLL_MAX; label create+retry also failed)"
+  if [ "$n" -ge "$POLLER_ENROLL_MAX" ]; then
+    surface_or_repair "$pr" "$ref" "$sha" "enroll-infra" "this dev-authored PR carries no \`$ENROLL_LABEL\` label, so the host live-gate will never discover it and the PR can never reach a verdict — and the poller could not add the label itself after $n attempts (a \`gh label create\` + retry included). That is a CREDENTIAL/permission fact, not a code defect: the App identity appears to lack label-write on \`$SLUG\`. REMEDIATION: grant it Issues:write on this repo, or add the \`$ENROLL_LABEL\` label to the PR by hand — either one re-enters the normal gate → fitness → merge path with no further action."
+  fi
+  return 1
+}
+
 # The rc-3 question — asked ONCE per head, and ONLY once the bounded retries are exhausted (review_due).
 # It carries the reviewer harness's REAL stderr: a question that shrugs is not a question. Re-callable on
 # every later sweep at zero cost — surface() early-exits on its own marker, and RE-POSTS if a previous
@@ -1003,6 +1293,13 @@ looking for a build or live-gate failure; there isn't one. Address the reviewer'
 the reviewer's PROSE (advisory, not a machine signal): treat them as the requirements to satisfy, use your
 own judgment on HOW, and if you believe a finding is wrong, say so via FIXER_BLOCKED rather than
 half-fixing it."
+  elif [ "$cause" = ANOMALY ]; then
+    what="Neither gate failed. The PIPELINE ITSELF reached a state it has no rule for and is STUCK — this
+PR cannot progress until that state is resolved. The stuck-state is described below. DIAGNOSE the real
+cause from the repository as it actually is, then make the MINIMAL change that lets this PR move again.
+If the right repair is NOT a change to this branch — it needs a maintainer decision, access you do not
+have, or a change to the pipeline's own rules — do NOT improvise one: end with FIXER_BLOCKED and state
+precisely what is needed."
   else
     what="The HOST LIVE-GATE returned RED — the candidate failed to build or failed its live probes.
 Address the failure below."
@@ -1242,12 +1539,12 @@ rebuild_request_tick(){
 #
 # R9 FLEET HALT (#151): the fleet-wide stop switch is read ONCE at the TOP of every tick — BEFORE any
 # model run is spawned, any merge taken, any retire close, any comment posted (R9's bound is "within
-# one sweep"). rc 0 alone means GO; ANY other outcome — a maintainer HALT, an unreadable-signal PAUSE,
-# a checker that is missing or crashed — makes the whole tick OBSERVE-ONLY: sweep_repo still enumerates
-# and logs what it WOULD do, so the operator sees the queue, but acts on nothing and writes no state
-# marker. That is fail-closed TOWARD STOPPING (R9's deliberate inversion of the loop's usual
-# fail-safe-toward-progress; the checker itself softens it — one blip PAUSES, only K consecutive
-# unreadable reads HALT: bin/fleet-halt.sh). The poller does NOT exit: HALT stops NEW action, not
+# one sweep"). rc 0 alone means GO; ANY other outcome — a maintainer HALT, or a checker that is missing
+# or crashed — makes the whole tick OBSERVE-ONLY: sweep_repo still enumerates and logs what it WOULD do,
+# so the operator sees the queue, but acts on nothing and writes no state marker. This branch is
+# unchanged by #274; what changed is UPSTREAM, inside the checker: an UNREADABLE signal no longer
+# escalates to HALT — it returns rc 0 (GO), loudly, so internet weather can no longer freeze the fleet
+# (935 halts, ZERO maintainer-thrown: bin/fleet-halt.sh). The poller does NOT exit: HALT stops NEW action, not
 # running work (in-flight fixer/merge completes; the hard kill is App-key revocation, per R9), and a
 # maintainer removing the label resumes action on the very next sweep — no restart, no re-arm.
 sweep(){
@@ -1285,16 +1582,26 @@ sweep_repo(){
   # re-fetches duplicated fields this same list already carried (2 calls/PR saved). Branch names
   # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
   # number (no torn read across a mid-sweep push).
+  #
+  # author + isDraft ride this SAME call (R39/#278 unenrolled self-heal needs both, and a second list
+  # call for two scalars the snapshot already holds would be pure waste).
+  #
+  # FIELD ORDER IS LOAD-BEARING. `IFS=$'\t' read` COLLAPSES runs of tabs — tab is IFS whitespace — so an
+  # EMPTY field in the MIDDLE folds away and slides every later field one slot left (the hazard already
+  # documented in bin/dev-loop.sh, where it slid a release count into an empty timestamp's slot). `labels`
+  # is empty on most PRs, so it must stay LAST, where a trailing tab is merely stripped and the variable
+  # reads empty — exactly as before. The two new fields therefore sit BEFORE it and neither can ever be
+  # empty: `.author.login // "-"` has a placeholder for a deleted account, and `.isDraft` is a bare bool.
   local rows
-  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid,labels \
-          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\([.labels[].name]|join(","))"' 2>/dev/null)" \
+  rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid,author,isDraft,labels \
+          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\(.author.login // "-")\t\(.isDraft)\t\([.labels[].name]|join(","))"' 2>/dev/null)" \
     || { log "pr list failed — skipping sweep"; return 0; }
   [ -n "$rows" ] || return 0                       # zero open PRs — quiet (rc 0 distinguishes it)
   # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
   # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
   # --watch flock; FD 3 is free.
-  local pr ref sha labels comments host tier fit action files fitraw ferr frc nf ef n last now since
-  while IFS=$'\t' read -r -u 3 pr ref sha labels; do
+  local pr ref sha author draft labels comments host tier fit action files fitraw ferr frc nf ef n last now since
+  while IFS=$'\t' read -r -u 3 pr ref sha author draft labels; do
     [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
     # newest host verdict authored by the trusted host bot ONLY (ignore anyone else) — bound to THIS
@@ -1308,27 +1615,10 @@ sweep_repo(){
     # dedup: act on each (pr,sha,host-verdict) at most once for the terminal actions; REVIEW/FIX manage
     # their own re-entry (fitness marker; progress signature), so only gate the whole sweep-action here.
     local done="$STATE/acted-${pr}-${sha}-${host}.done"
-    # R39 SELF-HEAL — UNENROLLED PR (2026-07-27). An open PR with NO live-validate label can never get a
-    # host verdict, so the gate is never reached and this sweep logs `host=NONE ⇒ NOOP` forever. That is
-    # exactly what happened on e2e-beta: 6 authored PRs, 1,142 sweeps, 12 hours, ZERO alarms — and the
-    # stall detector could not see it either, because it watches PRs that CARRY the label. The label is
-    # a mutable marker being used as pipeline state; its absence is a MECHANICAL condition the loop can
-    # repair, not a human question. So: establish the label contract and enrol the PR. Bounded by a
-    # per-PR marker so a repo that genuinely refuses the label is tried once, then surfaced — never a
-    # silent spin. Additive: on failure it logs and falls through to the existing behaviour.
-    if [ "$host" = NONE ] && ! printf '%s' ",$labels," | grep -qF ",${AUTHOR_LABEL:-live-validate},"; then
-      local enrol="$STATE/enrol-${pr}.tried"
-      if [ ! -e "$enrol" ]; then
-        : > "$enrol"
-        log "#$pr ${sha:0:7} — UNENROLLED (no ${AUTHOR_LABEL:-live-validate} label ⇒ can never be gated); repairing"
-        "${REPO_LABELS:-$HERE/repo-labels.sh}" ensure "$POLLER_REPO" >/dev/null 2>&1 || true
-        if gh pr edit "$pr" --repo "$SLUG" --add-label "${AUTHOR_LABEL:-live-validate}" >/dev/null 2>&1; then
-          log "#$pr enrolled in the host live-gate — it will be gated on the next sweep"
-        else
-          surface "$pr" "$sha" "unenrolled" "this PR carries no \`${AUTHOR_LABEL:-live-validate}\` label, so the host live-gate can never see it and the loop would NOOP on it forever. Auto-enrolment FAILED (the label could not be applied). The pipeline vocabulary is declared in bin/repo-labels.sh — run \`repo-labels.sh ensure ${POLLER_REPO}\` and re-label." || true
-        fi
-      fi
-    fi
+    # NB the UNENROLLED-PR self-heal lives in enroll_pr(), reached from the host=NONE routing arm below
+    # (#282). It is deliberately NOT here: enrolment must be gated on the PR being DEV-AUTHORED and NOT a
+    # DRAFT, and both facts are read in that arm. Labelling a stranger's PR into an autonomous merge
+    # pipeline is not ours to do, and enrolling a draft races dev-author's own draft → ready → label handoff.
     # TERMINAL-STATE SKIP: once (pr,sha,GREEN) has ACTED (PRESENT posted / dry-run decided / merge
     # attempted), no further action exists for this tuple — the case arms below would only hit
     # their own `[ -f "$done" ] && continue`. Skip the GREEN-moment fetches too, so a PARKED GREEN
@@ -1337,7 +1627,16 @@ sweep_repo(){
     # REVIEW-pending PR never holds this marker (fitness re-entry unaffected); FIX never writes it.
     # NB (pre-existing semantics, unchanged): a dry-run marker also blocks a later ARMED merge of
     # the same (pr,sha) — arming re-routes only new heads; part of the #96 flip discussion.
-    [ -f "$done" ] && { log "#$pr ${sha:0:7} host=$host — acted, parked"; continue; }
+    if [ -f "$done" ]; then
+      _mage=$(( $(date +%s) - $(stat -c %Y "$done" 2>/dev/null || date +%s) ))
+      if [ "$(marker_live "$_mage" "$POLLER_ACTED_TTL")" = LIVE ]; then
+        log "#$pr ${sha:0:7} host=$host — acted, parked (${_mage}s/${POLLER_ACTED_TTL}s)"; continue
+      fi
+      # The timer ran out. The marker recorded an action that may never have completed — #270 sat here
+      # with BOTH gates green for hours because its sweep was killed after the marker was written.
+      log "#$pr ${sha:0:7} host=$host — acted-marker EXPIRED after ${_mage}s (> ${POLLER_ACTED_TTL}s); RE-EVALUATING (a stop is a pause with a timer, never a dead end)"
+      rm -f "$done" 2>/dev/null || true
+    fi
     # BATCHED gate reads: plan() consults tier + fitness ONLY on GREEN — so fetch them ONLY then
     # (a NOOP/RED PR costs exactly one comments call per sweep). Both GREEN-moment fetches are
     # rc-checked and SKIP this PR for THIS sweep on a transient failure (retry next sweep) — they
@@ -1365,7 +1664,25 @@ sweep_repo(){
         fit="$(printf '%s' "$fitraw" | fitness_verdict)"; fit="${fit:-NONE}"
       fi
     fi
-    action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED")"
+    # MOVE 1b (#274): a SKIPPED host verdict is merge-eligible ONLY for a PR that changes nothing the
+    # gate exists to validate. Fetch the file list ONLY when it can change the decision (host=SKIPPED),
+    # so the common GREEN/RED path costs no extra API call. Unreadable ⇒ treat as GATE-RELEVANT: the
+    # fail-safe direction is to withhold the merge, never to grant one on missing evidence.
+    local gaterel=0
+    if [ "$host" = SKIPPED ]; then
+      local _files
+      if _files="$(timeout 20 gh pr view "$pr" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null)" \
+         && [ -n "$_files" ]; then
+        gaterel="$(printf '%s\n' "$_files" | gate_relevant)"
+      else
+        gaterel=1
+        log "#$pr SKIPPED but the changed-file list is UNREADABLE — treating as gate-relevant (fail-safe: no merge on missing evidence)"
+      fi
+      [ "$gaterel" = 1 ] \
+        && log "#$pr host=SKIPPED and the PR touches the image/run/gate contract — NOT merge-eligible; waiting for a base advance to re-gate" \
+        || log "#$pr host=SKIPPED and the PR touches nothing the gate validates — NEUTRAL PASS, routing on fitness alone"
+    fi
+    action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED" "$gaterel")"
     log "#$pr ${sha:0:7} host=$host tier=$tier fitness=$fit ⇒ $action"
     # R9 HALT (#151): OBSERVE-ONLY — the decision above is LOGGED (the operator sees the queue) but not
     # acted on: no fixer model run, no review model run, no merge, no PRESENT/blocked comment — and no
@@ -1381,7 +1698,8 @@ sweep_repo(){
         # almost certainly SKIPPED this sha (a stale host .done marker, or a transient fetch-failure
         # deduped as delivered) and will NOT re-gate on its own — SURFACE it once rather than NOOP
         # forever. Age = the head commit's committer date (GitHub truth). One `gh api` per stuck head
-        # until surfaced, then the surface marker suppresses it. Unlabelled host=NONE stays a quiet NOOP.
+        # until surfaced, then the surface marker suppresses it. An UNLABELLED head is no longer a quiet NOOP —
+        # it takes the self-heal arm below (R39/#278), because unlabelled means the gate will never look.
         case ",$labels," in
           *,live-validate,*)
             [ -f "$STATE/surfaced-${pr}-${sha}-stalled.done" ] && continue
@@ -1390,8 +1708,28 @@ sweep_repo(){
             [ -n "$cdate" ] || continue
             age=$(( $(date +%s) - $(date -d "$cdate" +%s 2>/dev/null || echo 0) ))
             if [ "$(stall_verdict NONE 1 "$age" "$POLLER_STALL_MAX")" = STALL ]; then
-              surface "$pr" "$sha" "stalled" "this \`live-validate\`-labelled head has had NO host live-gate verdict for ~$((age/60))m (surfacing bound $((POLLER_STALL_MAX/60))m). The host gate produced no GREEN/RED for \`${sha:0:7}\` and will not re-gate on its own — most likely it SKIPPED this sha (a stale per-(repo,sha) \`.done\` marker on the host, or a transient PR-head fetch-failure deduped as a delivered SKIP; audit CAT-01/CAT-04). REMEDIATION: on the host, remove \`~/.local/state/live-gate/$(basename "$SLUG")-${sha}.done\` to force a re-gate, or push a new commit. (R18 idle-with-work-pending — the poller had been silently NOOPing on this since the head was pushed.)"
+              # R39/#278 — REPAIR FIRST. A head the host gate will never re-verdict is the archetypal
+              # stuck pipeline, and its own remediation text names an act the fixer can perform: push a
+              # new commit, which mints a head the gate has no `.done` marker for. Bounded twice over —
+              # POLLER_REPAIR_MAX attempts, and run_fixer's no-progress stop if a repair changes nothing.
+              surface_or_repair "$pr" "$ref" "$sha" "stalled" "this \`live-validate\`-labelled head has had NO host live-gate verdict for ~$((age/60))m (surfacing bound $((POLLER_STALL_MAX/60))m). The host gate produced no GREEN/RED for \`${sha:0:7}\` and will not re-gate on its own — most likely it SKIPPED this sha (a stale per-(repo,sha) \`.done\` marker on the host, or a transient PR-head fetch-failure deduped as a delivered SKIP; audit CAT-01/CAT-04). REMEDIATION: on the host, remove \`~/.local/state/live-gate/$(basename "$SLUG")-${sha}.done\` to force a re-gate, or push a new commit. (R18 idle-with-work-pending — the poller had been silently NOOPing on this since the head was pushed.)"
             fi
+            ;;
+          *)
+            # R39/#278 — UNENROLLED-PR SELF-HEAL. host=NONE on an UNLABELLED PR is not "the gate has not
+            # got to it yet": the gate discovers work by this label alone, so it will never look. The old
+            # comment above called this "a quiet NOOP" — quiet is precisely the defect, and it is the same
+            # shape as every other #278 stall (a state with no rule, answered by silence). See enroll_pr:
+            # dev-authored only (never a foreign contributor's PR), never a draft (dev-author opens draft →
+            # ready → label, so a draft is mid-authoring, not forgotten), one shot per PR.
+            # NORMALISE THE AUTHOR BEFORE COMPARING (bin/objective-status.sh does the same, for the same
+            # reason): gh renders an App author as `app/<login>`, and some paths append `[bot]`. Every PR
+            # this self-heal exists for is App-authored, so a raw `=` against DEV_LOGIN would match NONE
+            # of them — the feature would ship green, dead, and silent, which is the #278 defect itself.
+            local pauthor="${author#app/}"; pauthor="${pauthor%\[bot\]}"
+            [ "$pauthor" = "$DEV_LOGIN" ] || continue
+            [ "$draft" = false ] || continue
+            enroll_pr "$pr" "$ref" "$sha" || true
             ;;
         esac
         ;;
@@ -1428,8 +1766,13 @@ sweep_repo(){
                        2>/dev/null | head -c 6000)"
             reason="${reason:-the independent fitness review RETURNed this head; see its verdict comment on the PR}" ;;
           *)
-            log "#$pr: FIX routed with no known cause (host=$host fitness=$fit) — refusing to invent a reason"
-            surface "$pr" "$sha" "blocked" "the poller routed this PR to the fixer but cannot tell which gate failed (host=$host, fitness=$fit) — a human decision is needed."
+            # R39/#278 — the PUREST unanticipated state there is: plan() routed FIX, so a gate DID fail,
+            # yet neither gate's comment body can be read to say which. The poller still refuses to
+            # INVENT a reason (the #135 R6 rule that stops the fixer hunting a failure that never
+            # happened) — it hands the model the TRUE one: the pipeline disagrees with itself, here are
+            # the raw verdict tokens, diagnose from the repo. INFRA/spent still reach the maintainer.
+            log "#$pr: FIX routed with no known cause (host=$host fitness=$fit) — refusing to invent a reason; routing to bounded self-repair"
+            surface_or_repair "$pr" "$ref" "$sha" "blocked" "the poller routed this PR to the fixer but cannot tell which gate failed (host=$host, fitness=$fit): plan() saw a failing gate, but neither the host nor the fitness comment body for \`${sha:0:7}\` could be read to say which. No gate reason is being invented here — that is the whole finding."
             continue ;;
         esac
         run_fixer "$pr" "$ref" "$sha" "$cause" "$reason"
@@ -1547,8 +1890,13 @@ sweep_repo(){
                 echo $((rc_n+1)) > "$rn"
                 log "#$pr auto-rebased onto main (behind, clean) — attempt $((rc_n+1))/$POLLER_REBASE_MAX; the new head re-gates, NOT parked (CAT-17)"
               else
-                surface "$pr" "$sha" "rebase" "auto-merge could not merge (behind \`main\` / conflict), and the poller's bounded auto-rebase then $( [ "$(rebase_due "$rc_n" "$POLLER_REBASE_MAX")" = GIVEUP ] && echo "hit its bound ($POLLER_REBASE_MAX attempts) — the head keeps falling behind" || echo "could not update-branch — likely a genuine merge CONFLICT to resolve by hand"). All gates were GREEN+PASS; NOT a merge-trust refusal. Rebase + push and it re-gates and auto-merges." \
-                  && : > "$done"
+                # R39/#278 — a genuine merge CONFLICT is a stuck pipeline the model can actually clear
+                # (resolving a conflict on the PR's own branch is ordinary dev work), so try bounded
+                # repair before spending the human. PARKING IS GATED ON THE ROAD TAKEN: a REPAIR mints a
+                # new head that re-gates, so parking it would strand the PR the repair just unstuck —
+                # only a surfaced (INFRA/spent) outcome parks, and then still only on a SUCCESSFUL post.
+                if surface_or_repair "$pr" "$ref" "$sha" "rebase" "auto-merge could not merge (behind \`main\` / conflict), and the poller's bounded auto-rebase then $( [ "$(rebase_due "$rc_n" "$POLLER_REBASE_MAX")" = GIVEUP ] && echo "hit its bound ($POLLER_REBASE_MAX attempts) — the head keeps falling behind" || echo "could not update-branch — likely a genuine merge CONFLICT to resolve by hand"). All gates were GREEN+PASS; NOT a merge-trust refusal. Rebase + push and it re-gates and auto-merges." \
+                   && [ "$SOR_ROUTE" != REPAIR ]; then : > "$done"; fi
               fi
               ;;
           3) surface "$pr" "$sha" "merge-failed" "auto-merge's merge command failed for a non-gate reason (transient / the head moved) — NOT a merge-trust refusal. The poller keeps retrying the merge every sweep until it lands or the head moves (this comment posts once; see poller.log)." ;;
@@ -1622,6 +1970,20 @@ case "${1:-}" in
     log "pr-poller --watch up (repo=$SLUG interval=${POLL_INTERVAL}s armed=$POLLER_ARMED self-refresh=$SELF_REFRESH every=${SELF_REFRESH_EVERY} sweeps running=${LAUNCH_HEAD:0:7})"
     sweeps=0
     while :; do
+      # GENERATION FENCE (2026-07-28) — FIRST, and before any work. The box can be REBUILT underneath a
+      # running poller: the old container is torn down while this process keeps executing against its
+      # destroyed rootfs. Anything already resolved keeps working (bash, date, grep) and anything looked
+      # up fresh does not — `gh` vanishes with the deleted upper layer. The poller then sweeps forever,
+      # fails every call, and looks perfectly healthy: process alive, log advancing, clone not behind.
+      # That state stood for SIX DAYS and self-inflicted a fleet-wide R9 HALT (fleet-halt.sh reads its
+      # signal only through `gh api`), which then gated the very ticket that could have repaired the box.
+      # Exiting is the ONLY correct move — the supervisor cannot relaunch us into the live box until we
+      # let go. Advisory by construction: box-generation.sh returns 0 on ANY uncertainty, so an
+      # unstamped or unreadable box can never be killed by this.
+      if [ -x "$BOX_GENERATION" ] && ! "$BOX_GENERATION" check; then
+        log "GENERATION-ORPHAN — running in a container that is no longer live; exiting rc=$POLLER_ORPHAN_RC for a supervised relaunch in the LIVE box"
+        exit "$POLLER_ORPHAN_RC"
+      fi
       # SELF-REFRESH (#162) AT A SAFE POINT. This check sits at the TOP of the loop, OUTSIDE sweep(), so
       # it can only fire BETWEEN sweeps — never mid-fixer/review/merge (all synchronous inside sweep(), so
       # "never mid-sweep" IS "never mid-fixer"). Rate-limited to once per SELF_REFRESH_EVERY sweeps (req
