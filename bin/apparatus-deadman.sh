@@ -103,6 +103,10 @@ DEADMAN_UNREADABLE_MAX="${DEADMAN_UNREADABLE_MAX:-3}"  # consecutive unreadable 
 DEADMAN_EXPECT_POLLER="${DEADMAN_EXPECT_POLLER:-1}"    # 1 = a poller SHOULD be running (alarm when absent)
 DEADMAN_CLONE="${DEADMAN_CLONE:-$(dirname "$HERE")}"   # bin/ sits inside the live clone
 DEADMAN_REMOTE="${DEADMAN_REMOTE:-origin}"
+# WORK-PROGRESS axis (R18 IDLE-WITH-WORK-PENDING, 2026-07-28). How long open work may sit with NO state
+# change before it is an alarm. 0 disables.
+DEADMAN_WORK_STALL_MAX="${DEADMAN_WORK_STALL_MAX:-2700}"   # 45 min
+DEADMAN_WORK_REPOS="${DEADMAN_WORK_REPOS:-}"               # default: the R16 installed set
 DEADMAN_BRANCH="${DEADMAN_BRANCH:-main}"
 # @mention the maintainer at the TOP of the anomaly-issue BODY → when the issue is OPENED, GitHub
 # push-notifies that user, so the GitHub MOBILE APP (with "Direct Mentions" push on) rings the phone —
@@ -249,6 +253,23 @@ respond_plan(){
 }
 
 # ── SELFTEST — the pure core only, so it can run anywhere (CI, a bare shell) with no side effects ──────
+# work_stall_verdict <fingerprint> <prev-fingerprint> <unchanged-seconds> <max> → a reason line, or empty.
+# THE AXIS THAT WAS MISSING. Every other axis asks "is the machine RUNNING?" — poller alive, log fresh,
+# token minted, clone not behind. A poller that sweeps happily and NOOPs forever passes ALL of them.
+# On 2026-07-27 six authored PRs sat ungated for 12 HOURS while the poller logged `host=NONE ⇒ NOOP`
+# 1,142 times: fresh log, live process, zero alarms. The watchdog was measuring LIVENESS OF THE PROCESS
+# instead of PROGRESS OF THE WORK. This asks the other question: there IS open work, and its state has
+# not changed in too long. Empty fingerprint = no open work = nothing to be stalled about (quiet).
+work_stall_verdict(){
+  local fp="$1" prev="$2" age="$3" max="$4"
+  [ "${max:-0}" -gt 0 ] 2>/dev/null || return 0        # axis disabled
+  [ -n "$fp" ] || return 0                             # no open work → quiet
+  [ "$fp" = "$prev" ] || return 0                      # state changed → progress → quiet
+  case "$age" in ''|*[!0-9]*) return 0;; esac
+  [ "$age" -ge "$max" ] || return 0
+  printf 'WORK_STALLED|open work has not changed state in ~%s min (bound %ss): the loop is ALIVE but nothing is MOVING. Every liveness axis (poller up, log fresh, token minted) reads healthy — this is the IDLE-WITH-WORK-PENDING case (R18). Check the open PRs: are they gated? enrolled? waiting on a verdict that will never come?\n' "$(( age / 60 ))" "$max"
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   p=0 f=0
   ck(){ if [ "$2" = "$3" ]; then p=$((p+1)); printf '  ok   %s\n' "$1"
@@ -331,6 +352,16 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "MERGED_NOT_LIVE → SURFACE (never pull)" "$(respond_plan MERGED_NOT_LIVE 0 - 1)" SURFACE
   ck "CANNOT_VERIFY → SURFACE"               "$(respond_plan CANNOT_VERIFY 0 - 1)" SURFACE
 
+  echo "== work_stall_verdict — the axis that was MISSING on 2026-07-27 =="
+  wf(){ [ -n "$(work_stall_verdict "$1" "$2" "$3" "$4")" ] && echo FIRE || echo quiet; }
+  WFP="e2e-beta#9 abc 0 live-validate"
+  ck "THE INCIDENT: open work frozen 12h FIRES" "$(wf "$WFP" "$WFP" 43200 2700)" "FIRE"
+  ck "at the bound FIRES"                       "$(wf "$WFP" "$WFP" 2700 2700)" "FIRE"
+  ck "no open work = quiet (not stalled)"       "$(wf "" "" 99999 2700)" "quiet"
+  ck "a verdict ARRIVED = progress = quiet"     "$(wf "$WFP" "e2e-beta#9 abc 1 live-validate" 99999 2700)" "quiet"
+  ck "under the bound = quiet"                  "$(wf "$WFP" "$WFP" 600 2700)" "quiet"
+  ck "axis disabled (0) = quiet"                "$(wf "$WFP" "$WFP" 99999 0)" "quiet"
+  ck "unreadable age = quiet (no false alarm)"  "$(wf "$WFP" "$WFP" "" 2700)" "quiet"
   echo; echo "apparatus-deadman selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
 fi
@@ -564,6 +595,21 @@ fmt_body(){
   printf '\n<sub>apparatus liveness deadman (R18); an INDEPENDENT watcher that never merges and never pulls/merges/resets the clone. Under --watch it also RESPONDS within a safe envelope (quarantine untracked strays; SIGTERM a wedged poller) and records what it did here. This issue is updated in place while any anomaly stands and closed automatically when the loop is healthy again.</sub>\n'
 }
 
+# work_fingerprint → one line per open PR of ours across the in-scope repos:
+# "<repo>#<n> <head-sha> <gated:0|1> <labels>". ANY change (new PR, new head, a verdict arriving, a
+# merge, a label) changes the fingerprint and proves progress. Unreadable → empty → quiet (never a
+# false alarm from a GitHub blip; the CANNOT_VERIFY axis owns that failure).
+work_fingerprint(){
+  local repos="$DEADMAN_WORK_REPOS" r
+  [ -n "$repos" ] || repos="$("$(dirname "$(readlink -f "$0")")/repo-scope.sh" list 2>/dev/null)"
+  [ -n "$repos" ] || return 0
+  for r in $repos; do
+    gh pr list --repo "oso-gato/$r" --state open --limit 50 \
+       --json number,headRefOid,labels,comments \
+       -q ".[] | \"$r#\(.number) \(.headRefOid[0:12]) \([.comments[]|select(.body|test(\"Host live-gate|Fitness review\"))]|length) \([.labels[].name]|sort|join(\",\"))\"" 2>/dev/null
+  done | sort
+}
+
 # surface_anomaly <reasons> [resp-notes] — create-or-UPDATE the ONE issue, dedup via the marker + by-title
 # discovery. The responder's audit notes ride the body so the record shows what auto-recovery did.
 surface_anomaly(){
@@ -633,6 +679,17 @@ run_check(){
   # it here so a stale token surfaces even during a git blip (empty git-axis) or a healthy sweep.
   local freason; freason="$(fitness_token_verdict "$(fitness_env_age)" "$DEADMAN_FITNESS_STALE_MAX")"
   [ -n "$freason" ] && reasons="${reasons:+$reasons$'\n'}$freason"
+  # WORK-PROGRESS axis — independent of every liveness axis above, and the one that was missing.
+  local _wfp _wprev _wf="$DEADMAN_STATE/work.fp" _wage=0 _wreason
+  _wfp="$(work_fingerprint)"
+  _wprev="$(cat "$_wf" 2>/dev/null || true)"
+  if [ "$_wfp" != "$_wprev" ]; then
+    printf '%s' "$_wfp" > "$_wf" 2>/dev/null; touch "$_wf" 2>/dev/null      # progress → reset the clock
+  else
+    _wage=$(( $(date +%s) - $(stat -c %Y "$_wf" 2>/dev/null || date +%s) ))
+  fi
+  _wreason="$(work_stall_verdict "$_wfp" "$_wprev" "$_wage" "$DEADMAN_WORK_STALL_MAX")"
+  [ -n "$_wreason" ] && reasons="${reasons:+$reasons$'\n'}$_wreason"
 
   if [ -z "$reasons" ]; then
     if [ "$unreadable_now" = 1 ]; then
