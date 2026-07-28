@@ -284,7 +284,8 @@ fi
 # --- R9 FLEET HALT (#151). The old --watch hard-refusal is LIFTED BY #151 ITSELF (its req 9) and
 # --- replaced by the REAL interlock it stood in for: one_pass() reads the fleet HALT switch
 # --- (bin/fleet-halt.sh — its own contract suite is fleet-halt.test.sh) at the TOP of every pass,
-# --- BEFORE any author model run spawns. rc 0 alone is GO; HALT/PAUSE/a dead checker ⇒ OBSERVE-ONLY.
+# --- BEFORE any author model run spawns. rc 0 alone is GO; a maintainer HALT or a dead checker ⇒
+# --- OBSERVE-ONLY (rc 20/PAUSE is retired — since #274 an unreadable signal reads GO, see #274 STEP 3).
 # --- These rows are the mutation detectors requirement 8 demands: delete the halt check from
 # --- one_pass() and every one of them fails (authors spawn under HALT).
 echo "== R9 FLEET HALT (#151): a HALTED pass spawns NO author run — observe-only =="

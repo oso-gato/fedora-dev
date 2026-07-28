@@ -114,9 +114,9 @@
 # one_pass() reads the fleet-wide HALT switch (bin/fleet-halt.sh: a maintainer-applied `halt` label on
 # the FLEET HALT CONTROL issue in the control repo — maintainer-BOUND like every fleet trust anchor, so
 # the loop can neither halt nor UN-halt itself) at the TOP of every pass, BEFORE any author model run is
-# spawned. rc 0 alone means GO. Anything else — a maintainer HALT, an unreadable-signal PAUSE, a checker
-# that cannot run at all — makes the pass OBSERVE-ONLY (fail-closed TOWARD STOPPING, R9's deliberate
-# inversion of the loop's usual fail-safe-toward-progress): the backlog is still enumerated and logged,
+# spawned. rc 0 alone means GO. Anything else — a maintainer HALT, or a checker that cannot run at all
+# (rc 20/PAUSE is retired: since #274 an UNREADABLE signal reads GO, loudly, rather than escalating to a
+# halt nobody threw) — makes the pass OBSERVE-ONLY: the backlog is still enumerated and logged,
 # so the operator sees the queue, but nothing spawns and nothing is filed. HALT stops NEW action only —
 # an author run already in flight completes (killing it mid-push is how work is lost; the hard kill is
 # App-key revocation, per R9); a maintainer removing the label resumes on the next pass, no restart.
@@ -473,8 +473,8 @@ one_pass(){ # <repo>
     return 0
   fi
   # R9 FLEET HALT (#151) — read at the TOP of every pass, BEFORE any author model run is spawned (R9's
-  # bound is "within one sweep"). rc 0 alone means GO; a maintainer HALT, an unreadable-signal PAUSE, or
-  # a checker that cannot run at all (fail-closed toward stopping BY CONSTRUCTION — rc 127 is not rc 0)
+  # bound is "within one sweep"). rc 0 alone means GO; a maintainer HALT, or a checker that cannot run
+  # at all (fail-closed BY CONSTRUCTION — rc 127 is not rc 0; rc 20/PAUSE is retired, see #274)
   # makes this pass OBSERVE-ONLY: the backlog is still enumerated and logged below, so the operator sees
   # the queue, but no author run spawns and nothing is filed. Un-halt resumes on the next pass.
   local halted=0 hmsg

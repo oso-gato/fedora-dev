@@ -2,7 +2,7 @@
 # fleet-halt.test.sh — MOCK dry-run of bin/fleet-halt.sh, the R9 fleet HALT reader (#151). Stubs `gh`
 # on PATH (answering at gh's own `-q` OUTPUT level, like every other suite's stub) and drives the REAL
 # checker through the states its contract promises, asserting BOTH channels callers rely on: the exit
-# code (rc 0 = RUN is the ONLY "go"; 10 = HALT; 20 = PAUSE) and the first word of the stdout line.
+# code (rc 0 = RUN is the ONLY "go"; 10 = HALT; rc 20/PAUSE is RETIRED) and the first word of stdout.
 #
 # THE ROWS THAT BITE (the #151 acceptance set):
 #   * a MAINTAINER-applied `halt` halts — and an APP-applied one is INERT: presence-only reading of the
@@ -12,9 +12,11 @@
 #   * an App REMOVING a maintainer's `halt` does NOT un-halt (the fold decides by the newest MAINTAINER
 #     event, never by presence) — the mirror hole, closed.
 #   * ABSENT is a definite "no halt asserted" ⇒ RUN — a tidied-away control issue must never freeze the
-#     fleet (#151's deployment-hazard note) — while an UNREADABLE signal PAUSES, and only K CONSECUTIVE
-#     unreadable reads escalate to HALT (the deliberate, softened fail-closed inversion). A clean read
-#     resets the escalation.
+#     fleet (#151's deployment-hazard note) — and so, since STEP 3 of #274, is an UNREADABLE signal: it
+#     RUNS (logged, and loudly past K consecutive failures) and NEVER escalates to HALT. Measured: the
+#     old fail-closed direction produced 935 halts of which ZERO were maintainer-thrown. A clean read
+#     resets the streak, which now governs only how loudly the read logs — never whether work proceeds.
+#     ONLY a READ, PRESENT, maintainer-applied label halts, and the HALT rows below still prove it does.
 #   * a decoy issue matching the title cannot MASK a halted control (all matches are read, any HALT wins).
 #
 # Run:  bash fleet-halt.test.sh   → exit 0 = all rows pass.  No GitHub / network / model.
@@ -54,7 +56,7 @@ pass=0; fail=0; T=$'\t'
 ck(){ if [ "$2" = "$3" ]; then pass=$((pass+1)); printf '  ok   %s\n' "$1"
       else fail=$((fail+1)); printf '  FAIL %s\n       got=[%s] want=[%s]\n' "$1" "$2" "$3"; fi; }
 
-# fresh — an isolated scenario: its own state dir (the PAUSE→HALT counter), bus stores, roles.
+# fresh — an isolated scenario: its own state dir (the consecutive-unreadable counter), bus stores, roles.
 CN=0
 fresh(){
   CN=$((CN+1)); CASE="$ROOT/case-$CN"; mkdir -p "$CASE/state" "$CASE/tl" "$CASE/roles"
@@ -114,27 +116,35 @@ ${CONTROL}"
 tl 128 "labeled${T}arthur"                            # decoy #900 has no events at all
 check; ck "unlabelled decoy + halted control → HALT" "$(word1)/$RC" "HALT/10"
 
-echo "== UNREADABLE signal: PAUSE, then only K CONSECUTIVE failures escalate to HALT =="
+echo "== UNREADABLE signal: RUN — loud past K CONSECUTIVE failures, but NEVER a HALT (#274 STEP 3) =="
 fresh; FAKE_SEARCH="$CONTROL"; export FAKE_SEARCH_RC=1
-check; ck "1st failed read → PAUSE rc 20"  "$(word1)/$RC" "PAUSE/20"
-check; ck "2nd failed read → PAUSE"        "$(word1)/$RC" "PAUSE/20"
-check; ck "3rd consecutive → HALT (K=3 default)" "$(word1)/$RC" "HALT/10"
-ck "…which says it is the unreadable-signal escalation, not a maintainer" \
-   "$(printf '%s' "$OUT" | grep -c 'unreadable')" "1"
+check; ck "1st failed read → RUN rc 0"     "$(word1)/$RC" "RUN/0"
+ck "…quietly, naming the streak so the operator can see it building" \
+   "$(printf '%s' "$OUT" | grep -cF '(1/3)')" "1"
+check; ck "2nd failed read → RUN"          "$(word1)/$RC" "RUN/0"
+check; ck "3rd consecutive → STILL RUN (K=3 no longer escalates to a halt)" "$(word1)/$RC" "RUN/0"
+ck "…and now says so LOUDLY, and that this is NOT a halt" \
+   "$(printf '%s' "$OUT" | grep -cF 'not a halt')" "1"
+ck "…and the loud line is on stderr too (the caller's log sees the real problem)" \
+   "$(printf '%s' "$ERR" | grep -c 'CONTINUING ANYWAY')" "1"
+check; ck "4th consecutive → RUN"          "$(word1)/$RC" "RUN/0"
+check; ck "5th consecutive → RUN (a long outage is weather, not a maintainer's halt)" "$(word1)/$RC" "RUN/0"
 export FAKE_SEARCH_RC=0
-check; ck "a clean read RESETS the escalation → RUN" "$(word1)/$RC" "RUN/0"
+check; ck "a clean read RESETS the streak → RUN" "$(word1)/$RC" "RUN/0"
 export FAKE_SEARCH_RC=1
-check; ck "…so the next single blip is a PAUSE (1/3) again" "$(word1)/$RC" "PAUSE/20"
+check; ck "…so the next single blip is quiet again, still RUN" "$(word1)/$RC" "RUN/0"
+ck "…the streak restarted at 1" "$(printf '%s' "$OUT" | grep -cF '(1/3)')" "1"
 
-echo "== an unreadable TIMELINE pauses the same way (every structural read is gated) =="
+echo "== an unreadable TIMELINE runs the same way (no structural read can stop the fleet) =="
 fresh; FAKE_SEARCH="$CONTROL"; export FAKE_TL_RC=1
-check; ck "timeline fetch failed → PAUSE" "$(word1)/$RC" "PAUSE/20"
+check; ck "timeline fetch failed → RUN" "$(word1)/$RC" "RUN/0"
 
-echo "== an UNRESOLVABLE actor role pauses (bias toward stopping — it might be a maintainer) =="
+echo "== an UNRESOLVABLE actor role RUNS (a role we cannot read is not evidence of a halt) =="
 fresh; FAKE_SEARCH="$CONTROL"; tl 128 "labeled${T}arthur"; export FAKE_PERM_RC=1
-check; ck "role lookup failed on a halt event → PAUSE, never a silent RUN" "$(word1)/$RC" "PAUSE/20"
+check; ck "role lookup failed on a halt event → RUN, never a guessed halt" "$(word1)/$RC" "RUN/0"
 export FAKE_PERM_RC=0
-check; ck "…and resolves to HALT the moment the role reads again" "$(word1)/$RC" "HALT/10"
+check; ck "…and resolves to HALT the moment the role reads again (the signal still bites)" \
+   "$(word1)/$RC" "HALT/10"
 
 echo "== fail-closed BY CONSTRUCTION: callers branching on rc treat a dead checker as 'no go' =="
 "$ROOT/no-such-checker" >/dev/null 2>&1; rc=$?
