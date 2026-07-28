@@ -424,6 +424,37 @@ fitness_login_default(){ # <same_identity> <current_login>
   else printf 'oso-gato-fitness-claudebox'; fi
 }
 
+# GENERAL ANOMALY REPAIR (R39, 2026-07-28) ------------------------------------------------------------
+# WHY: on 2026-07-27 six PRs sat ungated for TWELVE HOURS. The trigger was a state nobody had written a
+# rule for (a label that did not exist on a new repo), and the pipeline's answer to "a state I have no
+# rule for" was its answer to every surprise: LOG IT, MARK IT BLOCKED, WAIT FOR A HUMAN. Seven distinct
+# stalls in one session, none of them predicted, each hand-patched after the fact. Writing down every way
+# the world can surprise a machine does not converge; the tail is unbounded.
+#
+# THE CURE WAS ALREADY BUILT AND WIRED SHUT. run_fixer summons a model to diagnose and repair — but it
+# could only be reached from TWO anticipated states (host RED, fitness RETURN). Every other surprise took
+# the road to the human. This routes the UNANTICIPATED TAIL to the same proven door.
+#
+# anomaly_route <kind> <attempts> <max> -> INFRA | ESCALATE | REPAIR   (pure; --selftest covers it)
+#   INFRA    - the anomaly IS the repair machinery (no clone, no worktree, push failed, reviewer down),
+#              or a budget we cannot read. Fixing a broken tool with itself loops, so these go STRAIGHT
+#              to the human exactly as before. Anything unparseable also lands here: fail-safe.
+#   ESCALATE - the bounded attempts are spent. The human is the LAST resort, never the first.
+#   REPAIR   - hand it to the fixer.
+# THE DEFAULT IS REPAIR. A future call site that surfaces some new anomaly inherits self-repair without
+# anyone remembering to wire it up. That inversion is the entire point: the old default was "ask a human".
+anomaly_route(){
+  local kind="${1-}" att="${2-}" max="${3-}"
+  case "$kind" in
+    infra|refused|escalate|trust) printf 'INFRA\n'; return 0 ;;
+  esac
+  case "$att" in ''|*[!0-9]*) printf 'INFRA\n'; return 0 ;; esac
+  case "$max" in ''|*[!0-9]*) printf 'INFRA\n'; return 0 ;; esac
+  [ "$max" -le 0 ] && { printf 'INFRA\n'; return 0; }
+  [ "$att" -ge "$max" ] && { printf 'ESCALATE\n'; return 0; }
+  printf 'REPAIR\n'
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -574,6 +605,20 @@ if [ "${1:-}" = "--selftest" ]; then
   tc "tier unterminated last" $'README.md\npolicy/CLAUDE.md' 'A'
   tc "tier terminated parity" $'README.md\n'                 'C'
   tc "tier empty stdin"       ''                             'NONE'
+  # R39 anomaly routing — the unanticipated tail must SELF-REPAIR, not wake a human.
+  ar(){ local got; got="$(anomaly_route "$2" "$3" "$4")"; [ "$got" = "$5" ] && echo "ok: $1" || { echo "FAIL: $1 anomaly_route($2,$3,$4)=$got want=$5"; fail=1; }; }
+  ar "a brand-new anomaly repairs by default"   stalled        0 3 REPAIR
+  ar "unenrolled PR repairs"                    unenrolled     0 3 REPAIR
+  ar "an unknown FUTURE kind repairs"           some-new-thing 0 3 REPAIR
+  ar "mid-budget still repairs"                 stalled        2 3 REPAIR
+  ar "budget spent escalates to the human"      stalled        3 3 ESCALATE
+  ar "over budget escalates"                    stalled        9 3 ESCALATE
+  ar "infra failure goes straight to human"     infra          0 3 INFRA
+  ar "a refusal is not repairable"              refused        0 3 INFRA
+  ar "a trust-boundary event is not repairable" trust          0 3 INFRA
+  ar "unreadable attempts -> human"             stalled        x 3 INFRA
+  ar "unreadable budget -> human"               stalled        0 x INFRA
+  ar "repair disabled (0) -> human"             stalled        0 0 INFRA
   [ "$fail" = 0 ] && echo "ALL POLLER SELFTESTS PASS" || echo "POLLER SELFTESTS FAILED"
   exit "$fail"
 fi
@@ -613,6 +658,8 @@ FITNESS_LOGIN="$(fitness_login_default "$FITNESS_SAME_IDENTITY" "${FITNESS_LOGIN
 POLLER_ARMED="${POLLER_ARMED:-1}"   # ARMED BY DEFAULT (gate-free objective; #96 explicit-arm retired) — the merge-trust boundary is the distinct-App gates + auto-merge's fail-closed re-check, not this flag; POLLER_ARMED=0 is a deliberate dry-run soak
 POLL_INTERVAL="${POLL_INTERVAL:-30}"   # fixed sweep cadence (a gentler 30s; no adaptive machinery)
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
+# R39: bounded repair attempts an UNANTICIPATED state gets before it becomes the maintainer's problem.
+POLLER_REPAIR_MAX="${POLLER_REPAIR_MAX:-3}"
 FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
 # the isolator the fixer runs in (#152). Overridable so poller-fixer.test.sh can drive the REAL sweep.
@@ -869,6 +916,29 @@ surface(){ # <pr> <sha> <kind> <message>
   gh pr comment "$pr" --repo "$SLUG" --body "**Poller → Arthur [$kind]:** $msg"$'\n\n<sub>dev-side poller (Step 5); no merge taken — needs your decision.</sub>' >/dev/null 2>&1 && : > "$m"
 }
 
+# surface_or_repair <pr> <ref> <sha> <kind> <reason> — THE NEW DEFAULT for an unexpected state.
+# Bounded self-repair FIRST; the human only when repair is inapplicable (INFRA) or spent (ESCALATE).
+# A repair needs a real branch to commit to, so an empty ref degrades to surface() — honest, never silent.
+surface_or_repair(){
+  local pr="$1" ref="$2" sha="$3" kind="$4" reason="$5"
+  local budget="$STATE/repair-${pr}-${kind}.n" att=0
+  [ -f "$budget" ] && att="$(cat "$budget" 2>/dev/null || echo 0)"
+  case "$att" in ''|*[!0-9]*) att=0 ;; esac
+  local route; route="$(anomaly_route "$kind" "$att" "$POLLER_REPAIR_MAX")"
+  [ -n "$ref" ] || route=INFRA
+  case "$route" in
+    REPAIR)
+      att=$((att+1)); printf '%s' "$att" > "$budget" 2>/dev/null
+      log "ANOMALY $SLUG#$pr @ ${sha:0:7} [$kind] repair attempt $att/$POLLER_REPAIR_MAX: $reason"
+      run_fixer "$pr" "$ref" "$sha" "ANOMALY" "$reason" ;;
+    ESCALATE)
+      log "ANOMALY $SLUG#$pr @ ${sha:0:7} [$kind] — $att/$POLLER_REPAIR_MAX repair attempts spent; escalating"
+      surface "$pr" "$sha" "$kind" "$reason - the loop attempted bounded self-repair $att time(s) and could not clear it; this is now a maintainer decision." ;;
+    *)
+      surface "$pr" "$sha" "$kind" "$reason" ;;
+  esac
+}
+
 # The rc-3 question — asked ONCE per head, and ONLY once the bounded retries are exhausted (review_due).
 # It carries the reviewer harness's REAL stderr: a question that shrugs is not a question. Re-callable on
 # every later sweep at zero cost — surface() early-exits on its own marker, and RE-POSTS if a previous
@@ -1003,6 +1073,13 @@ looking for a build or live-gate failure; there isn't one. Address the reviewer'
 the reviewer's PROSE (advisory, not a machine signal): treat them as the requirements to satisfy, use your
 own judgment on HOW, and if you believe a finding is wrong, say so via FIXER_BLOCKED rather than
 half-fixing it."
+  elif [ "$cause" = ANOMALY ]; then
+    what="Neither gate failed. The PIPELINE ITSELF reached a state it has no rule for and is STUCK — this
+PR cannot progress until that state is resolved. The stuck-state is described below. DIAGNOSE the real
+cause from the repository as it actually is (do not assume the description is complete or correct), then
+make the MINIMAL change that lets this PR move again. If the right repair is NOT a change to this branch
+— it needs a maintainer decision, access you do not have, or a change to the pipeline's own rules — do
+NOT improvise one: end with FIXER_BLOCKED and state precisely what is needed."
   else
     what="The HOST LIVE-GATE returned RED — the candidate failed to build or failed its live probes.
 Address the failure below."
@@ -1325,7 +1402,7 @@ sweep_repo(){
         if gh pr edit "$pr" --repo "$SLUG" --add-label "${AUTHOR_LABEL:-live-validate}" >/dev/null 2>&1; then
           log "#$pr enrolled in the host live-gate — it will be gated on the next sweep"
         else
-          surface "$pr" "$sha" "unenrolled" "this PR carries no \`${AUTHOR_LABEL:-live-validate}\` label, so the host live-gate can never see it and the loop would NOOP on it forever. Auto-enrolment FAILED (the label could not be applied). The pipeline vocabulary is declared in bin/repo-labels.sh — run \`repo-labels.sh ensure ${POLLER_REPO}\` and re-label." || true
+          surface_or_repair "$pr" "$ref" "$sha" "unenrolled" "this PR carries no \`${AUTHOR_LABEL:-live-validate}\` label, so the host live-gate can never see it and the loop would NOOP on it forever. Auto-enrolment FAILED (the label could not be applied). The pipeline vocabulary is declared in bin/repo-labels.sh — run \`repo-labels.sh ensure ${POLLER_REPO}\` and re-label." || true
         fi
       fi
     fi
@@ -1390,7 +1467,7 @@ sweep_repo(){
             [ -n "$cdate" ] || continue
             age=$(( $(date +%s) - $(date -d "$cdate" +%s 2>/dev/null || echo 0) ))
             if [ "$(stall_verdict NONE 1 "$age" "$POLLER_STALL_MAX")" = STALL ]; then
-              surface "$pr" "$sha" "stalled" "this \`live-validate\`-labelled head has had NO host live-gate verdict for ~$((age/60))m (surfacing bound $((POLLER_STALL_MAX/60))m). The host gate produced no GREEN/RED for \`${sha:0:7}\` and will not re-gate on its own — most likely it SKIPPED this sha (a stale per-(repo,sha) \`.done\` marker on the host, or a transient PR-head fetch-failure deduped as a delivered SKIP; audit CAT-01/CAT-04). REMEDIATION: on the host, remove \`~/.local/state/live-gate/$(basename "$SLUG")-${sha}.done\` to force a re-gate, or push a new commit. (R18 idle-with-work-pending — the poller had been silently NOOPing on this since the head was pushed.)"
+              surface_or_repair "$pr" "$ref" "$sha" "stalled" "this \`live-validate\`-labelled head has had NO host live-gate verdict for ~$((age/60))m (surfacing bound $((POLLER_STALL_MAX/60))m). The host gate produced no GREEN/RED for \`${sha:0:7}\` and will not re-gate on its own — most likely it SKIPPED this sha (a stale per-(repo,sha) \`.done\` marker on the host, or a transient PR-head fetch-failure deduped as a delivered SKIP; audit CAT-01/CAT-04). REMEDIATION: on the host, remove \`~/.local/state/live-gate/$(basename "$SLUG")-${sha}.done\` to force a re-gate, or push a new commit. (R18 idle-with-work-pending — the poller had been silently NOOPing on this since the head was pushed.)"
             fi
             ;;
         esac
