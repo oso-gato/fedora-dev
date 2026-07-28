@@ -7,6 +7,13 @@
 # surface [rebase] + park. MUTATION: force rebase_due to always GIVEUP → even a clean-behind PR gets no
 # update-branch and parks (the old terminal behaviour) — proving the bounded auto-rebase is what makes
 # progress. No real GitHub/network/model.
+#
+# SUBJECT = REBASE OWNERSHIP, so these rows run with POLLER_REPAIR_MAX=0. Since R39/#278 the rc-2 arm's
+# give-up path routes a genuine CONFLICT to BOUNDED SELF-REPAIR before the maintainer, so with repair
+# enabled the [rebase] surface is no longer the immediate outcome — and this fixture provisions no
+# fixable branch at origin. Disabling repair keeps these rows asserting what they were written to assert:
+# WHO owns the rebase, and that a clean-behind PR is never parked. The repair-first road out of the same
+# arm is covered by poller-anomaly-repair.test.sh; anomaly_route's rebase row is in --selftest.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(mktemp -d)"; trap 'rm -rf "$ROOT"' EXIT
@@ -57,6 +64,7 @@ run(){ # <poller-script> [env…]
   local sc="$1"; shift
   env PATH="$GHBIN:$PATH" HOME="$HOMEDIR" GH_LOG="$GH_LOG" \
     POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=1 FLEET_HALT=true \
+    POLLER_REPAIR_MAX=0 \
     FAKE_SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef "$@" \
     bash "$sc" --once > "$ROOT/out.log" 2>&1
 }
