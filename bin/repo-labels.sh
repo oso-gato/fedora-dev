@@ -16,6 +16,7 @@
 #   repo-labels.sh ensure <repo>   idempotently CREATE any missing label (safe to run every time)
 #   repo-labels.sh audit           scan bin/*.sh for label literals that are NOT in this registry (drift)
 #   repo-labels.sh list            print the registry
+#   repo-labels.sh parked          print the labels that take an item OUT of the drivable set
 #   repo-labels.sh --selftest      exercise the pure conformance core (no gh / network)
 #
 # NAMING RULES (what "conforms" means — enforced by label_ok, not by convention):
@@ -26,20 +27,30 @@
 # Covered by repo-labels.test.sh. Control-plane (the pipeline's own vocabulary).
 set -uo pipefail
 
-# ---- THE REGISTRY — the single source of truth. name|colour|role|description ------------------------
+# ---- THE REGISTRY — the single source of truth. name|colour|role|description[|PARKED] ---------------
 # role: APPLY = the apparatus puts it on;  READ = the apparatus reads it and must understand it.
 # Adding a label ANYWHERE in bin/ without adding it here is drift and `audit` fails on it.
+#
+# THE 5TH FIELD — `PARKED` — marks a label that takes an item OUT OF THE DRIVABLE SET: the loop is not
+# supposed to move it, because a human owns its next step. It is deliberately ORTHOGONAL to the role
+# column (a PARKED label may be one the apparatus APPLIES — `maintainer-merge` is the R1 hold the loop
+# puts on itself — or one it merely READS), which is why it needs its own field rather than being
+# inferred from `READ`. It exists because a watchdog that measures PROGRESS must know the difference
+# between work that is STUCK and work that is WAITING BY DESIGN: without it, a PR sitting correctly on
+# `maintainer-merge` produces an unchanging fingerprint forever and the deadman eventually SIGTERMs a
+# perfectly healthy poller and wakes the maintainer — the exact outcome the work-progress axis exists to
+# prevent. Consumers read it via `parked` so the set has ONE home (the whole point of this file).
 REGISTRY="$(cat <<'EOF'
 backlog|0e8a16|APPLY|A planned feature issue the authoring loop may pick up (R2)
 live-validate|1d76db|APPLY|Enrolls a PR in the host live-gate — the gating pipeline's entry point (R4)
 shipped|5319e7|APPLY|The objective was declared shipped autonomously by the ship actuator (R40)
-maintainer-merge|5319e7|APPLY|Touches the confirmed spec — maintainer merges it, never the loop (R1)
-apparatus-blocked|b60205|APPLY|Bounded auto-recovery is exhausted; a human is genuinely needed
+maintainer-merge|5319e7|APPLY|Touches the confirmed spec — maintainer merges it, never the loop (R1)|PARKED
+apparatus-blocked|b60205|APPLY|Bounded auto-recovery is exhausted; a human is genuinely needed|PARKED
 host-task|fbca04|APPLY|A ticket addressed to the host agent over the bus (R5)
-escalate|d93f0b|READ|A genuine maintainer decision — removes the item from the drivable set
-needs-decision|d93f0b|READ|Synonym of escalate, honoured by the ship oracle
-blocked|d93f0b|READ|Work cannot proceed; not drivable by the loop
-awaiting-maintainer|d93f0b|READ|Parked pending the maintainer; not drivable by the loop
+escalate|d93f0b|READ|A genuine maintainer decision — removes the item from the drivable set|PARKED
+needs-decision|d93f0b|READ|Synonym of escalate, honoured by the ship oracle|PARKED
+blocked|d93f0b|READ|Work cannot proceed; not drivable by the loop|PARKED
+awaiting-maintainer|d93f0b|READ|Parked pending the maintainer; not drivable by the loop|PARKED
 EOF
 )"
 
@@ -58,6 +69,9 @@ registry_names(){ printf '%s\n' "$REGISTRY" | awk -F'|' 'NF{print $1}'; }
 registry_field(){ printf '%s\n' "$REGISTRY" | awk -F'|' -v n="$1" -v f="$2" '$1==n{print $f}'; }
 # is_registered <name> → rc 0 iff declared here.
 is_registered(){ registry_names | grep -qxF "${1-}"; }
+# parked_names → every label that takes an item OUT of the drivable set (the 5th field), one per line.
+# Read by the deadman's work-progress axis so "waiting by design" is never mistaken for "stuck".
+parked_names(){ printf '%s\n' "$REGISTRY" | awk -F'|' '$5=="PARKED"{print $1}'; }
 
 if [ "${1:-}" = "--selftest" ]; then
   p=0 f=0
@@ -82,6 +96,22 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "registry is non-empty"  "$( [ "$(registry_names | grep -c .)" -ge 8 ] && echo yes || echo no )" "yes"
   ck "live-validate declared" "$(is_registered live-validate && echo yes || echo no)" "yes"
   ck "unknown not declared"   "$(is_registered not-a-real-label && echo yes || echo no)" "no"
+  echo "== the PARKED set — 'waiting by design' must never be read as 'stuck' =="
+  inpk(){ parked_names | grep -qxF "$1" && echo yes || echo no; }
+  ck "escalate is parked"            "$(inpk escalate)" "yes"
+  ck "needs-decision is parked"      "$(inpk needs-decision)" "yes"
+  ck "blocked is parked"             "$(inpk blocked)" "yes"
+  ck "awaiting-maintainer is parked" "$(inpk awaiting-maintainer)" "yes"
+  ck "maintainer-merge is parked (the R1 hold the loop puts on ITSELF)" "$(inpk maintainer-merge)" "yes"
+  ck "apparatus-blocked is parked (already surfaced; a restart cannot help)" "$(inpk apparatus-blocked)" "yes"
+  # The other direction is the one that would silently DISABLE the work-progress axis: if an ordinary
+  # in-flight label were parked, every live PR would be filtered out, the fingerprint would be empty and
+  # the deadman would go permanently quiet — an axis that reports healthy because it is looking at nothing.
+  ck "live-validate NOT parked (it IS the drivable state)" "$(inpk live-validate)" "no"
+  ck "backlog NOT parked"     "$(inpk backlog)" "no"
+  ck "shipped NOT parked"     "$(inpk shipped)" "no"
+  ck "every parked label is registered" \
+     "$( bad2=""; for n in $(parked_names); do is_registered "$n" || bad2="$bad2 $n"; done; echo "${bad2:-none}" )" "none"
   echo; echo "repo-labels selftest: $p passed, $f failed"; [ "$f" -eq 0 ]; exit
 fi
 
@@ -89,7 +119,11 @@ ORG="${ORG:-oso-gato}"
 log(){ echo "repo-labels: $*" >&2; }
 
 case "${1:-}" in
-  list) printf '%s\n' "$REGISTRY" | awk -F'|' 'NF{printf "%-22s %-6s %s\n",$1,$3,$4}'; exit 0 ;;
+  list) printf '%s\n' "$REGISTRY" | awk -F'|' 'NF{printf "%-22s %-6s %-7s %s\n",$1,$3,($5=="PARKED"?"PARKED":"-"),$4}'; exit 0 ;;
+
+  # The non-drivable set, for consumers that must tell "stuck" from "waiting by design". Pure + local
+  # (no gh, no network), so a caller on the watchdog's hot path can read it on every check for free.
+  parked) parked_names; exit 0 ;;
 
   check)
     REPO="${2:?usage: repo-labels.sh check <repo>}"
@@ -102,6 +136,16 @@ case "${1:-}" in
 
   ensure)
     REPO="${2:?usage: repo-labels.sh ensure <repo>}"
+    # R16 OPERATING SCOPE — `ensure` is a WRITE actuator (it creates labels on a repo), and R16 rule 4 is
+    # "every actuator checks scope before acting", not "every actuator whose caller happens to have
+    # checked". Its one caller today (dev-author.sh) does check first, so this is defence in depth — but
+    # a scope check that lives only in the caller is one refactor away from being absent, which is
+    # precisely how #165 reached a foreign repo. Fail-closed: any non-zero reader rc (127 included) is a
+    # refusal, and SCOPE_SESSION (if the caller exported one) narrows this to the same declared scope.
+    HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+    REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
+    "$REPO_SCOPE" check "$REPO" 2>/dev/null || {
+      log "R16 SCOPE: '$REPO' is outside the operating scope — creating NO labels on it"; exit 4; }
     have="$(gh label list --repo "$ORG/$REPO" --limit 200 --json name -q '.[].name' 2>/dev/null)" || {
       log "cannot read labels on $ORG/$REPO — not establishing blind (fail-closed)"; exit 3; }
     made=0 failed=""

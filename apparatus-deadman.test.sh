@@ -93,6 +93,33 @@ freshstate(){ local d="$ROOT/state.$RANDOM"; mkdir -p "$d"; printf '%s' "$d"; }
 agelog(){ touch -d "@$(( $(date +%s) - ${2:-1000} ))" "$1"; }     # $1=log $2=age-seconds (default 1000)
 freshlog(){ : > "$1"; touch "$1"; }
 
+# no_gh_writes → true when EVERY recorded gh call is on the READ allowlist below.
+#
+# The quiet-when-healthy contract is "the deadman does not FILE/UPDATE/COMMENT/CLOSE an issue unless an
+# anomaly stands" — it was written as "the calls file is empty" because the deadman made no gh READS at
+# all. The work-progress axis (R18 idle-with-work-pending) adds one: it must read the open-PR state to
+# tell a loop that is MOVING from one that is merely RUNNING, and that read happens on every check by
+# design. So the row asserts the contract itself rather than the old proxy.
+#
+# IT IS AN INVERTED ALLOWLIST, NOT A WRITE-DENYLIST. The first cut denied `issue create|edit|comment|
+# close` — which is every write the deadman makes TODAY, and therefore reads as sufficient. But the
+# invariant being defended is the fleet's deepest one: THE WATCHDOG NEVER MERGES. A denylist grants
+# every verb nobody thought to enumerate, so a future `pr merge`, `pr comment`, `api -X POST`, `label
+# create` or `pr edit --add-label` from this process would pass the row silently — the sieve shape the
+# ANTI-THEATER doctrine rejects. An allowlist fails the other way: a genuinely new READ trips the row
+# once and is added deliberately, which is the correct amount of friction for widening what a watchdog
+# may do. (It did exactly that on its first run: it surfaced the transitive `gh api
+# /installation/repositories` that repo-scope.sh makes on the healthy path — a read the old denylist
+# would never have shown anyone.)
+#
+# THE THREE ALLOWED SHAPES, each a READ and nothing else:
+#   `api -X GET …`  the deadman's own issue search (explicit GET)
+#   `api /…`        a path with NO -X ⇒ gh's default method is GET (repo-scope's App enumeration).
+#                   Deliberately anchored on the leading slash so `api -X POST /repos/…` does NOT match.
+#   `pr list …`     the work-progress axis reading open-PR state
+# Anything else — including every `pr`/`issue`/`label` MUTATION verb — fails the row.
+no_gh_writes(){ ! grep -qvE '^(api -X GET |api /|pr list )' "$GH_CALLS" 2>/dev/null; }
+
 # dm → run one --check with scenario env; captures OUT + RC. Common knobs default here, override via env.
 # DEADMAN_POLLER_NAME=fake-poller.sh keeps the deadman blind to the box's REAL running pr-poller.sh.
 dm(){   # args: KEY=VAL … (extra env)
@@ -139,7 +166,7 @@ echo "== quiet-when-healthy, dedup, clear =="
 S="$ROOT/ok"; new_origin_and_clone "$S"; ST="$(freshstate)"; LOG="$ROOT/ok.log"; freshlog "$LOG"
 : > "$GH_CALLS"; start_genuine
 dm DEADMAN_CLONE="$S" DEADMAN_STATE="$ST" DEADMAN_EXPECT_POLLER=1 DEADMAN_POLLER_LOG="$LOG" DEADMAN_SWEEP_MAX=300
-{ [ "$RC" = 0 ] && echo "$OUT" | grep -q '^HEALTHY' && [ ! -s "$GH_CALLS" ]; } \
+{ [ "$RC" = 0 ] && echo "$OUT" | grep -q '^HEALTHY' && no_gh_writes; } \
   && ok "all-healthy (current clone, live poller, fresh log) ⇒ rc 0 and ZERO gh writes" \
   || bad "healthy-quiet" "rc=$RC out=[$OUT] calls=[$(cat "$GH_CALLS")]"
 stop_procs
@@ -188,7 +215,7 @@ S="$ROOT/unr"; new_origin_and_clone "$S"; git -C "$S" remote set-url origin /non
 ST="$(freshstate)"; : > "$GH_CALLS"
 dm DEADMAN_CLONE="$S" DEADMAN_STATE="$ST" DEADMAN_EXPECT_POLLER=0 DEADMAN_UNREADABLE_MAX=2   # check 1
 r1_rc="$RC"; r1_cv=0; echo "$OUT" | grep -q CANNOT_VERIFY && r1_cv=1
-r1_empty=1; [ -s "$GH_CALLS" ] && r1_empty=0                                                  # no gh write on the blip
+r1_empty=1; no_gh_writes || r1_empty=0                                                        # no gh write on the blip
 dm DEADMAN_CLONE="$S" DEADMAN_STATE="$ST" DEADMAN_EXPECT_POLLER=0 DEADMAN_UNREADABLE_MAX=2   # check 2 → bound
 { [ "$r1_cv" = 0 ] && [ "$r1_rc" = 0 ] && [ "$r1_empty" = 1 ] \
   && echo "$OUT" | grep -q CANNOT_VERIFY && [ "$RC" != 0 ] && grep -q '^issue create' "$GH_CALLS"; } \
@@ -196,6 +223,76 @@ dm DEADMAN_CLONE="$S" DEADMAN_STATE="$ST" DEADMAN_EXPECT_POLLER=0 DEADMAN_UNREAD
   || bad "unreadable-bound" "check1 rc=$r1_rc cv=$r1_cv empty=$r1_empty ; check2 rc=$RC out=[$OUT]"
 
 # ── MUTATION-CHECK 1 — neutralize the lag gate ⇒ merged-not-live stops firing ───────────────────────
+echo "== work-progress axis: PARKED work is filtered OUT of the fingerprint (the WIRING) =="
+# --selftest already proves work_drivable DECIDES correctly. It cannot prove work_fingerprint CALLS it,
+# and a correct pure core wired to nothing is the exact defect this apparatus has shipped before. These
+# rows drive the real --work-fingerprint seam against a stub `gh pr list` and read the emitted lines.
+cat > "$ROOT/stub/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$GH_CALLS"
+case "${1:-} ${2:-}" in
+  "pr list") cat "${FAKE_PRS:-/dev/null}" 2>/dev/null; exit 0;;
+esac
+case "${1:-}" in
+  api)   [ -n "${GH_SEARCH_RESULT:-}" ] && [ -f "$GH_SEARCH_RESULT" ] && cat "$GH_SEARCH_RESULT"; exit 0;;
+  issue) case "${2:-}" in create) echo "https://github.com/${DEADMAN_REPO:-x/y}/issues/4242";; esac; exit 0;;
+esac
+exit 0
+EOF
+chmod +x "$ROOT/stub/gh"
+export FAKE_PRS="$ROOT/prs.txt"
+fp(){ : > "$GH_CALLS"; WFP="$(DEADMAN_WORK_REPOS=e2e-beta bash "$SCRIPT" --work-fingerprint 2>/dev/null)"; }
+
+printf '%s\n' 'e2e-beta#9 abc123def456 0 live-validate' > "$FAKE_PRS"; fp
+{ echo "$WFP" | grep -q 'e2e-beta#9'; } \
+  && ok "a drivable PR IS in the fingerprint (the axis still sees real work)" \
+  || bad "fp-drivable" "wfp=[$WFP]"
+
+# The false-fire the axis would otherwise commit: a PR correctly held for the maintainer is static for
+# as long as the human takes, so left in the fingerprint it would SIGTERM a healthy poller after 45 min
+# and then page the very person being waited on.
+printf '%s\n' 'e2e-beta#9 abc123def456 0 maintainer-merge' > "$FAKE_PRS"; fp
+{ [ -z "$WFP" ]; } \
+  && ok "an R1 maintainer-merge PR is FILTERED OUT (no false stall on work waiting by design)" \
+  || bad "fp-parked-r1" "wfp=[$WFP]"
+
+printf '%s\n' 'e2e-beta#9 abc 0 escalate' 'e2e-beta#10 def 1 live-validate' > "$FAKE_PRS"; fp
+{ ! echo "$WFP" | grep -q '#9' && echo "$WFP" | grep -q '#10'; } \
+  && ok "mixed: the escalated PR drops out, the drivable one stays" \
+  || bad "fp-mixed" "wfp=[$WFP]"
+
+printf '%s\n' 'e2e-beta#9 abc 0 apparatus-blocked,live-validate' > "$FAKE_PRS"; fp
+{ [ -z "$WFP" ]; } \
+  && ok "a parked label anywhere in the list parks the PR" || bad "fp-parked-multi" "wfp=[$WFP]"
+
+printf '%s\n' 'e2e-beta#9 abc123def456 0 ' > "$FAKE_PRS"; fp
+{ echo "$WFP" | grep -q 'e2e-beta#9'; } \
+  && ok "an UNLABELLED PR survives the filter (it is drivable, and the trailing-space field is empty)" \
+  || bad "fp-unlabelled" "wfp=[$WFP]"
+
+# A GitHub label may legally contain SPACES — a stock repo ships `good first issue` and `help wanted`.
+# Reading only the LAST space-separated field would see "issue" here and miss the parked label entirely.
+printf '%s\n' 'e2e-beta#9 abc 0 awaiting-maintainer,good first issue' > "$FAKE_PRS"; fp
+{ [ -z "$WFP" ]; } \
+  && ok "a parked label survives a SPACE-containing sibling label (fields, not last-token)" \
+  || bad "fp-spacey-label" "wfp=[$WFP]"
+
+# MUTATION: neutralize the filter in a copy and the parked PR must reappear — otherwise the rows above
+# pass for some reason other than the filter.
+MUTD="$ROOT/dm-mut.sh"
+sed 's|^    work_drivable "\$_l" "\$parked" && printf|    true "$_l" "$parked" \&\& printf|' "$SCRIPT" > "$MUTD"
+if ! grep -q '^    true "\$_l" "\$parked" && printf' "$MUTD" || ! bash -n "$MUTD" 2>/dev/null; then
+  bad "fp-mutation-vacuous" "the sed did not neutralize the filter"
+else
+  cp "$MUTD" "$HERE/bin/.dm-mut-tmp.sh"; chmod +x "$HERE/bin/.dm-mut-tmp.sh"   # needs its bin/ siblings
+  printf '%s\n' 'e2e-beta#9 abc 0 maintainer-merge' > "$FAKE_PRS"
+  MW="$(DEADMAN_WORK_REPOS=e2e-beta bash "$HERE/bin/.dm-mut-tmp.sh" --work-fingerprint 2>/dev/null)"
+  rm -f "$HERE/bin/.dm-mut-tmp.sh"
+  { echo "$MW" | grep -q 'e2e-beta#9'; } \
+    && ok "MUTATION BITES: without the filter the parked PR is back in the fingerprint (false-fire restored)" \
+    || bad "fp-mutation-no-bite" "mutant wfp=[$MW]"
+fi
+
 echo "== mutation-checks (grep-verified non-vacuous) =="
 CP="$ROOT/mut-lag.sh"
 sed 's/\[ "\$lag_streak" -ge "\$lag_max" \]/[ "$lag_streak" -ge 999999 ]/' "$SCRIPT" > "$CP"; chmod +x "$CP"

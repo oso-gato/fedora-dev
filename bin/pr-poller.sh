@@ -1593,9 +1593,16 @@ sweep_repo(){
   # reads empty — exactly as before. The two new fields therefore sit BEFORE it and neither can ever be
   # empty: `.author.login // "-"` has a placeholder for a deleted account, and `.isDraft` is a bare bool.
   local rows
+  # DIAGNOSABILITY (2026-07-28): this used to be `2>/dev/null` + a bare "pr list failed". On 2026-07-28
+  # the merge loop went totally dark — 4,304 of these, ZERO PRs evaluated for 40 minutes — and the cause
+  # was UNRECOVERABLE because the error had been discarded at the point of failure. The identical command
+  # succeeded from an interactive shell, so the fault was environmental and invisible from the log alone.
+  # A failure that cannot say WHY is the same defect class as a stall nobody notices: KEEP the stderr.
+  local _lerr; _lerr="$(mktemp 2>/dev/null || echo "/tmp/prlist.$$")"
   rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid,author,isDraft,labels \
-          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\(.author.login // "-")\t\(.isDraft)\t\([.labels[].name]|join(","))"' 2>/dev/null)" \
-    || { log "pr list failed — skipping sweep"; return 0; }
+          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\(.author.login // "-")\t\(.isDraft)\t\([.labels[].name]|join(","))"' 2>"$_lerr")" \
+    || { log "pr list failed — skipping sweep — gh said: $(tr '\n' ' ' < "$_lerr" 2>/dev/null | cut -c1-300)"; rm -f "$_lerr"; return 0; }
+  rm -f "$_lerr"
   [ -n "$rows" ] || return 0                       # zero open PRs — quiet (rc 0 distinguishes it)
   # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
   # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
