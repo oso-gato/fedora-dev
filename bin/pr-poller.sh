@@ -508,6 +508,35 @@ anomaly_route(){
   printf 'REPAIR\n'
 }
 
+# marker_live <age-seconds> <ttl-seconds> → LIVE | EXPIRED   (pure; --selftest covers it)
+#
+# EVERY STOP MUST BE A PAUSE WITH A TIMER (STEP 3 of #274). The `acted-<pr>-<sha>-<host>` marker exists
+# so one sweep does not re-act on a head it already handled. But it had NO EXPIRY, so any head whose
+# action was interrupted mid-flight stayed parked FOREVER — the marker outlived the work it recorded.
+#
+# Observed directly on 2026-07-28: PR #270 was reviewed, its marker written, the poller was SIGTERMed
+# mid-sweep, and every later sweep logged `acted, parked` and skipped it. It sat with **host GREEN and
+# fitness PASS** — both gates satisfied, nothing left to decide — and could never merge, because the
+# merge arm short-circuits on the same marker. It took a human moving the file to release it. The
+# skip line had by then been re-logged 15,368 times: a stop with no release, announcing itself.
+#
+# EXPIRY IS SAFE BECAUSE EVERY DOWNSTREAM ACTION IS IDEMPOTENT OR BOUNDED: a re-attempted MERGE on an
+# already-merged PR is a no-op; a re-REVIEW is bounded by the review budget; a re-FIX is bounded by the
+# existing no-progress stop (same signature + unadvanced head ⇒ surface, never churn). So the worst
+# case of a too-short TTL is a little repeated work; the worst case of no TTL is a PR parked forever
+# with both gates green, which is what actually happened.
+#
+# FAIL DIRECTION: an unreadable age or TTL yields LIVE — keep the existing skip rather than invent a
+# re-attempt from missing evidence. TTL 0 disables expiry entirely (the old behaviour).
+marker_live(){
+  local age="${1-}" ttl="${2-}"
+  case "$age" in ''|*[!0-9]*) printf 'LIVE\n'; return 0 ;; esac
+  case "$ttl" in ''|*[!0-9]*) printf 'LIVE\n'; return 0 ;; esac
+  [ "$ttl" -le 0 ] && { printf 'LIVE\n'; return 0; }
+  [ "$age" -ge "$ttl" ] && { printf 'EXPIRED\n'; return 0; }
+  printf 'LIVE\n'
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -710,6 +739,15 @@ if [ "${1:-}" = "--selftest" ]; then
   ar "unreadable attempts -> human"             stalled        x 3 INFRA
   ar "unreadable budget -> human"               stalled        0 x INFRA
   ar "repair disabled (0) -> human"             stalled        0 0 INFRA
+  # STEP 3 (#274) — every stop is a PAUSE WITH A TIMER, never a dead end.
+  ml(){ local got; got="$(marker_live "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 marker_live($2,$3)=$got want=$4"; fail=1; }; }
+  ml "fresh marker still parks"                 10   1800 LIVE
+  ml "just under the TTL still parks"           1799 1800 LIVE
+  ml "at the TTL expires"                       1800 1800 EXPIRED
+  ml "THE #270 CASE: hours parked with both gates green -> expires" 20000 1800 EXPIRED
+  ml "TTL 0 disables expiry (old park-forever behaviour)" 99999 0 LIVE
+  ml "unreadable age -> LIVE (never invent a re-attempt)" x 1800 LIVE
+  ml "unreadable ttl -> LIVE"                   10   x    LIVE
   [ "$fail" = 0 ] && echo "ALL POLLER SELFTESTS PASS" || echo "POLLER SELFTESTS FAILED"
   exit "$fail"
 fi
@@ -750,6 +788,9 @@ POLLER_ARMED="${POLLER_ARMED:-1}"   # ARMED BY DEFAULT (gate-free objective; #96
 POLL_INTERVAL="${POLL_INTERVAL:-30}"   # fixed sweep cadence (a gentler 30s; no adaptive machinery)
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
 POLLER_REPAIR_MAX="${POLLER_REPAIR_MAX:-3}"   # R39/#278: bounded repair attempts before the maintainer
+# STEP 3 of #274: how long an `acted` marker suppresses re-evaluation before it EXPIRES. Every stop is
+# a pause with a timer; 0 disables expiry (the old park-forever behaviour).
+POLLER_ACTED_TTL="${POLLER_ACTED_TTL:-1800}"
 # R39/#278 UNENROLLED-PR SELF-HEAL. DEV_LOGIN is the author identity whose PRs the loop owns and may
 # therefore enrol; ENROLL_LABEL is the host live-gate's ONLY discovery signal and must stay in lockstep
 # with bin/dev-author.sh's AUTHOR_LABEL (the two are the same enrolment, at author-time and after).
@@ -1582,7 +1623,16 @@ sweep_repo(){
     # REVIEW-pending PR never holds this marker (fitness re-entry unaffected); FIX never writes it.
     # NB (pre-existing semantics, unchanged): a dry-run marker also blocks a later ARMED merge of
     # the same (pr,sha) — arming re-routes only new heads; part of the #96 flip discussion.
-    [ -f "$done" ] && { log "#$pr ${sha:0:7} host=$host — acted, parked"; continue; }
+    if [ -f "$done" ]; then
+      _mage=$(( $(date +%s) - $(stat -c %Y "$done" 2>/dev/null || date +%s) ))
+      if [ "$(marker_live "$_mage" "$POLLER_ACTED_TTL")" = LIVE ]; then
+        log "#$pr ${sha:0:7} host=$host — acted, parked (${_mage}s/${POLLER_ACTED_TTL}s)"; continue
+      fi
+      # The timer ran out. The marker recorded an action that may never have completed — #270 sat here
+      # with BOTH gates green for hours because its sweep was killed after the marker was written.
+      log "#$pr ${sha:0:7} host=$host — acted-marker EXPIRED after ${_mage}s (> ${POLLER_ACTED_TTL}s); RE-EVALUATING (a stop is a pause with a timer, never a dead end)"
+      rm -f "$done" 2>/dev/null || true
+    fi
     # BATCHED gate reads: plan() consults tier + fitness ONLY on GREEN — so fetch them ONLY then
     # (a NOOP/RED PR costs exactly one comments call per sweep). Both GREEN-moment fetches are
     # rc-checked and SKIP this PR for THIS sweep on a transient failure (retry next sweep) — they
