@@ -18,6 +18,13 @@
 #   * OPEN DEV PRs  — OPEN PRs authored by $DEV_LOGIN, not carrying an escalation label. Each is DEV-
 #     drivable (label `live-validate` → read the verdict → iterate RED→GREEN → the poller merges). This
 #     is the signal that nails the maintainer's complaint: a pushed-but-unmerged PR is NOT "done".
+#   * THE STANDING WORK PLAN (#279) — the OPEN issue whose title starts with $PLAN_TITLE ("STANDING WORK
+#     PLAN"), discovered BY TITLE, never by a hardcoded number (the bin/fleet-halt.sh precedent). Its
+#     unchecked `- [ ]` / `- [~]` items are reported as OPEN_PLAN_ITEMS + PLAN_ISSUE. **This fact is
+#     REPORTED, not folded into the verdict**: an unchecked box is a reason not to STOP, not a proof the
+#     built product is unshipped — folding it into `drivable` would let one stale checkbox freeze
+#     bin/ship-actuator.sh out of ever closing an objective. The anti-stall Stop hook reads the KV
+#     directly; every other consumer reads STATUS and is untouched by this fact.
 #   * ACCEPTANCE PROBE (optional) — a side-effect-free command the objective declares
 #     ($OBJECTIVE_ACCEPTANCE, else <objective-doc-dir>/objective-acceptance.sh if executable). It guards
 #     the "off-backlog work reads SHIPPED" false-positive: DECLARED-and-FAILING ⇒ OPEN even with an empty
@@ -42,6 +49,9 @@ ORG="${ORG:-oso-gato}"
 DEV_LOGIN="${DEV_LOGIN:-oso-gato-nox-claudebox}"
 BACKLOG_LABEL="${BACKLOG_LABEL:-backlog}"
 ESCALATE_LABELS="${ESCALATE_LABELS:-escalate,needs-decision,blocked,awaiting-maintainer}"
+# The standing work plan is discovered BY TITLE PREFIX (fleet-halt.sh's control-issue precedent) — it
+# carries no label of its own. Set PLAN_TITLE='' to switch the fact off entirely.
+PLAN_TITLE="${PLAN_TITLE-STANDING WORK PLAN}"   # `-` not `:-`: an EXPLICIT empty value must disable it
 OS_PROBE_TIMEOUT="${OS_PROBE_TIMEOUT:-20}"
 SCOPE_REGISTRY_DIR="${SCOPE_REGISTRY_DIR:-$HOME/.local/state/scope-registry}"
 # The R34 ship-gate reviewer identity (== the independent fitness App). Its commit-comment on the current
@@ -92,6 +102,24 @@ classify(){
   fi
 }
 
+# plan_unchecked <required-title-prefix>  (stdin: an "@@PLAN <number> <title>" header line followed by
+# that issue's body, repeated) → "<unchecked-item-count> <first-issue-number-carrying-one>".
+# `- [ ]` and `- [~]` count as unchecked; `- [x]` does not. The title prefix is re-checked HERE because
+# GitHub's issue search is fuzzy and the discovery of the standing work plan must not be.
+plan_unchecked(){
+  awk -v want="${1-}" '
+    index($0,"@@PLAN ")==1 {
+      cur=""; rest=substr($0,8)
+      num=rest; sub(/[^0-9].*$/,"",num)
+      title=rest; sub(/^[0-9]+[[:space:]]*/,"",title)
+      if (want != "" && index(title,want)==1) cur=num
+      next
+    }
+    cur!="" && /^[[:space:]]*[-*][[:space:]]+\[[ ~]\]/ { n++; if (first=="") first=cur }
+    END { printf "%d %s\n", n+0, first }
+  '
+}
+
 # next_action <open-backlog:0|1> <first-backlog#> <first-drivable-pr#> <first-pr-has-live-validate:0|1>
 #   → the ONE-LINE exact next DRIVE action the gate injects into a false-DONE/false-BLOCKED block.
 next_action(){
@@ -132,6 +160,18 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "none + no evidence → INDETERMINATE" "$(classify 0 ABSENT 0)" "INDETERMINATE"
   ck "non-numeric → INDETERMINATE"        "$(classify '' ABSENT 1)" "INDETERMINATE"
   ck "probe FAIL wins over evidence"      "$(classify 0 FAIL 1 PASS)" "OPEN"
+  echo "== plan_unchecked (the standing work plan — reported, never folded into the verdict) =="
+  planfeed(){ printf '%s\n' \
+    '@@PLAN 274 STANDING WORK PLAN — enterprise autonomous loop' \
+    '- [x] STEP 1 — wire the tests into CI' \
+    '- [ ] STEP 4 — the clock' \
+    '- [~] STEP 5 — delete the self-watching'; }
+  ck "counts [ ] and [~], not [x]"  "$(planfeed | plan_unchecked 'STANDING WORK PLAN')" "2 274"
+  ck "all checked → none open"      "$(printf '%s\n' '@@PLAN 274 STANDING WORK PLAN' '- [x] done' | plan_unchecked 'STANDING WORK PLAN')" "0 "
+  ck "a fuzzy-search non-match is ignored" \
+     "$(printf '%s\n' '@@PLAN 9 Rewrite the STANDING WORK PLAN parser' '- [ ] not the plan' | plan_unchecked 'STANDING WORK PLAN')" "0 "
+  ck "empty feed → none"            "$(printf '' | plan_unchecked 'STANDING WORK PLAN')" "0 "
+  ck "no title configured → off"    "$(planfeed | plan_unchecked '')" "0 "
   echo "== next_action (the exact drive step) =="
   ck "open backlog → author it"           "$(next_action 1 41 '' 0 | grep -o 'author + ship backlog issue #41')" "author + ship backlog issue #41"
   ck "labelled PR → read the verdict"     "$(next_action 0 '' 233 1 | grep -o 'drive PR #233: read its host')" "drive PR #233: read its host"
@@ -152,6 +192,8 @@ emit(){ # <status> <reason> [next]
   printf 'DRIVABLE: %s\n' "${drivable_total:-?}"
   printf 'PROBE: %s\n' "${probe:-ABSENT}"
   printf 'SHIP_GATE: %s\n' "${shipgate:-N/A}"
+  printf 'OPEN_PLAN_ITEMS: %s\n' "${plan_items:-0}"
+  [ -n "${plan_issue:-}" ] && printf 'PLAN_ISSUE: %s\n' "$plan_issue"
   [ -n "${3:-}" ] && printf 'NEXT: %s\n' "$3"
   printf 'REASON: %s\n' "$2"
 }
@@ -198,6 +240,20 @@ while IFS=$'\t' read -r n author labels; do
 done <<<"$prs"
 
 drivable_total=$(( open_backlog + drivable ))
+
+# FACT 2b — THE STANDING WORK PLAN (#279). REPORTED (OPEN_PLAN_ITEMS / PLAN_ISSUE), never folded into
+# `drivable_total`: see the header — an unchecked box is a reason not to STOP, not a proof the built
+# product is unshipped, and folding it in would let one stale checkbox freeze ship-actuator forever.
+# Discovered BY TITLE (fleet-halt.sh's precedent), strict-prefix re-checked because issue search is fuzzy.
+# FAIL DIRECTION: an unreadable/absent plan reports 0 — the anti-stall gate simply loses this extra tooth
+# (it can only ADD teeth, never remove them), and no verdict is ever fabricated from a failed read.
+plan_items=0; plan_issue=""
+if [ -n "$PLAN_TITLE" ]; then
+  plan_raw="$(gh issue list --repo "$SLUG" --state open --search "$PLAN_TITLE in:title" --limit 5 \
+               --json number,title,body -q '.[] | "@@PLAN \(.number) \(.title)\n\(.body)"' 2>/dev/null)" || plan_raw=""
+  read -r plan_items plan_issue <<<"$(printf '%s\n' "$plan_raw" | plan_unchecked "$PLAN_TITLE")"
+  case "$plan_items" in ''|*[!0-9]*) plan_items=0; plan_issue="";; esac
+fi
 
 # FACT 3 — the optional acceptance probe (side-effect-free; declared → enforced, absent → not required).
 probe=ABSENT; probe_path="${OBJECTIVE_ACCEPTANCE:-}"
