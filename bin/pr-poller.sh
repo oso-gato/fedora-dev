@@ -1363,9 +1363,16 @@ sweep_repo(){
   # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
   # number (no torn read across a mid-sweep push).
   local rows
+  # DIAGNOSABILITY (2026-07-28): this used to be `2>/dev/null` + "pr list failed". On 2026-07-28 the
+  # merge loop went totally dark — 4,304 of these, ZERO PRs evaluated for 40 minutes — and the reason was
+  # UNRECOVERABLE because the error had been discarded at the point of failure. The identical command
+  # succeeded from an interactive shell, so the cause was environmental and invisible from the log alone.
+  # A failure that cannot say WHY is the same defect class as a stall nobody notices: keep the stderr.
+  local _lerr; _lerr="$(mktemp 2>/dev/null || echo /tmp/prlist.$$)"
   rows="$(gh pr list --repo "$SLUG" --state open --json number,headRefName,headRefOid,labels \
-          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\([.labels[].name]|join(","))"' 2>/dev/null)" \
-    || { log "pr list failed — skipping sweep"; return 0; }
+          -q '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid)\t\([.labels[].name]|join(","))"' 2>"$_lerr")" \
+    || { log "pr list failed — skipping sweep — gh said: $(tr '\n' ' ' < "$_lerr" 2>/dev/null | cut -c1-300)"; rm -f "$_lerr"; return 0; }
+  rm -f "$_lerr"
   [ -n "$rows" ] || return 0                       # zero open PRs — quiet (rc 0 distinguishes it)
   # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
   # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
