@@ -1622,6 +1622,10 @@ sweep_repo(){
     # dedup: act on each (pr,sha,host-verdict) at most once for the terminal actions; REVIEW/FIX manage
     # their own re-entry (fitness marker; progress signature), so only gate the whole sweep-action here.
     local done="$STATE/acted-${pr}-${sha}-${host}.done"
+    # NB the UNENROLLED-PR self-heal lives in enroll_pr(), reached from the host=NONE routing arm below
+    # (#282). It is deliberately NOT here: enrolment must be gated on the PR being DEV-AUTHORED and NOT a
+    # DRAFT, and both facts are read in that arm. Labelling a stranger's PR into an autonomous merge
+    # pipeline is not ours to do, and enrolling a draft races dev-author's own draft → ready → label handoff.
     # TERMINAL-STATE SKIP: once (pr,sha,GREEN) has ACTED (PRESENT posted / dry-run decided / merge
     # attempted), no further action exists for this tuple — the case arms below would only hit
     # their own `[ -f "$done" ] && continue`. Skip the GREEN-moment fetches too, so a PARKED GREEN
