@@ -613,6 +613,10 @@ FITNESS_LOGIN="$(fitness_login_default "$FITNESS_SAME_IDENTITY" "${FITNESS_LOGIN
 POLLER_ARMED="${POLLER_ARMED:-1}"   # ARMED BY DEFAULT (gate-free objective; #96 explicit-arm retired) — the merge-trust boundary is the distinct-App gates + auto-merge's fail-closed re-check, not this flag; POLLER_ARMED=0 is a deliberate dry-run soak
 POLL_INTERVAL="${POLL_INTERVAL:-30}"   # fixed sweep cadence (a gentler 30s; no adaptive machinery)
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
+# GENERATION FENCE (2026-07-28) — SHARED CONTRACT with bin/poller-service.sh: rc 92 means "I am running
+# in a container that no longer exists", and the supervisor must EXIT on it rather than relaunch.
+POLLER_ORPHAN_RC="${POLLER_ORPHAN_RC:-92}"
+BOX_GENERATION="${BOX_GENERATION:-$HERE/box-generation.sh}"
 FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
 # the isolator the fixer runs in (#152). Overridable so poller-fixer.test.sh can drive the REAL sweep.
@@ -1599,6 +1603,20 @@ case "${1:-}" in
     log "pr-poller --watch up (repo=$SLUG interval=${POLL_INTERVAL}s armed=$POLLER_ARMED self-refresh=$SELF_REFRESH every=${SELF_REFRESH_EVERY} sweeps running=${LAUNCH_HEAD:0:7})"
     sweeps=0
     while :; do
+      # GENERATION FENCE (2026-07-28) — FIRST, and before any work. The box can be REBUILT underneath a
+      # running poller: the old container is torn down while this process keeps executing against its
+      # destroyed rootfs. Anything already resolved keeps working (bash, date, grep) and anything looked
+      # up fresh does not — `gh` vanishes with the deleted upper layer. The poller then sweeps forever,
+      # fails every call, and looks perfectly healthy: process alive, log advancing, clone not behind.
+      # That state stood for SIX DAYS and self-inflicted a fleet-wide R9 HALT (fleet-halt.sh reads its
+      # signal only through `gh api`), which then gated the very ticket that could have repaired the box.
+      # Exiting is the ONLY correct move — the supervisor cannot relaunch us into the live box until we
+      # let go. Advisory by construction: box-generation.sh returns 0 on ANY uncertainty, so an
+      # unstamped or unreadable box can never be killed by this.
+      if [ -x "$BOX_GENERATION" ] && ! "$BOX_GENERATION" check; then
+        log "GENERATION-ORPHAN — running in a container that is no longer live; exiting rc=$POLLER_ORPHAN_RC for a supervised relaunch in the LIVE box"
+        exit "$POLLER_ORPHAN_RC"
+      fi
       # SELF-REFRESH (#162) AT A SAFE POINT. This check sits at the TOP of the loop, OUTSIDE sweep(), so
       # it can only fire BETWEEN sweeps — never mid-fixer/review/merge (all synchronous inside sweep(), so
       # "never mid-sweep" IS "never mid-fixer"). Rate-limited to once per SELF_REFRESH_EVERY sweeps (req

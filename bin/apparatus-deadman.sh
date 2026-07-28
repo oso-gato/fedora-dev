@@ -103,6 +103,9 @@ DEADMAN_UNREADABLE_MAX="${DEADMAN_UNREADABLE_MAX:-3}"  # consecutive unreadable 
 DEADMAN_EXPECT_POLLER="${DEADMAN_EXPECT_POLLER:-1}"    # 1 = a poller SHOULD be running (alarm when absent)
 DEADMAN_CLONE="${DEADMAN_CLONE:-$(dirname "$HERE")}"   # bin/ sits inside the live clone
 DEADMAN_REMOTE="${DEADMAN_REMOTE:-origin}"
+# GENERATION FENCE (2026-07-28): a watchdog orphaned in a destroyed container reports healthy forever.
+DEADMAN_BOX_GENERATION="${DEADMAN_BOX_GENERATION:-$(dirname "$(readlink -f "$0")")/box-generation.sh}"
+DEADMAN_ORPHAN_RC="${DEADMAN_ORPHAN_RC:-92}"
 DEADMAN_BRANCH="${DEADMAN_BRANCH:-main}"
 # @mention the maintainer at the TOP of the anomaly-issue BODY → when the issue is OPENED, GitHub
 # push-notifies that user, so the GitHub MOBILE APP (with "Direct Mentions" push on) rings the phone —
@@ -674,6 +677,18 @@ case "${1:-}" in
     trap 'log "deadman stopping (signal)"; exit 0' TERM INT HUP
     log "apparatus-deadman --watch up (interval=${DEADMAN_INTERVAL}s clone=$DEADMAN_CLONE repo=$DEADMAN_REPO expect_poller=$DEADMAN_EXPECT_POLLER responder=on)"
     while :; do
+      # GENERATION FENCE (2026-07-28) — the watchdog needs this MORE than anything it watches. On
+      # 2026-07-28 this deadman was orphaned inside a torn-down container alongside the poller it was
+      # meant to guard, and reported `healthy (behind=0 poller_alive=1 log_age=30s)` for six days: every
+      # measurement true, every one meaningless, because a watcher inside the corpse is as blind as the
+      # watched. It cannot detect this class about itself by measuring liveness — only by asking whether
+      # its own container still exists. Exiting hands it back to the base supervise loop, which re-enters
+      # the LIVE box. Advisory: box-generation.sh returns 0 on ANY uncertainty and can never kill a
+      # healthy watcher.
+      if [ -x "$DEADMAN_BOX_GENERATION" ] && ! "$DEADMAN_BOX_GENERATION" check; then
+        log "GENERATION-ORPHAN — this deadman is in a container that is no longer live; exiting for a supervised relaunch in the LIVE box (a watchdog inside a corpse reports healthy forever)"
+        exit "${DEADMAN_ORPHAN_RC:-92}"
+      fi
       run_check 1 >/dev/null || true    # --watch RESPONDS; the verdict + actions ride the log
       sleep "$DEADMAN_INTERVAL"
     done
