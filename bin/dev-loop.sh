@@ -8,6 +8,34 @@
 # poller pipeline ships — so the driver writes NO build, validate, or merge logic; it only SEQUENCES the
 # author across the backlog. It is to dev-author what poller-service is to pr-poller.
 #
+# THE PLAN ARM — HOW AN OBJECTIVE BECOMES A BACKLOG (added after the fitness RETURN on d339476). Until
+# now this driver started at the backlog and NOTHING in the fleet ever invoked `bin/dev-plan.sh`: the
+# planner — the one component that enforces R1, the maintainer's confirmation of an objective — was
+# built, tested, and unreachable. `grep -rn dev-plan bin/*.sh` found no caller, only prose. That is the
+# gap the intake front door fell into: an objective filed as `backlog` would have been swept by the arm
+# BELOW straight into `dev-author` → PR → auto-merge, so an UNCONFIRMED objective became merged code and
+# the maintainer's `approved` tap was never read by anything. So each pass now does the step upstream of
+# its own backlog first:
+#
+#     open issues labelled BOTH $INTAKE_LABEL (`objective`) and $APPROVED_LABEL (`approved`)
+#         → bin/dev-plan.sh <repo> <n>  → `backlog` feature issues → the arm below authors them.
+#
+# THE LABEL FILTER IS DISCOVERY, NOT AUTHORISATION — and that distinction is the whole trust boundary.
+# Applying a label needs only triage/write, which every fleet App identity holds, so this query alone
+# would be self-authorising. It is not the gate: `dev-plan.sh` independently resolves WHO applied
+# `approved` (the last `labeled` timeline event) and binds that actor to admin|maintain, refusing
+# anything else. This arm can therefore only ever OFFER an objective to a gate it does not control —
+# a label the loop applied to itself buys it nothing.
+#
+# AN OBJECTIVE THE PLANNER STOPPED ON IS PARKED, exactly like a blocked backlog issue: `dev-plan.sh`
+# comments its own refusal/BLOCKED reason on the issue, and while that comment is the NEWEST one the
+# objective is not re-offered — otherwise a non-maintainer's `approved` label (or one transiently
+# unfetchable timeline read) would re-post the identical refusal every LOOP_INTERVAL forever, the silent
+# spin R4 forbids. A reply un-parks it, and the refusal itself tells the maintainer what to do.
+# (The R39 bounded release below is deliberately NOT wired to this park yet — a planner park is
+# overwhelmingly "a human must tap the label properly", which no automatic re-attempt can change.
+# Extending the clock to this arm is a follow-up, recorded here rather than half-built.)
+#
 # It is DETERMINISTIC and idempotent by construction:
 #   * discovery is one `gh issue list --label backlog --state open` (no local list to maintain);
 #   * dev-author's own per-(repo,issue) marker + "is there already an open PR?" guard make a re-run a
@@ -96,13 +124,19 @@
 # that refusal IN THE SAME CHANGE that lands the check — a clock that spawns bounded model runs is now
 # stoppable within one sweep, which is exactly what R9 demanded before a timer mode could exist.
 #
-#   dev-loop.sh <repo> [--once]   drive the backlog for <repo> — ONE full pass, then exit
+#   dev-loop.sh <repo> [--once]   plan the approved objectives, then drive the backlog for <repo> —
+#                                 ONE full pass, then exit
 #   dev-loop.sh --watch <repo>    supervised loop (flock singleton): one pass every $LOOP_INTERVAL s;
 #                                 the R9 fleet HALT gates every pass (#151)
 #   dev-loop.sh --selftest        exercise the pure helpers (no gh / author / network)
 #
 # ENV: ORG (default oso-gato); BACKLOG_LABEL (default backlog); DEV_AUTHOR (default the sibling
 #      bin/dev-author.sh, overridable for the mock test);
+#      INTAKE_LABEL (the label bin/intake-file.sh files an objective under, default objective) +
+#      APPROVED_LABEL (the maintainer's confirmation label, default approved) + DEV_PLAN (default the
+#      sibling bin/dev-plan.sh, overridable for the mock test) + MAX_PLANS_PER_PASS (cap on PLANNER runs
+#      spawned per pass, default 2 — a planner run is a bounded model run, and an objective the planner
+#      already handled costs no slot);
 #      MAX_PER_PASS (safety cap on author RUNS SPAWNED per pass, default 5 — a runaway-planner backstop;
 #      skips and parked issues cost no slot); DEV_LOGIN (the dev box's App identity, whose questions the
 #      park gate trusts — default oso-gato-nox-claudebox, the same bare comment-author form the poller's
@@ -125,6 +159,13 @@ MAX_PER_PASS="${MAX_PER_PASS:-5}"
 DEV_LOGIN="${DEV_LOGIN-oso-gato-nox-claudebox}"
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 DEV_AUTHOR="${DEV_AUTHOR:-$HERE/dev-author.sh}"
+# THE PLAN ARM (see the header). $INTAKE_LABEL must stay DISTINCT from $BACKLOG_LABEL — an objective
+# filed under the label this driver hands to dev-author is an unconfirmed objective going straight to
+# implementation, which is the R1 bypass this arm exists to close.
+INTAKE_LABEL="${INTAKE_LABEL:-objective}"
+APPROVED_LABEL="${APPROVED_LABEL:-approved}"
+DEV_PLAN="${DEV_PLAN:-$HERE/dev-plan.sh}"
+MAX_PLANS_PER_PASS="${MAX_PLANS_PER_PASS:-2}"
 # the R9 fleet HALT reader (#151) — rc 0 is the ONLY "go"; see the header. Overridable for the mock test.
 FLEET_HALT="${FLEET_HALT:-$HERE/fleet-halt.sh}"
 # the R16 operating-scope reader (#167) — rc 0 is the ONLY "in scope"; see bin/repo-scope.sh.
@@ -157,6 +198,13 @@ ESCALATE_ANCHOR='**dev-loop → release budget spent (needs a decision):**'
 ESCALATE_ANCHOR_RE='^\*\*dev-loop → release budget spent \(needs a decision\):\*\*'
 # What counts as "a question is open on this issue" — either gate's anchor (line-1, identity-bound).
 PARK_ANCHOR="$BLOCKED_ANCHOR|$ESCALATE_ANCHOR_RE"
+
+# The PLANNER's own machine-owned line-1 anchors — a CONTRACT with bin/dev-plan.sh in exactly the way
+# $BLOCKED_ANCHOR is one with bin/dev-author.sh (`dev-loop.test.sh` pins both against the real scripts).
+# `refused:` = the objective is not maintainer-confirmed; `needs a decision (BLOCKED…)` = the planner ran
+# and stopped. Either means dev-plan has already SAID something on the issue and re-running it would only
+# repeat it, so the objective parks until somebody replies.
+PLAN_PARK_ANCHOR='^\*\*dev-plan → (refused|needs a decision)'
 
 log(){ printf '[%s] dev-loop: %s\n' "$(date -u +%H:%M:%S 2>/dev/null || echo --:--:--)" "$*" >&2; }
 
@@ -210,10 +258,29 @@ run_class(){
 # has replied since. Identity-bound + line-1-anchored (G2): a stranger's pasted marker, or the marker
 # quoted mid-prose, is inert. Everything else — including an unreadable/empty author — is ACTIVE, so the
 # issue is re-offered rather than silently dropped.
+# The optional 4th argument selects WHICH anchor set counts as an open question, so the plan arm can
+# reuse this gate (and its identity binding) for dev-plan's anchors without a second copy of the logic.
 park_state(){
-  local me="$1" who="$2" line1="$3"
+  local me="$1" who="$2" line1="$3" anchor="${4:-$PARK_ANCHOR}"
   [ -n "$me" ] && [ "$who" = "$me" ] || { printf 'ACTIVE'; return; }
-  if printf '%s' "$line1" | grep -qE "$PARK_ANCHOR"; then printf 'PARKED'; else printf 'ACTIVE'; fi
+  if printf '%s' "$line1" | grep -qE "$anchor"; then printf 'PARKED'; else printf 'ACTIVE'; fi
+}
+
+# plan_class <dev-plan-rc> <dev-plan-stdout> → PLANNED | SKIPPED | STOPPED. The same (rc, stdout)
+# reading run_class does for the author, and for the same reason: MAX_PLANS_PER_PASS must count PLANNER
+# RUNS, not invocations. dev-plan's only stdout emission is the URLs of the backlog issues it filed, and
+# an ALREADY-PLANNED objective exits 0 having printed nothing and spawned no model — but it keeps its
+# labels forever, so charging it a slot would let two planned objectives starve every later one.
+#   PLANNED  rc 0 + issue URLs → it decomposed the objective. Spends a slot.
+#   SKIPPED  rc 0, no URLs     → already planned (its `planned:` tombstone is on the bus) / nothing new
+#                                to file. No model run ⇒ no slot.
+#   STOPPED  any other rc      → unconfirmed (3), BLOCKED (4), or a filing failure. dev-plan has posted
+#                                its own reason on the issue where it could; that comment parks it.
+plan_class(){
+  case "$1" in
+    0) case "$2" in *https://*) printf 'PLANNED';; *) printf 'SKIPPED';; esac ;;
+    *) printf 'STOPPED' ;;
+  esac
 }
 
 # held_seconds <iso8601-timestamp> <now-epoch> → seconds held, or '' when the clock is UNREADABLE.
@@ -286,6 +353,32 @@ if [ "${1:-}" = "--selftest" ]; then
   # …but a RELEASE announcement is NOT a question: it is the un-park, so the issue must read ACTIVE.
   ck "our RELEASE announcement does NOT park → ACTIVE" \
      "$(park_state oso-gato-nox-claudebox oso-gato-nox-claudebox "$RELEASE_ANCHOR re-offering it now.")" "ACTIVE"
+  echo "== plan_class — the plan cap counts PLANNER RUNS, so an already-planned objective costs nothing =="
+  ck "rc0 + filed backlog URLs → PLANNED" \
+     "$(plan_class 0 'https://github.com/oso-gato/fedora-dev/issues/9')" "PLANNED"
+  ck "rc0, nothing filed → SKIPPED (already planned — must NOT burn a slot)" "$(plan_class 0 '')" "SKIPPED"
+  ck "rc3 unconfirmed → STOPPED"     "$(plan_class 3 '')" "STOPPED"
+  ck "rc4 planner BLOCKED → STOPPED" "$(plan_class 4 '')" "STOPPED"
+  ck "rc12 out of scope → STOPPED"   "$(plan_class 12 '')" "STOPPED"
+  echo "== the plan arm reuses park_state with the PLANNER's anchors (identity- + line-1-bound) =="
+  PR_='**dev-plan → refused:** this objective is not yet confirmed.'
+  PB_='**dev-plan → needs a decision (BLOCKED):** the planner produced no features.'
+  ck "dev-plan's refusal is the newest comment → PARKED" \
+     "$(park_state oso-gato-nox-claudebox oso-gato-nox-claudebox "$PR_" "$PLAN_PARK_ANCHOR")" "PARKED"
+  ck "dev-plan's BLOCKED question → PARKED" \
+     "$(park_state oso-gato-nox-claudebox oso-gato-nox-claudebox "$PB_" "$PLAN_PARK_ANCHOR")" "PARKED"
+  ck "a maintainer's reply after it → ACTIVE (re-offered to the planner)" \
+     "$(park_state oso-gato-nox-claudebox arthur 'approved properly now')" "ACTIVE"
+  ck "a STRANGER pasting dev-plan's refusal is inert → ACTIVE" \
+     "$(park_state oso-gato-nox-claudebox randomer "$PR_" "$PLAN_PARK_ANCHOR")" "ACTIVE"
+  ck "dev-plan's 'planned:' summary is NOT a park (dev-plan itself no-ops on it) → ACTIVE" \
+     "$(park_state oso-gato-nox-claudebox oso-gato-nox-claudebox '**dev-plan → planned:** 3 feature(s)' "$PLAN_PARK_ANCHOR")" "ACTIVE"
+  # The author arm must be unaffected by the new argument: its own anchor set is still the default.
+  ck "park_state with no anchor argument still uses the AUTHOR anchors" \
+     "$(park_state oso-gato-nox-claudebox oso-gato-nox-claudebox "$Q")" "PARKED"
+  echo "== the intake label is NOT the label this driver authors from (the R1 bypass, fitness d339476) =="
+  ck "INTAKE_LABEL and BACKLOG_LABEL are distinct" \
+     "$([ "$INTAKE_LABEL" != "$BACKLOG_LABEL" ] && echo distinct || echo SAME)" "distinct"
   echo "== held_seconds — an EXTERNAL clock, and every unreadable shape yields '' (⇒ HOLD) =="
   ck "a real age is computed"        "$(held_seconds '2026-07-20T00:00:00Z' 1784592000)" "86400"
   ck "exactly now → 0"              "$(held_seconds '2026-07-21T00:00:00Z' 1784592000)" "0"
@@ -304,6 +397,70 @@ if [ "${1:-}" = "--selftest" ]; then
   echo; echo "dev-loop selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
 fi
+
+# ---- THE PLAN ARM: an APPROVED objective reaches the planner ---------------------------------------
+# Runs at the TOP of every pass, under the SAME R16 scope check and R9 halt read as the authoring arm
+# (it spawns bounded model runs and files issues — it is "new action" in exactly R9's sense). Anything
+# it files lands as `backlog`, so the arm below picks it up in this very pass, bounded by MAX_PER_PASS.
+# NO LOCAL STATE, like everything else here: discovery is one label query and the park is derived from
+# the objective's own newest comment.
+plan_pass(){ # <repo> <slug> <halted>
+  local repo="$1" slug="$2" halted="$3"
+  [ -x "$DEV_PLAN" ] || { log "planner not executable ($DEV_PLAN) — no objective is planned this pass"; return 0; }
+  # Same @tsv discipline as the backlog query (number, newest comment's author, newest comment's line 1)
+  # and the same HAND SPLIT below: an issue with no comments emits two EMPTY trailing fields, which
+  # `IFS=$'\t' read` would fold away.
+  local jqf='.[] | [ .number,
+        ((.comments | last | .author.login) // ""),
+        ((.comments | last | .body // "") | split("\n")[0])
+      ] | @tsv'
+  local raw
+  raw="$(gh issue list --repo "$slug" --label "$INTAKE_LABEL" --label "$APPROVED_LABEL" --state open \
+          --json number,comments -q "$jqf" 2>/dev/null)" \
+    || { log "objective query failed for $slug — nothing planned this pass (retried next; no objective is lost)"; return 0; }
+  local -A pwho=() pline=(); local ln num w line1 TAB=$'\t'
+  while IFS= read -r ln; do
+    [ -n "$ln" ] || continue
+    num="${ln%%$TAB*}"; ln="${ln#*$TAB}"
+    w="${ln%%$TAB*}";   line1="${ln#*$TAB}"
+    case "$num" in ''|*[!0-9]*) continue ;; esac
+    pwho["$num"]="$w"; pline["$num"]="$line1"
+  done <<<"$raw"
+  local nums; nums="$(parse_backlog "$(printf '%s\n' "${!pwho[@]}")")"
+  [ -n "$nums" ] || return 0
+  # FD 3 + stdin closed, for the reason spelled out at the authoring arm: dev-plan spawns a bounded
+  # `claude -p`, which drains any stdin it inherits to EOF and would otherwise swallow this list.
+  local n rc out spawned=0
+  while IFS= read -r n <&3; do
+    [ -n "$n" ] || continue
+    if [ "$spawned" -ge "$MAX_PLANS_PER_PASS" ]; then
+      log "MAX_PLANS_PER_PASS=$MAX_PLANS_PER_PASS planner run(s) spawned — the remaining approved objective(s) are DEFERRED to the next pass"
+      break
+    fi
+    if [ "$(park_state "$DEV_LOGIN" "${pwho[$n]:-}" "${pline[$n]:-}" "$PLAN_PARK_ANCHOR")" = PARKED ]; then
+      log "  parked objective $slug#$n — dev-plan's own refusal/question is still the newest comment (re-running it would only repeat it); reply on the issue to re-offer it"
+      continue
+    fi
+    if [ "$halted" = 1 ]; then
+      log "  HALTED — would plan objective $slug#$n (R9 fleet HALT; observe-only, no model run, nothing filed)"
+      continue
+    fi
+    log "→ planning approved objective $slug#$n via dev-plan"
+    # The label got it HERE; dev-plan decides whether it may act on it (it re-resolves the applier and
+    # binds them to a maintainer role — see THE LABEL FILTER IS DISCOVERY, NOT AUTHORISATION).
+    out="$("$DEV_PLAN" "$repo" "$n" </dev/null)"; rc=$?
+    case "$(plan_class "$rc" "$out")" in
+      PLANNED)
+        spawned=$((spawned+1))
+        log "  planned objective $slug#$n → backlog: $(printf '%s' "$out" | tr '\n' ' ')" ;;
+      SKIPPED)
+        log "  skipped objective $slug#$n (already planned / nothing new to file) — no cap slot spent" ;;
+      STOPPED)
+        spawned=$((spawned+1))
+        log "  dev-plan rc=$rc for objective $slug#$n — it recorded its own reason on the issue (unconfirmed / blocked / could not file); it parks until someone replies" ;;
+    esac
+  done 3<<<"$nums"
+}
 
 # ---- ONE PASS over the backlog --------------------------------------------------------------------
 one_pass(){ # <repo>
@@ -325,6 +482,10 @@ one_pass(){ # <repo>
     halted=1
     log "FLEET HALT: ${hmsg:-halt checker unavailable (fail-closed toward stopping)} — OBSERVE-ONLY pass (no author run will be spawned, nothing filed)"
   fi
+  # THE STEP UPSTREAM OF THIS BACKLOG (see THE PLAN ARM in the header): an `approved` objective is
+  # handed to the planner FIRST, so anything it decomposes is authored by the arm below in this same
+  # pass. It carries the halt state rather than re-reading it — one halt read per pass.
+  plan_pass "$repo" "$slug" "$halted"
   # ONE list call carries the issue number, its NEWEST comment (author + line 1 + createdAt) AND the
   # release budget already spent on it — the park state, its CLOCK and its BUDGET are all DERIVED from
   # that one read (see PARKING and THE BUDGET LIVES ON THE BUS, above), so the driver keeps NO local

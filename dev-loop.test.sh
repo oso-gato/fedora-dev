@@ -67,11 +67,32 @@ grep -qF -- 'dev-author → needs a decision' "$LOOP" \
 # sleeps, no wall-clock flake). `issue comment` is served too — the driver's release announcement and
 # its escalation are real posts onto this same store, and counting them back off it is what bounds the
 # budget. $FAKE_COMMENT_FAILS makes that post FAIL, the case where a release must NOT be taken.
+#
+# TWO list queries now share this case, and the stub ROUTES BY LABEL exactly as the real gh does: the
+# PLAN ARM asks for issues carrying BOTH $INTAKE_LABEL and $APPROVED_LABEL (three fields — number, newest
+# comment's author, its line 1), the authoring arm asks for $BACKLOG_LABEL (six). Every query's arguments
+# are also recorded to $QUERY_LOG, so a row can assert the plan arm really is scoped to the approved
+# objectives and not to whatever it happens to be handed.
 cat > "$BIN/gh" <<'EOF'
 #!/usr/bin/env bash
 iso(){ date -u -d "@$(( $(date -u +%s) - ${1:-0} ))" +%Y-%m-%dT%H:%M:%SZ; }
 case "${1:-} ${2:-}" in
   "issue list")
+    printf '%s\n' "$*" >> "${QUERY_LOG:-/dev/null}"
+    if printf '%s\n' "$*" | grep -q -- "--label ${INTAKE_LABEL:-objective}"; then
+      # THE PLAN ARM's query. Serve it ONLY when the maintainer's approval label is asked for too — an
+      # objective is discoverable to the planner only once it carries both, which is the point.
+      printf '%s\n' "$*" | grep -q -- "--label ${APPROVED_LABEL:-approved}" || exit 0
+      for n in ${FAKE_OBJECTIVES:-}; do
+        f="$STORE/$n"
+        if [ -s "$f" ]; then
+          tail -1 "$f" | awk -F'\t' -v n="$n" '{printf "%s\t%s\t%s\n", n, $1, $2}'
+        else
+          printf '%s\t\t\n' "$n"
+        fi
+      done
+      exit 0
+    fi
     for n in ${FAKE_BACKLOG:-}; do
       f="$STORE/$n"
       if [ -s "$f" ]; then
@@ -129,6 +150,27 @@ if [ "$2" = "${FAKE_AUTHOR_FAIL:-}" ]; then post_question "$@"; exit 4; fi
 printf 'https://github.com/oso-gato/fedora-dev/pull/%s\n' "$((900 + $2))"
 exit 0
 EOF
+# dev-plan stub — the REAL (rc, stdout, comment) contract the plan arm reads:
+#   FAKE_PLAN_SKIP list   → already planned: rc 0, NOTHING on stdout, no comment, no model run
+#   FAKE_PLAN_REFUSE list → rc 3 (not maintainer-confirmed) — and, like the real dev-plan, it POSTS its
+#                           refusal on the objective, which is what parks it
+#   otherwise             → rc 0 + the URL(s) of the backlog issues it filed (its only stdout emission)
+# It DRAINS STDIN for the same reason the author stub does: the real planner spawns a bounded `claude -p`.
+cat > "$BIN/dev-plan.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'PLAN %s %s\n' "$1" "$2" >> "$PLAN_LOG"
+for s in ${FAKE_PLAN_SKIP:-}; do [ "$2" = "$s" ] && exit 0; done
+for r in ${FAKE_PLAN_REFUSE:-}; do
+  if [ "$2" = "$r" ]; then
+    printf '%s\t%s this objective is not yet confirmed.\t%s\n' "$DEV_LOGIN" "$PLAN_REFUSE_ANCHOR" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$STORE/$2"
+    exit 3
+  fi
+done
+printf 'https://github.com/oso-gato/fedora-dev/issues/%s\n' "$((500 + $2))"
+exit 0
+EOF
 # fleet-halt stub — the R9 HALT reader's CONTRACT, not its internals (bin/fleet-halt.sh has its own
 # suite): rc 0 + RUN is the only "go"; HALT is asserted when $HALT_FLAG exists or FAKE_HALT is set (the
 # flag-file form lets a row flip the switch MID-PASS, to prove in-flight work is not killed).
@@ -141,6 +183,12 @@ echo RUN; exit 0
 EOF
 chmod +x "$BIN"/*
 export ANCHOR
+# The PLANNER's line-1 anchors, pinned here in LOCKSTEP with bin/dev-plan.sh and bin/dev-loop.sh exactly
+# as $ANCHOR is pinned against bin/dev-author.sh: the plan arm parks on them, so a reword on either side
+# that this file did not follow must FAIL rather than silently set the loop re-refusing forever.
+export PLAN_REFUSE_ANCHOR='**dev-plan → refused:**'
+export PLAN_BLOCKED_ANCHOR='**dev-plan → needs a decision (BLOCKED):**'
+export INTAKE_LABEL=objective APPROVED_LABEL=approved
 # The driver's OWN anchors (#277), pinned here in LOCKSTEP with bin/dev-loop.sh exactly as $ANCHOR is
 # pinned against bin/dev-author.sh: the stub counts the release budget off these literals, so a reword
 # on the driver side that this file did not follow must FAIL rather than silently un-bound the budget.
@@ -167,7 +215,11 @@ fi
 # fresh — a clean BUS (empty comment stores) + author log + default fakes for an INDEPENDENT scenario.
 fresh(){
   export AUTHOR_LOG="$ROOT/author-$RANDOM.log"; : > "$AUTHOR_LOG"
+  export PLAN_LOG="$ROOT/plan-$RANDOM.log"; : > "$PLAN_LOG"
+  export QUERY_LOG="$ROOT/query-$RANDOM.log"; : > "$QUERY_LOG"
   export STORE="$ROOT/bus-$RANDOM"; rm -rf "$STORE"; mkdir -p "$STORE"
+  export FAKE_OBJECTIVES="" FAKE_PLAN_SKIP="" FAKE_PLAN_REFUSE=""
+  unset MAX_PLANS_PER_PASS
   export FAKE_BACKLOG="" FAKE_AUTHOR_FAIL="" FAKE_AUTHOR_SKIP="" FAKE_AUTHOR_RC="" FAKE_POST_FAILS=""
   export FAKE_HALT="" HALT_FLAG="$ROOT/halt-flag-$RANDOM" FAKE_TOUCH_HALT=""
   export FAKE_COMMENT_AGE=0 FAKE_COMMENT_FAILS=""
@@ -185,15 +237,18 @@ count_anchor(){ awk -F'\t' -v me="$DEV_LOGIN" -v a="$2" '$1==me && index($2,a)==
 # calls WITHOUT fresh() are successive passes over the same BUS (that is how parking is proven).
 drive(){ # <desc> <expected-author-invocations, space-separated>
   local desc="$1" want="$2"
-  : > "$AUTHOR_LOG"
+  : > "$AUTHOR_LOG"; : > "$PLAN_LOG"
   # REPO_SCOPE/STOP_RELEASE are pinned to the REAL siblings so a driver copy run from elsewhere (the
   # mutation row) still resolves them and dies for the RIGHT reason, never a scope refusal.
-  PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$BIN/fleet-halt-stub" \
+  PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" DEV_PLAN="$BIN/dev-plan.sh" \
+    FLEET_HALT="$BIN/fleet-halt-stub" \
     REPO_SCOPE="$HERE/bin/repo-scope.sh" STOP_RELEASE="$HERE/bin/stop-release.sh" \
     bash "${DRIVE_SCRIPT:-$LOOP}" fedora-dev >/dev/null 2>&1 || true
   local got; got="$(awk '{print $3}' "$AUTHOR_LOG" | sort -n | tr '\n' ' ' | sed 's/ $//')"
   ck "$desc" "$got" "$want"
 }
+# planned — the issues the PLANNER was invoked for on the last drive() (the plan arm's own trace).
+planned(){ awk '{print $3}' "$PLAN_LOG" | sort -n | tr '\n' ' ' | sed 's/ $//'; }
 
 echo "== one pass authors every backlog issue, in order — against a stdin-DRAINING author =="
 fresh; FAKE_BACKLOG=$'7\n3\n12'
@@ -280,6 +335,66 @@ PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$BIN/fleet-halt-st
 ck "--watch under HALT stays up (rc 124 — it must NOT exit; the halt clears without a restart)" "$?" "124"
 ck "…and spawns no author run across every halted pass" "$(wc -l < "$AUTHOR_LOG" | tr -d ' ')" "0"
 export FAKE_HALT=""
+
+# --- THE PLAN ARM. Before this arm existed, `bin/dev-plan.sh` had NO caller anywhere in the fleet: the
+# --- one component that enforces R1 (a MAINTAINER must confirm an objective before anything is built
+# --- from it) was written, tested and unreachable. An intake objective filed as `backlog` was therefore
+# --- swept by the authoring arm above straight into implementation and auto-merge, with the maintainer's
+# --- `approved` tap read by nothing. These rows assert the route exists and is bounded — and the
+# --- mutation at the end of this file asserts they are carried by the WIRING, not by the harness.
+echo "== THE PLAN ARM: an APPROVED objective is handed to dev-plan (and the label filter is the query) =="
+fresh; FAKE_OBJECTIVES=$'42'
+drive "the objective is not itself authored (it is not a backlog feature)" ""
+ck "…the planner was invoked for it" "$(planned)" "42"
+ck "…and the query asked for BOTH the intake and the approval label" \
+   "$(grep -c -- '--label objective' "$QUERY_LOG"):$(grep -c -- '--label approved' "$QUERY_LOG")" "1:1"
+ck "…while the authoring arm still queries its own label" "$(grep -c -- '--label backlog' "$QUERY_LOG")" "1"
+
+echo "== the planner's own refusal PARKS the objective — it is not re-asked every pass (R4) =="
+fresh; FAKE_OBJECTIVES=$'42'; FAKE_PLAN_REFUSE=42
+drive "pass 1: the planner runs and refuses (a non-maintainer applied the label)" ""
+ck "…the planner ran once" "$(planned)" "42"
+drive "pass 2: parked — the refusal is still the newest comment" ""
+ck "…and the planner was NOT re-run (no repeated refusal every LOOP_INTERVAL)" "$(planned)" ""
+reply 42 arthur
+drive "pass 3: a reply un-parks it" ""
+ck "…the planner is re-offered the objective" "$(planned)" "42"
+
+echo "== an ALREADY-PLANNED objective costs no cap slot (it keeps its labels forever) =="
+fresh; FAKE_OBJECTIVES=$'11\n12\n13'; FAKE_PLAN_SKIP="11 12"; export MAX_PLANS_PER_PASS=1
+drive "the two planned objectives are skipped, so 13 is still reached" ""
+ck "…all three offered, the cap spent only on the one that planned" "$(planned)" "11 12 13"
+unset MAX_PLANS_PER_PASS
+
+echo "== MAX_PLANS_PER_PASS caps PLANNER runs (defer, never drop) =="
+fresh; FAKE_OBJECTIVES=$'11\n12\n13'; export MAX_PLANS_PER_PASS=2
+drive "capped at two planner runs this pass" ""
+ck "…the third objective is deferred to the next pass" "$(planned)" "11 12"
+unset MAX_PLANS_PER_PASS
+
+echo "== R9 FLEET HALT gates the plan arm too — a halted pass plans nothing =="
+fresh; FAKE_OBJECTIVES=$'42'; FAKE_BACKLOG=$'3'; export FAKE_HALT=1
+drive "halted pass: nothing authored" ""
+ck "…and nothing planned" "$(planned)" ""
+export FAKE_HALT=""
+drive "un-halted: the objective is planned, nothing lost" "3"
+ck "…the planner runs on the next pass" "$(planned)" "42"
+
+echo "== the anchors the plan arm parks on are the ones bin/dev-plan.sh actually posts =="
+if [ -f "$HERE/bin/dev-plan.sh" ]; then
+  grep -qF -- "$PLAN_REFUSE_ANCHOR" "$HERE/bin/dev-plan.sh" \
+    && ck "bin/dev-plan.sh still emits the line-1 'refused:' anchor" yes yes \
+    || ck "bin/dev-plan.sh still emits the line-1 'refused:' anchor" no yes
+  grep -qF -- "$PLAN_BLOCKED_ANCHOR" "$HERE/bin/dev-plan.sh" \
+    && ck "bin/dev-plan.sh still emits the line-1 BLOCKED anchor" yes yes \
+    || ck "bin/dev-plan.sh still emits the line-1 BLOCKED anchor" no yes
+fi
+grep -qF -- 'dev-plan → (refused|needs a decision)' "$LOOP" \
+  && ck "bin/dev-loop.sh parks the plan arm on exactly those two" yes yes \
+  || ck "bin/dev-loop.sh parks the plan arm on exactly those two" no yes
+grep -qF '"$DEV_PLAN" "$repo" "$n" </dev/null' "$LOOP" \
+  && ck "bin/dev-loop.sh runs dev-plan with stdin closed (its model run drains what it inherits)" yes yes \
+  || ck "bin/dev-loop.sh runs dev-plan with stdin closed (its model run drains what it inherits)" no yes
 
 echo "== a stuck (non-zero) author does NOT wedge the rest =="
 fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_FAIL=7
@@ -499,6 +614,23 @@ export PARK_COOLOFF=3600 PARK_MAX_RELEASES=2 FAKE_COMMENT_AGE=7200
 DRIVE_SCRIPT="$MUT" drive "mutant pass 1: 7 goes BLOCKED" "3 7 12"
 DRIVE_SCRIPT="$MUT" drive "mutant pass 2: the aged park is NOT released — the defect #277 removes" "3 12"
 ck "…and the mutant announces no release" "$(count_anchor 7 "$RELEASE_ANCHOR")" "0"
+
+# --- MUTATION #3, RUN IN-SUITE. The defect this arm removes was not a wrong function — it was a RIGHT
+# --- function nothing called: bin/dev-plan.sh existed, was tested, enforced R1, and had no caller, so an
+# --- objective could reach implementation without ever passing it. A pure-core selftest cannot see that.
+# --- Un-wire the call site (exactly the shipped-dead-code state) and the rows above must go dark: the
+# --- approved objective is never handed to the planner. The sed must genuinely change the copy.
+echo "== MUTATION: with plan_pass un-wired, an APPROVED objective never reaches the planner =="
+MUTP="$ROOT/mut-plan-dev-loop.sh"
+sed 's|^  plan_pass "\$repo" "\$slug" "\$halted"$|  : # plan arm un-wired (mutation)|' "$LOOP" > "$MUTP"
+if cmp -s "$LOOP" "$MUTP"; then
+  ck "the plan-arm mutation sed genuinely changed the driver (else this row proves nothing)" no yes
+else
+  ck "the plan-arm mutation sed genuinely changed the driver (else this row proves nothing)" yes yes
+fi
+fresh; FAKE_OBJECTIVES=$'42'; FAKE_BACKLOG=$'3'
+DRIVE_SCRIPT="$MUTP" drive "mutant: the backlog is still authored (only the plan arm is gone)" "3"
+ck "…and the approved objective is silently never planned (the pre-fix behaviour)" "$(planned)" ""
 
 echo
 echo "dev-loop-dryrun: $pass passed, $fail failed"
