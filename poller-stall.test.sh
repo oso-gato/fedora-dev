@@ -6,6 +6,13 @@
 # forever — while staying quiet when the head is fresh or unlabelled. MUTATION: neutralize stall_verdict
 # to never return STALL and the aged head must surface NOTHING (proving the WORK-age clock is what bites,
 # not the surface plumbing). No real GitHub/network/model.
+#
+# SUBJECT = THE CLOCK, so these rows run with POLLER_REPAIR_MAX=0. Since R39/#278 a STALL routes to
+# BOUNDED SELF-REPAIR first and only reaches the human when repair is inapplicable or spent, so with
+# repair enabled the clock's outcome is a fixer run, not a comment — and this fixture provisions no
+# fixable branch at origin. Disabling repair pins the clock's outcome back to the observable surface it
+# was written to assert (the documented repair-disabled mode, which is exactly the pre-#278 behaviour).
+# The repair-ENABLED path over this same clock is covered end to end by poller-anomaly-repair.test.sh.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; POLLER="$HERE/bin/pr-poller.sh"
 [ -f "$POLLER" ] || { echo "FATAL: $POLLER not found"; exit 2; }
@@ -19,7 +26,10 @@ case "${1:-} ${2:-}" in
   "pr list")
     case "$*" in
       *"--state merged"*) : ;;                                                    # retire pass: nothing merged
-      *"--state open"*)   printf '%s\t%s\t%s\t%s\n' 1 feat/x "$FAKE_SHA" "${FAKE_LABELS:-live-validate}";;
+      # SIX fields, matching the poller's real list query. `labels` stays LAST because `IFS=$'\t' read`
+      # collapses runs of tabs, so an empty labels field must have nothing after it to slide.
+      *"--state open"*)   printf '%s\t%s\t%s\t%s\t%s\t%s\n' 1 feat/x "$FAKE_SHA" \
+                            "${FAKE_AUTHOR:-oso-gato-nox-claudebox}" false "${FAKE_LABELS-live-validate}";;
     esac ;;
   "pr view") : ;;                                                                 # NO host/fitness verdict → host=NONE
   "api "*)   case "$*" in *"/commits/"*) printf '%s\n' "$FAKE_COMMIT_DATE";; esac ;;
@@ -48,6 +58,7 @@ run(){ # <script> <commit-date> [env…]
   local script="$1" cd="$2"; shift 2
   env PATH="$BIN:$PATH" HOME="$HOMEDIR" GH_LOG="$GH_LOG" \
     POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FLEET_HALT=true \
+    POLLER_REPAIR_MAX=0 \
     FAKE_SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef FAKE_COMMIT_DATE="$cd" "$@" \
     bash "$script" --once > "$ROOT/out.log" 2>&1
 }
@@ -67,9 +78,13 @@ echo "== FRESH: same PR, head just pushed (< bound) → quiet NOOP =="
 setup; run "$POLLER" "$NOW"
 surfaced && no "a fresh head wrongly surfaced" || ok "fresh labelled host=NONE → quiet NOOP"
 
-echo "== UNLABELLED: aged host=NONE but no live-validate label → quiet NOOP (no gate expected) =="
+# NB the STALL CLOCK is this row's only subject: it must not fire on a head no gate was ever asked for.
+# Since R39/#278 an unlabelled DEV-authored head is no longer inert — it takes the enrolment self-heal
+# arm — so this asserts "no [stalled] SURFACE", NOT "the sweep did nothing". The enrolment path itself is
+# poller-anomaly-repair.test.sh's subject; calling this a "quiet NOOP" would now be a false claim.
+echo "== UNLABELLED: aged host=NONE but no live-validate label → the STALL clock stays silent =="
 setup; run "$POLLER" "$OLD" FAKE_LABELS="some-other-label"
-surfaced && no "an unlabelled aged head wrongly surfaced" || ok "unlabelled host=NONE → quiet NOOP"
+surfaced && no "an unlabelled aged head wrongly surfaced" || ok "unlabelled host=NONE → no [stalled] surface"
 
 echo "== MUTATION: neutralize stall_verdict (never STALL) → aged head surfaces NOTHING =="
 MUT="$ROOT/pr-poller-mut.sh"

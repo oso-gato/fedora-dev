@@ -99,6 +99,9 @@ DEADMAN_TITLE="${DEADMAN_TITLE:-APPARATUS LIVENESS DEADMAN}"
 DEADMAN_INTERVAL="${DEADMAN_INTERVAL:-120}"
 DEADMAN_LAG_MAX="${DEADMAN_LAG_MAX:-3}"                 # consecutive behind-checks before merged-not-live fires
 DEADMAN_SWEEP_MAX="${DEADMAN_SWEEP_MAX:-300}"          # seconds the poller log may be stale before FROZEN
+# The bound to use INSTEAD while the poller has a live WORKING child. Must exceed the longest
+# legitimate synchronous step; a fitness review measured 462s on 2026-07-28.
+DEADMAN_BUSY_MAX="${DEADMAN_BUSY_MAX:-1800}"           # seconds a BUSY poller may be log-silent before FROZEN
 DEADMAN_UNREADABLE_MAX="${DEADMAN_UNREADABLE_MAX:-3}"  # consecutive unreadable checks before CANNOT_VERIFY
 DEADMAN_EXPECT_POLLER="${DEADMAN_EXPECT_POLLER:-1}"    # 1 = a poller SHOULD be running (alarm when absent)
 DEADMAN_CLONE="${DEADMAN_CLONE:-$(dirname "$HERE")}"   # bin/ sits inside the live clone
@@ -110,6 +113,11 @@ DEADMAN_REMOTE="${DEADMAN_REMOTE:-origin}"
 # so `DEADMAN_LOG=` would silently write to the default path instead of disabling the file (and would
 # make the `[ -n "$DEADMAN_LOG" ]` guards below dead code). Do not "tidy" it back to `:-`.
 DEADMAN_LOG="${DEADMAN_LOG-$HOME/.local/state/apparatus-deadman/deadman.log}"
+# SELF-REFRESH (2026-07-28): the clone HEAD this watcher LAUNCHED on. The loop compares against it and
+# exits for a supervised relaunch once poller-service.sh has ff-pulled past it. Test seam: inject it.
+DEADMAN_LAUNCH_HEAD="${DEADMAN_LAUNCH_HEAD:-}"
+DEADMAN_REFRESH_EVERY="${DEADMAN_REFRESH_EVERY:-15}"   # checks between refresh probes (~30 min at 120s)
+DEADMAN_RELOAD_RC="${DEADMAN_RELOAD_RC:-90}"           # informational: the supervise loop relaunches on ANY exit
 # GENERATION FENCE (2026-07-28): a watchdog orphaned in a destroyed container reports healthy forever.
 DEADMAN_BOX_GENERATION="${DEADMAN_BOX_GENERATION:-$(dirname "$(readlink -f "$0")")/box-generation.sh}"
 DEADMAN_ORPHAN_RC="${DEADMAN_ORPHAN_RC:-92}"
@@ -182,7 +190,12 @@ deadman_verdict(){
   if [ "$expect_poller" = 1 ]; then
     if [ "$poller_alive" != 1 ]; then
       printf 'POLLER_DOWN|poller not running (no pr-poller.sh --watch process) — the autonomous loop is not sweeping\n'
-    elif [ "$log_age" -ge 0 ] && [ "$log_age" -gt "$sweep_max" ]; then
+    elif [ -n "$sweep_max" ] && [ -z "${sweep_max//[0-9]/}" ] && [ "$sweep_max" -gt 0 ] 2>/dev/null \
+         && [ "$log_age" -ge 0 ] && [ "$log_age" -gt "$sweep_max" ]; then
+      # THE BOUND MUST BE A POSITIVE INTEGER OR THIS AXIS IS SKIPPED ENTIRELY. A sweep_max of 0 would
+      # mean "log_age > 0" — ALWAYS FROZEN on any log age of one second, SIGTERMing a healthy poller on
+      # every check. This is the one alarm whose response is to KILL a process, so an unusable bound
+      # must DISABLE it, never arm it permanently.
       printf 'POLLER_FROZEN|poller alive but not sweeping (log frozen ~%s min, > %ss) — the sweep loop is wedged\n' "$(( log_age / 60 ))" "$sweep_max"
     fi
   fi
@@ -259,6 +272,54 @@ respond_plan(){
 }
 
 # ── SELFTEST — the pure core only, so it can run anywhere (CI, a bare shell) with no side effects ──────
+# refresh_verdict <launch-head> <clone-head> → RELOAD | STAY   (pure; --selftest covers it)
+#
+# WHY (2026-07-28). The poller gets #162 self-refresh: it notices the clone advanced past the code it is
+# running and exits for a supervised relaunch. THIS WATCHER HAD NO SUCH PATH. poller-service.sh
+# ff-pulls the shared clone and relaunches only the POLLER, so a merged fix to apparatus-deadman.sh sat
+# on disk while the RUNNING deadman kept executing the code it launched with — indefinitely, unless a
+# human restarted it. That is the merged-but-not-live trap this watcher exists to REPORT, reproduced
+# inside the watcher itself.
+#
+# It needs no pull of its own — poller-service.sh is the single writer of the clone (never contend with
+# it). It only has to NOTICE and EXIT: the base supervise loop in entrypoint.sh is
+# `while :; do distrobox enter … apparatus-deadman.sh --watch || true; sleep 30; done`, so exiting IS
+# the relaunch, and the relaunch reads the new code from the already-updated clone.
+#
+# FAIL-SAFE TOWARD STAYING: an unreadable head on either side ⇒ STAY. A watcher that exits on a failed
+# git read would flap itself out of existence during a blip, and a watchdog that is not running is worse
+# than one running slightly stale code.
+refresh_verdict(){
+  local launch="${1-}" now="${2-}"
+  [ -n "$launch" ] || { printf 'STAY\n'; return 0; }
+  [ -n "$now" ] || { printf 'STAY\n'; return 0; }
+  [ "$launch" = "$now" ] && { printf 'STAY\n'; return 0; }
+  printf 'RELOAD\n'
+}
+
+# effective_sweep_max <idle-max> <busy-max> <busy:0|1> → the staleness bound to judge FROZEN against.
+#
+# WHY (the 2026-07-28 self-inflicted outage). POLLER_FROZEN was decided PURELY on poller-log staleness
+# against a 300s bound. But the poller's REVIEW and FIX steps run `claude -p` SYNCHRONOUSLY inside
+# sweep(), and a fitness review legitimately takes ~460s — the log is silent because the poller is
+# WORKING, not wedged. Measured: `#267 running fitness harness` 08:58:49 → `poller stopping (signal)`
+# 09:06:31, a healthy poller killed 462s in. Every kill also restarts the poller, and the #162
+# self-refresh counter restarts at 0 — so a poller killed every ~20 min can NEVER reach its refresh
+# tick and MERGED CODE NEVER DEPLOYS. That is the MERGED_NOT_LIVE anomaly this same watcher was filing:
+# it was reporting a fault it was itself creating.
+#
+# An unreadable idle bound yields 0, and 0 DISABLES the FROZEN axis in deadman_verdict (which requires a
+# positive integer). An earlier revision returned 0 while its comment, test name and PR body all claimed
+# "never FROZEN" — the gate was `log_age -gt sweep_max`, so 0 meant ALWAYS frozen. Caught by review.
+effective_sweep_max(){
+  local idle="${1-}" busy_max="${2-}" busy="${3-}"
+  case "$idle" in ''|*[!0-9]*) printf '0\n'; return 0 ;; esac      # unreadable ⇒ 0 ⇒ axis DISABLED
+  [ "$busy" = 1 ] || { printf '%s\n' "$idle"; return 0; }
+  case "$busy_max" in ''|*[!0-9]*) printf '%s\n' "$idle"; return 0 ;; esac
+  [ "$busy_max" -gt "$idle" ] && { printf '%s\n' "$busy_max"; return 0; }
+  printf '%s\n' "$idle"
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   p=0 f=0
   ck(){ if [ "$2" = "$3" ]; then p=$((p+1)); printf '  ok   %s\n' "$1"
@@ -355,6 +416,34 @@ if [ "${1:-}" = "--selftest" ]; then
      "/fakehome/.local/state/apparatus-deadman/deadman.log"
   ck "explicit path → honoured verbatim" \
      "$(DEADMAN_LOG=/tmp/x.log HOME=/fakehome bash -c "$_asgn"'; printf %s "$DEADMAN_LOG"')" /tmp/x.log
+
+  echo "== refresh_verdict — the watcher must deploy its OWN merged fixes =="
+  rv(){ ck "$1" "$(refresh_verdict "$2" "$3")" "$4"; }
+  rv "same head stays"                       abc123 abc123 STAY
+  rv "clone advanced -> reload"              abc123 def456 RELOAD
+  rv "unreadable launch head -> STAY (never flap out of existence)" "" def456 STAY
+  rv "unreadable clone head -> STAY"         abc123 "" STAY
+  rv "both unreadable -> STAY"               "" "" STAY
+  echo "== effective_sweep_max — a BUSY poller is not a FROZEN poller (the 2026-07-28 self-kill) =="
+  es(){ ck "$1" "$(effective_sweep_max "$2" "$3" "$4")" "$5"; }
+  es "idle poller keeps the tight bound"             300 1800 0 300
+  es "THE INCIDENT: busy poller gets the long bound" 300 1800 1 1800
+  es "busy bound below idle is ignored"              300 60   1 300
+  es "unreadable idle bound -> 0 (DISABLES the axis)" x 1800  1 0
+  es "unreadable busy bound falls back to idle"      300 x    1 300
+  es "busy flag absent behaves as idle"              300 1800 '' 300
+  # END-TO-END through the REAL verdict. Every finding on this PR was a comment or test NAME claiming
+  # behaviour the code did not have, green because the test checked a hand-fed value, never the path.
+  ck "462s review on the busy bound raises NO POLLER_FROZEN" \
+     "$(deadman_verdict 0 0 0 "" 1 462 0 0 1 3 "$(effective_sweep_max 300 1800 1)" 3 | grep -c POLLER_FROZEN)" "0"
+  ck "462s review on the OLD tight bound WOULD have been killed" \
+     "$(deadman_verdict 0 0 0 "" 1 462 0 0 1 3 300 3 | grep -c POLLER_FROZEN)" "1"
+  ck "bound 0 raises NO alarm at log_age=1 (the inversion)" \
+     "$(deadman_verdict 0 0 0 "" 1 1 0 0 1 3 0 3 | grep -c POLLER_FROZEN)" "0"
+  ck "non-numeric bound raises NO alarm" \
+     "$(deadman_verdict 0 0 0 "" 1 99999 0 0 1 3 x 3 | grep -c POLLER_FROZEN)" "0"
+  ck "a REAL wedge still alarms (the axis is not dead)" \
+     "$(deadman_verdict 0 0 0 "" 1 900 0 0 1 3 300 3 | grep -c POLLER_FROZEN)" "1"
 
   echo; echo "apparatus-deadman selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
@@ -610,6 +699,30 @@ fmt_body(){
   printf '\n<sub>apparatus liveness deadman (R18); an INDEPENDENT watcher that never merges and never pulls/merges/resets the clone. Under --watch it also RESPONDS within a safe envelope (quarantine untracked strays; SIGTERM a wedged poller) and records what it did here. This issue is updated in place while any anomaly stands and closed automatically when the loop is healthy again.</sub>\n'
 }
 
+# poller_busy <pids> → 1 if ANY named poller has a live child that is DOING WORK, else 0.
+#
+# THE SLEEP CHILD IS NOT WORK. `pr-poller.sh` ends its loop with `sleep "$POLL_INTERVAL"` and bash FORKS
+# /bin/sleep there (no exec optimisation inside a loop), so a genuinely IDLE poller has a live child for
+# ~30 of every ~31 seconds. Counting that as busy would hand the loose bound to an idle poller almost
+# always, making the tight bound unreachable in production. Skipping children whose /proc/<kid>/comm is
+# `sleep` is what makes "idle" actually mean idle — classifying a CHILD by comm is not the self-match
+# hazard the 5-incident rule guards against (that rule is about identifying OURSELVES from a cmdline).
+#
+# FAIL DIRECTION: any unreadable /proc yields NOT-busy, keeping the TIGHT bound under uncertainty. This
+# can never INVENT busy to suppress a real alarm.
+poller_busy(){
+  local pids="${1-}" p kids k comm
+  for p in $pids; do
+    kids="$(cat "/proc/$p/task/$p/children" 2>/dev/null)" || continue
+    for k in $kids; do
+      comm="$(cat "/proc/$k/comm" 2>/dev/null)" || continue   # raced away ⇒ not evidence of work
+      case "$comm" in sleep) continue ;; esac                 # the idle inter-sweep nap, not work
+      printf '1'; return 0
+    done
+  done
+  printf '0'
+}
+
 # surface_anomaly <reasons> [resp-notes] — create-or-UPDATE the ONE issue, dedup via the marker + by-title
 # discovery. The responder's audit notes ride the body so the record shows what auto-recovery did.
 surface_anomaly(){
@@ -673,9 +786,15 @@ run_check(){
   local lag_min=$(( lag_streak * DEADMAN_INTERVAL / 60 ))
 
   local reasons
+  # BUSY-NOT-FROZEN: judge staleness against the bound that fits what the poller is actually doing.
+  local _busy _sweep_bound
+  _busy="$(poller_busy "$pids")"
+  _sweep_bound="$(effective_sweep_max "$DEADMAN_SWEEP_MAX" "$DEADMAN_BUSY_MAX" "$_busy")"
+  [ "$_busy" = 1 ] && [ "$lage" -gt "$DEADMAN_SWEEP_MAX" ] 2>/dev/null && \
+    log "poller log silent ${lage}s but it has a LIVE WORKING CHILD (review/fix in flight) — judging against ${_sweep_bound}s, not ${DEADMAN_SWEEP_MAX}s"
   reasons="$(deadman_verdict "$behind" "$lag_streak" "$lag_min" "$dirty" "$alive" "$lage" \
              "$unreadable_now" "$unread_streak" "$DEADMAN_EXPECT_POLLER" \
-             "$DEADMAN_LAG_MAX" "$DEADMAN_SWEEP_MAX" "$DEADMAN_UNREADABLE_MAX")"
+             "$DEADMAN_LAG_MAX" "$_sweep_bound" "$DEADMAN_UNREADABLE_MAX")"
   # The fitness-token freshness axis is INDEPENDENT of git-readability and the poller — evaluate + append
   # it here so a stale token surfaces even during a git blip (empty git-axis) or a healthy sweep.
   local freason; freason="$(fitness_token_verdict "$(fitness_env_age)" "$DEADMAN_FITNESS_STALE_MAX")"
@@ -719,6 +838,8 @@ case "${1:-}" in
   --check) run_check "${DEADMAN_RESPOND:-0}"; exit $?;;   # READ-ONLY by default; DEADMAN_RESPOND=1 opts in
   --watch)
     trap 'log "deadman stopping (signal)"; exit 0' TERM INT HUP
+    _rchecks=0
+    [ -n "$DEADMAN_LAUNCH_HEAD" ] || DEADMAN_LAUNCH_HEAD="$(git -C "$DEADMAN_CLONE" rev-parse HEAD 2>/dev/null)"
     log "apparatus-deadman --watch up (interval=${DEADMAN_INTERVAL}s clone=$DEADMAN_CLONE repo=$DEADMAN_REPO expect_poller=$DEADMAN_EXPECT_POLLER responder=on)"
     while :; do
       # GENERATION FENCE (2026-07-28) — the watchdog needs this MORE than anything it watches. On
@@ -734,6 +855,18 @@ case "${1:-}" in
         exit "${DEADMAN_ORPHAN_RC:-92}"
       fi
       run_check 1 >/dev/null || true    # --watch RESPONDS; the verdict + actions ride the log
+      # SELF-REFRESH probe at a SAFE POINT (between checks, never mid-response). Rate-limited so a
+      # git read is not done every tick. Exiting IS the relaunch — the base supervise loop re-enters
+      # and reads the new code from the clone poller-service.sh already ff-pulled.
+      _rchecks=$(( _rchecks + 1 ))
+      if [ "$_rchecks" -ge "$DEADMAN_REFRESH_EVERY" ]; then
+        _rchecks=0
+        _now_head="$(git -C "$DEADMAN_CLONE" rev-parse HEAD 2>/dev/null)"
+        if [ "$(refresh_verdict "$DEADMAN_LAUNCH_HEAD" "$_now_head")" = RELOAD ]; then
+          log "self-refresh: clone advanced ${DEADMAN_LAUNCH_HEAD:0:7} → ${_now_head:0:7} — EXITING for a supervised relaunch on the new code (a watchdog that cannot deploy its own fixes is the merged-not-live trap it exists to report)"
+          exit "$DEADMAN_RELOAD_RC"
+        fi
+      fi
       sleep "$DEADMAN_INTERVAL"
     done
     ;;
