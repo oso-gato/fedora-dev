@@ -103,6 +103,11 @@ DEADMAN_UNREADABLE_MAX="${DEADMAN_UNREADABLE_MAX:-3}"  # consecutive unreadable 
 DEADMAN_EXPECT_POLLER="${DEADMAN_EXPECT_POLLER:-1}"    # 1 = a poller SHOULD be running (alarm when absent)
 DEADMAN_CLONE="${DEADMAN_CLONE:-$(dirname "$HERE")}"   # bin/ sits inside the live clone
 DEADMAN_REMOTE="${DEADMAN_REMOTE:-origin}"
+# SELF-REFRESH (2026-07-28): the clone HEAD this watcher LAUNCHED on. The loop compares against it and
+# exits for a supervised relaunch once poller-service.sh has ff-pulled past it. Test seam: inject it.
+DEADMAN_LAUNCH_HEAD="${DEADMAN_LAUNCH_HEAD:-}"
+DEADMAN_REFRESH_EVERY="${DEADMAN_REFRESH_EVERY:-15}"   # checks between refresh probes (~30 min at 120s)
+DEADMAN_RELOAD_RC="${DEADMAN_RELOAD_RC:-90}"           # informational: the supervise loop relaunches on ANY exit
 # GENERATION FENCE (2026-07-28): a watchdog orphaned in a destroyed container reports healthy forever.
 DEADMAN_BOX_GENERATION="${DEADMAN_BOX_GENERATION:-$(dirname "$(readlink -f "$0")")/box-generation.sh}"
 DEADMAN_ORPHAN_RC="${DEADMAN_ORPHAN_RC:-92}"
@@ -252,6 +257,31 @@ respond_plan(){
 }
 
 # ── SELFTEST — the pure core only, so it can run anywhere (CI, a bare shell) with no side effects ──────
+# refresh_verdict <launch-head> <clone-head> → RELOAD | STAY   (pure; --selftest covers it)
+#
+# WHY (2026-07-28). The poller gets #162 self-refresh: it notices the clone advanced past the code it is
+# running and exits for a supervised relaunch. THIS WATCHER HAD NO SUCH PATH. poller-service.sh
+# ff-pulls the shared clone and relaunches only the POLLER, so a merged fix to apparatus-deadman.sh sat
+# on disk while the RUNNING deadman kept executing the code it launched with — indefinitely, unless a
+# human restarted it. That is the merged-but-not-live trap this watcher exists to REPORT, reproduced
+# inside the watcher itself.
+#
+# It needs no pull of its own — poller-service.sh is the single writer of the clone (never contend with
+# it). It only has to NOTICE and EXIT: the base supervise loop in entrypoint.sh is
+# `while :; do distrobox enter … apparatus-deadman.sh --watch || true; sleep 30; done`, so exiting IS
+# the relaunch, and the relaunch reads the new code from the already-updated clone.
+#
+# FAIL-SAFE TOWARD STAYING: an unreadable head on either side ⇒ STAY. A watcher that exits on a failed
+# git read would flap itself out of existence during a blip, and a watchdog that is not running is worse
+# than one running slightly stale code.
+refresh_verdict(){
+  local launch="${1-}" now="${2-}"
+  [ -n "$launch" ] || { printf 'STAY\n'; return 0; }
+  [ -n "$now" ] || { printf 'STAY\n'; return 0; }
+  [ "$launch" = "$now" ] && { printf 'STAY\n'; return 0; }
+  printf 'RELOAD\n'
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   p=0 f=0
   ck(){ if [ "$2" = "$3" ]; then p=$((p+1)); printf '  ok   %s\n' "$1"
@@ -334,6 +364,13 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "MERGED_NOT_LIVE → SURFACE (never pull)" "$(respond_plan MERGED_NOT_LIVE 0 - 1)" SURFACE
   ck "CANNOT_VERIFY → SURFACE"               "$(respond_plan CANNOT_VERIFY 0 - 1)" SURFACE
 
+  echo "== refresh_verdict — the watcher must deploy its OWN merged fixes =="
+  rv(){ ck "$1" "$(refresh_verdict "$2" "$3")" "$4"; }
+  rv "same head stays"                       abc123 abc123 STAY
+  rv "clone advanced -> reload"              abc123 def456 RELOAD
+  rv "unreadable launch head -> STAY (never flap out of existence)" "" def456 STAY
+  rv "unreadable clone head -> STAY"         abc123 "" STAY
+  rv "both unreadable -> STAY"               "" "" STAY
   echo; echo "apparatus-deadman selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
 fi
@@ -675,6 +712,8 @@ case "${1:-}" in
   --check) run_check "${DEADMAN_RESPOND:-0}"; exit $?;;   # READ-ONLY by default; DEADMAN_RESPOND=1 opts in
   --watch)
     trap 'log "deadman stopping (signal)"; exit 0' TERM INT HUP
+    _rchecks=0
+    [ -n "$DEADMAN_LAUNCH_HEAD" ] || DEADMAN_LAUNCH_HEAD="$(git -C "$DEADMAN_CLONE" rev-parse HEAD 2>/dev/null)"
     log "apparatus-deadman --watch up (interval=${DEADMAN_INTERVAL}s clone=$DEADMAN_CLONE repo=$DEADMAN_REPO expect_poller=$DEADMAN_EXPECT_POLLER responder=on)"
     while :; do
       # GENERATION FENCE (2026-07-28) — the watchdog needs this MORE than anything it watches. On
@@ -690,6 +729,18 @@ case "${1:-}" in
         exit "${DEADMAN_ORPHAN_RC:-92}"
       fi
       run_check 1 >/dev/null || true    # --watch RESPONDS; the verdict + actions ride the log
+      # SELF-REFRESH probe at a SAFE POINT (between checks, never mid-response). Rate-limited so a
+      # git read is not done every tick. Exiting IS the relaunch — the base supervise loop re-enters
+      # and reads the new code from the clone poller-service.sh already ff-pulled.
+      _rchecks=$(( _rchecks + 1 ))
+      if [ "$_rchecks" -ge "$DEADMAN_REFRESH_EVERY" ]; then
+        _rchecks=0
+        _now_head="$(git -C "$DEADMAN_CLONE" rev-parse HEAD 2>/dev/null)"
+        if [ "$(refresh_verdict "$DEADMAN_LAUNCH_HEAD" "$_now_head")" = RELOAD ]; then
+          log "self-refresh: clone advanced ${DEADMAN_LAUNCH_HEAD:0:7} → ${_now_head:0:7} — EXITING for a supervised relaunch on the new code (a watchdog that cannot deploy its own fixes is the merged-not-live trap it exists to report)"
+          exit "$DEADMAN_RELOAD_RC"
+        fi
+      fi
       sleep "$DEADMAN_INTERVAL"
     done
     ;;
