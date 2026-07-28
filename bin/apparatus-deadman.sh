@@ -247,6 +247,19 @@ respond_plan(){
     POLLER_DOWN)
       # never launch supervision here: hold ONE grace window, then surface if still down.
       [ "$acted" = 1 ] && printf SURFACE || printf WAIT ;;
+    WORK_STALLED)
+      # A poller that is ALIVE and SWEEPING but has moved no work is FUNCTIONALLY frozen, so it gets the
+      # SAME bounded remedy as POLLER_FROZEN. Proven necessary 2026-07-28: the loop evaluated ZERO PRs
+      # for 40 minutes while `gh` failed inside the poller's environment and succeeded identically from
+      # an interactive shell. POLLER_FROZEN could not fire (the log was advancing — with failures), and
+      # POLLER_DOWN could not fire (the process was alive), so no axis and no responder could see it.
+      # TERM is the right remedy precisely BECAUSE the fault was environmental: the supervisor relaunches
+      # with a freshly-built environment, and work resumes from GitHub (idempotent — nothing is lost).
+      # Bounded exactly like POLLER_FROZEN: signal ONCE per occurrence, then escalate to the human rather
+      # than churn a restart loop. No confirmed poller pid ⇒ SURFACE (never signal a stranger).
+      if   [ "$have_target" != 1 ]; then printf SURFACE
+      elif [ "$acted" = 1 ];        then printf ESCALATE
+      else                               printf SIGTERM; fi ;;
     *)  # MERGED_NOT_LIVE (self-refresh owns the pull — the responder must NOT pull), CANNOT_VERIFY, etc.
       printf SURFACE ;;
   esac
@@ -362,6 +375,12 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "under the bound = quiet"                  "$(wf "$WFP" "$WFP" 600 2700)" "quiet"
   ck "axis disabled (0) = quiet"                "$(wf "$WFP" "$WFP" 99999 0)" "quiet"
   ck "unreadable age = quiet (no false alarm)"  "$(wf "$WFP" "$WFP" "" 2700)" "quiet"
+  echo "== WORK_STALLED responder — a poller that moves no work is FUNCTIONALLY frozen =="
+  rp(){ local got; got="$(respond_plan "$2" "$3" "$4" "$5")"; ck "$1" "$got" "$6"; }
+  rp "stalled work TERMs the poller once"      WORK_STALLED 0 "" 1 SIGTERM
+  rp "already acted -> escalate, never churn"  WORK_STALLED 1 "" 1 ESCALATE
+  rp "no confirmed pid -> surface, never signal a stranger" WORK_STALLED 0 "" 0 SURFACE
+  rp "parity with POLLER_FROZEN (same remedy)" POLLER_FROZEN 0 "" 1 SIGTERM
   echo; echo "apparatus-deadman selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
 fi
