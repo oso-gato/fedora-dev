@@ -198,8 +198,13 @@ esac
 # COMPLEMENTARY TO, NOT A DUPLICATE OF, the poller's enroll_pr (R39/#278): that one repairs an ALREADY
 # OPEN unlabelled PR reactively, one label, after the fact. This declares the whole vocabulary up front
 # so the label EXISTS at `--add-label` time and the PR is enrolled on its first push.
+# KEEP ITS STDERR. repo-labels reports exactly what it did ("created 'live-validate'", "could NOT
+# create: …", "outside the operating scope") on stderr, and those lines are the only record of whether
+# the enrolment vocabulary actually got established. Discarding them would repeat, in this very commit,
+# the defect the poller hunk here removes: a failure that cannot say WHY is undiagnosable hours later.
+# Only stdout is dropped (the script writes none) so nothing pollutes an author log parsed elsewhere.
 REPO_LABELS="${REPO_LABELS:-$HERE/repo-labels.sh}"
-[ -x "$REPO_LABELS" ] && { "$REPO_LABELS" ensure "$REPO" >&2 2>/dev/null || log "label contract could not be established on $SLUG — the PR may not enrol (continuing)"; }
+[ -x "$REPO_LABELS" ] && { "$REPO_LABELS" ensure "$REPO" >/dev/null || log "label contract could not be established on $SLUG — the PR may not enrol (continuing)"; }
 CLONE_ROOT="${CLONE_ROOT:-$HOME/repos}"
 _src="$REPO"; [ -d "$_src/.git" ] || _src="$CLONE_ROOT/$REPO"
 if [ ! -d "$_src/.git" ]; then

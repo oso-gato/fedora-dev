@@ -109,6 +109,11 @@ DEADMAN_REMOTE="${DEADMAN_REMOTE:-origin}"
 # WORK-PROGRESS axis (R18 IDLE-WITH-WORK-PENDING, 2026-07-28). How long open work may sit with NO state
 # change before it is an alarm. 0 disables.
 DEADMAN_WORK_STALL_MAX="${DEADMAN_WORK_STALL_MAX:-2700}"   # 45 min
+# TEST KNOB ONLY — override the repo list the work axis reads. Empty by default, so the real deployment
+# always derives its repos from the R16 App-install enumeration (`repo-scope.sh list`) and never from a
+# config string. It is READ-ONLY (this axis only ever runs `gh pr list`), so it cannot widen what the
+# apparatus ACTS on — but it must not grow into a config-driven repo set either: the one home for "which
+# repos" is the App installation, and a second list here would be exactly the drift R16 removed.
 DEADMAN_WORK_REPOS="${DEADMAN_WORK_REPOS:-}"               # default: the R16 installed set
 # The watcher's OWN durable log. Lives in the deadman's state dir, NOT the poller's: the stale
 # ~/.local/state/pr-poller/deadman.log is a leftover of an older arrangement and reading it to judge
@@ -289,6 +294,30 @@ respond_plan(){
 }
 
 # ── SELFTEST — the pure core only, so it can run anywhere (CI, a bare shell) with no side effects ──────
+# work_drivable <labels-csv> <parked-csv> → rc 0 iff the loop is SUPPOSED to be moving this item.
+#
+# THE DIFFERENCE BETWEEN STUCK AND WAITING. The work-progress axis alarms on work whose state has not
+# changed. Some work is not SUPPOSED to change: a PR held for the maintainer (R1 `maintainer-merge`), one
+# carrying a genuine escalation, one whose bounded auto-recovery is already spent (`apparatus-blocked`).
+# Its fingerprint is static BY DESIGN and stays static for as long as the human takes — so without this
+# filter the deadman would, 45 minutes later, SIGTERM a perfectly healthy poller and then wake the very
+# maintainer it is waiting on. That is the exact failure mode the axis exists to prevent, aimed inward.
+#
+# EXACT TOKEN MATCH, never a substring: both sides are comma-FENCED before the compare, so `blocked` can
+# never match `apparatus-blocked` (or vice versa) and a label that merely CONTAINS a parked name is not
+# parked. The parked set is passed IN rather than read here, so this stays pure and its one home is the
+# registry in `repo-labels.sh` — a second hardcoded copy of the vocabulary is the defect that file exists
+# to kill. An EMPTY parked set filters nothing (the axis keeps working, unfiltered — see work_fingerprint
+# for why that is the correct fail direction).
+work_drivable(){
+  local labels=",${1-}," parked="${2-}" p
+  for p in ${parked//,/ }; do
+    [ -n "$p" ] || continue
+    case "$labels" in *",$p,"*) return 1 ;; esac
+  done
+  return 0
+}
+
 # work_stall_verdict <fingerprint> <prev-fingerprint> <unchanged-seconds> <max> → a reason line, or empty.
 # THE AXIS THAT WAS MISSING. Every other axis asks "is the machine RUNNING?" — poller alive, log fresh,
 # token minted, clone not behind. A poller that sweeps happily and NOOPs forever passes ALL of them.
@@ -446,6 +475,21 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "under the bound = quiet"                  "$(wf "$WFP" "$WFP" 600 2700)" "quiet"
   ck "axis disabled (0) = quiet"                "$(wf "$WFP" "$WFP" 99999 0)" "quiet"
   ck "unreadable age = quiet (no false alarm)"  "$(wf "$WFP" "$WFP" "" 2700)" "quiet"
+  echo "== work_drivable — work WAITING BY DESIGN is not work that is STUCK =="
+  PK="maintainer-merge,apparatus-blocked,escalate,needs-decision,blocked,awaiting-maintainer"
+  dv(){ work_drivable "$1" "$PK" && echo drivable || echo parked; }
+  ck "an ordinary gated PR is drivable"      "$(dv 'live-validate' )" "drivable"
+  ck "no labels at all is drivable"          "$(dv '' )" "drivable"
+  ck "R1 maintainer-merge is PARKED"         "$(dv 'maintainer-merge' )" "parked"
+  ck "escalate is PARKED"                    "$(dv 'escalate' )" "parked"
+  ck "apparatus-blocked is PARKED"           "$(dv 'live-validate,apparatus-blocked' )" "parked"
+  ck "parked wins anywhere in the list"      "$(dv 'a,b,blocked,c' )" "parked"
+  # The substring rows are the ones that would silently mis-filter: with a naive `case *blocked*` an
+  # `apparatus-blocked` PR would satisfy a `blocked` probe and — worse — a future label merely CONTAINING
+  # a parked name would drop real work out of the axis, blinding it in exactly the quiet way it must not.
+  ck "substring must NOT match (apparatus-blocked vs blocked)" "$(work_drivable 'apparatus-blocked' 'blocked' && echo drivable || echo parked)" "drivable"
+  ck "substring must NOT match (blocked vs apparatus-blocked)" "$(work_drivable 'blocked' 'apparatus-blocked' && echo drivable || echo parked)" "drivable"
+  ck "empty parked set filters NOTHING"      "$(work_drivable 'escalate' '' && echo drivable || echo parked)" "drivable"
   echo "== WORK_STALLED responder — a poller that moves no work is FUNCTIONALLY frozen =="
   rp(){ local got; got="$(respond_plan "$2" "$3" "$4" "$5")"; ck "$1" "$got" "$6"; }
   rp "stalled work TERMs the poller once"      WORK_STALLED 0 "" 1 SIGTERM
@@ -750,23 +794,52 @@ fmt_body(){
   printf '\n<sub>apparatus liveness deadman (R18); an INDEPENDENT watcher that never merges and never pulls/merges/resets the clone. Under --watch it also RESPONDS within a safe envelope (quarantine untracked strays; SIGTERM a wedged poller) and records what it did here. This issue is updated in place while any anomaly stands and closed automatically when the loop is healthy again.</sub>\n'
 }
 
-# work_fingerprint → one line per open PR of ours across the in-scope repos:
-# "<repo>#<n> <head-sha> <gated:0|1> <labels>". ANY change (new PR, new head, a verdict arriving, a
-# merge, a label) changes the fingerprint and proves progress. Unreadable → empty → quiet (never a
-# false alarm from a GitHub blip; the CANNOT_VERIFY axis owns that failure).
+# work_fingerprint → one line per open DRIVABLE PR of ours across the in-scope repos:
+# "<repo>#<n> <head-sha> <gate-comments> <labels>", where <gate-comments> COUNTS the host live-gate and
+# fitness verdict comments on that PR. ANY change (new PR, new head, a verdict arriving, a merge, a
+# label) changes the fingerprint and proves progress — the count is not read for its value, only for its
+# delta, which is why a count and not a 0|1 flag is sufficient.
+#
+# PARKED WORK IS EXCLUDED (see work_drivable): a PR held for the maintainer is static by design, and
+# alarming on it would page the human we are waiting for. The parked vocabulary comes from
+# repo-labels.sh, which owns it; if that read fails the set is EMPTY and NOTHING is filtered — the axis
+# keeps working, unfiltered, because a silently-disabled watchdog is far worse than one that can
+# false-fire into a bounded, self-clearing SIGTERM. The degraded read is logged, never swallowed.
 #
 # EVERY READ IS TIMEOUT-BOUNDED, like every other gh/git call in this file. This is a WATCHDOG: it is the
 # one process that must never hang, and an unbounded network read inside its check loop is exactly how it
 # would. The bound is per-repo, so one wedged repo costs one timeout, not the whole check.
+#
+# UNREADABLE → EMPTY → QUIET, and the HONEST caveat: an empty fingerprint means EITHER "no open work" OR
+# "the gh read failed", and both are quiet. No axis owns the second case — CANNOT_VERIFY is driven by the
+# GIT-remote unreadable counter (see run_check's $G_UNREAD) and never sees a gh failure — so a persistent
+# `gh pr list` outage would leave this axis quiet rather than alarmed. That is a DISCLOSED RESIDUAL, not
+# a covered case. What keeps it from being SILENT is the log line below (the failure is stated on every
+# check) and the stored-fingerprint rule in run_check (an empty read never resets the clock, so an
+# accumulated stall survives the blip and fires when the read recovers). Giving the gh read its own
+# unreadable counter — a real second axis, with its own bound — is the named follow-up.
 work_fingerprint(){
   local repos="$DEADMAN_WORK_REPOS" r
-  [ -n "$repos" ] || repos="$("$(dirname "$(readlink -f "$0")")/repo-scope.sh" list 2>/dev/null)"
+  [ -n "$repos" ] || repos="$("$HERE/repo-scope.sh" list 2>/dev/null)"
   [ -n "$repos" ] || return 0
+  local parked; parked="$("$HERE/repo-labels.sh" parked 2>/dev/null | paste -sd, -)"
+  [ -n "$parked" ] || log "work-progress: parked-label registry unreadable — NOT filtering parked work this check (the axis stays on; a maintainer-held PR may false-fire)"
   for r in $repos; do
     timeout "$DEADMAN_GH_TIMEOUT" gh pr list --repo "oso-gato/$r" --state open --limit 50 \
        --json number,headRefOid,labels,comments \
-       -q ".[] | \"$r#\(.number) \(.headRefOid[0:12]) \([.comments[]|select(.body|test(\"Host live-gate|Fitness review\"))]|length) \([.labels[].name]|sort|join(\",\"))\"" 2>/dev/null
+       -q ".[] | \"$r#\(.number) \(.headRefOid[0:12]) \([.comments[]|select(.body|test(\"Host live-gate|Fitness review\"))]|length) \([.labels[].name]|sort|join(\",\"))\"" 2>/dev/null \
+      || log "work-progress: could not read open PRs for $r — this check sees no work there (an empty read never resets the stall clock)"
+  done | while IFS= read -r line; do
+    # The labels are EVERYTHING after the third space (`<repo>#<n> <sha> <count> <labels>`), taken by
+    # stripping three fields — NOT `${line##* }`, the last field. A GitHub label may legally contain
+    # spaces (a stock repo ships `good first issue` / `help wanted`), and a last-field read of
+    # "awaiting-maintainer,good first issue" yields "issue" — the parked label silently invisible, and
+    # the false-fire this filter exists to stop quietly back for that PR. With no labels the line ends
+    # in a space and this correctly yields the empty string.
+    _l="${line#* }"; _l="${_l#* }"; _l="${_l#* }"
+    work_drivable "$_l" "$parked" && printf '%s\n' "$line"
   done | sort
+  return 0
 }
 
 # poller_busy <pids> → 1 if ANY named poller has a live child that is DOING WORK, else 0.
@@ -923,6 +996,11 @@ run_check(){
 
 case "${1:-}" in
   --check) run_check "${DEADMAN_RESPOND:-0}"; exit $?;;   # READ-ONLY by default; DEADMAN_RESPOND=1 opts in
+  # TEST SEAM (read-only): print the work fingerprint this check would compare. It exists because a
+  # --selftest of work_drivable proves the DECISION and nothing about whether work_fingerprint actually
+  # CALLS it — and a correct pure core wired to nothing is precisely the defect this apparatus keeps
+  # shipping. The suite drives this to prove the parked filter is live. Makes no writes of any kind.
+  --work-fingerprint) work_fingerprint; exit 0;;
   --watch)
     trap 'log "deadman stopping (signal)"; exit 0' TERM INT HUP
     _rchecks=0
@@ -957,5 +1035,5 @@ case "${1:-}" in
       sleep "$DEADMAN_INTERVAL"
     done
     ;;
-  *) echo "usage: apparatus-deadman.sh --check | --watch | --selftest" >&2; exit 2;;
+  *) echo "usage: apparatus-deadman.sh --check | --watch | --selftest | --work-fingerprint" >&2; exit 2;;
 esac
