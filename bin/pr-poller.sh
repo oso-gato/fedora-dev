@@ -469,6 +469,36 @@ fitness_login_default(){ # <same_identity> <current_login>
   else printf 'oso-gato-fitness-claudebox'; fi
 }
 
+# GENERAL ANOMALY REPAIR (R39 / #278) ------------------------------------------------------------------
+# WHY: seven distinct stalls in one session (2026-07-27/28), none predicted, each hand-patched after the
+# fact. The pattern was never the individual bugs. It was the DEFAULT: the pipeline's answer to "a state
+# I have no rule for" was its answer to every surprise — log it, mark it blocked, wait for a human.
+# Enumerating every way the world can surprise a machine does not converge; the tail is unbounded.
+#
+# THE CURE WAS ALREADY BUILT AND WIRED SHUT. run_fixer summons a model to diagnose and repair, and could
+# only be reached from TWO anticipated states (host RED, fitness RETURN). Every other surprise took the
+# road to the maintainer. The machine was never lacking the ability to unstick itself; it was only
+# PERMITTED to for two problems somebody thought of in advance.
+#
+# anomaly_route <kind> <attempts> <max> -> INFRA | ESCALATE | REPAIR   (pure; --selftest covers it)
+#   INFRA    - the anomaly IS the repair machinery, or a budget we cannot read. Fixing a broken tool with
+#              itself loops, so these go STRAIGHT to the maintainer. Anything unparseable lands here.
+#   ESCALATE - the bounded attempts are spent. The human is the LAST resort, never the first.
+#   REPAIR   - hand it to the fixer.
+# THE DEFAULT IS REPAIR, so a future call site that surfaces some new anomaly inherits self-repair
+# without anyone remembering to wire it up. That inversion is the entire point.
+anomaly_route(){
+  local kind="${1-}" att="${2-}" max="${3-}"
+  case "$kind" in
+    infra|refused|escalate|trust) printf 'INFRA\n'; return 0 ;;
+  esac
+  case "$att" in ''|*[!0-9]*) printf 'INFRA\n'; return 0 ;; esac
+  case "$max" in ''|*[!0-9]*) printf 'INFRA\n'; return 0 ;; esac
+  [ "$max" -le 0 ] && { printf 'INFRA\n'; return 0; }
+  [ "$att" -ge "$max" ] && { printf 'ESCALATE\n'; return 0; }
+  printf 'REPAIR\n'
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -646,6 +676,18 @@ if [ "${1:-}" = "--selftest" ]; then
   ck2 "RED still fixes"                   "$(pl _ RED A NONE 1 0)" "FIX"
   ck2 "NONE still waits"                  "$(pl _ NONE A NONE 1 0)" "NOOP"
   ck2 "back-compat: 4-arg call still works" "$(plan GREEN A PASS 1)" "MERGE"
+  ar(){ local got; got="$(anomaly_route "$2" "$3" "$4")"; [ "$got" = "$5" ] && echo "ok: $1" || { echo "FAIL: $1 anomaly_route($2,$3,$4)=$got want=$5"; fail=1; }; }
+  ar "a brand-new anomaly repairs by DEFAULT"   stalled        0 3 REPAIR
+  ar "unenrolled PR repairs"                    unenrolled     0 3 REPAIR
+  ar "an unknown FUTURE kind repairs"           some-new-thing 0 3 REPAIR
+  ar "mid-budget still repairs"                 stalled        2 3 REPAIR
+  ar "budget spent escalates to the human"      stalled        3 3 ESCALATE
+  ar "infra failure goes straight to human"     infra          0 3 INFRA
+  ar "a refusal is not repairable"              refused        0 3 INFRA
+  ar "a trust-boundary event is not repairable" trust          0 3 INFRA
+  ar "unreadable attempts -> human"             stalled        x 3 INFRA
+  ar "unreadable budget -> human"               stalled        0 x INFRA
+  ar "repair disabled (0) -> human"             stalled        0 0 INFRA
   [ "$fail" = 0 ] && echo "ALL POLLER SELFTESTS PASS" || echo "POLLER SELFTESTS FAILED"
   exit "$fail"
 fi
@@ -685,6 +727,7 @@ FITNESS_LOGIN="$(fitness_login_default "$FITNESS_SAME_IDENTITY" "${FITNESS_LOGIN
 POLLER_ARMED="${POLLER_ARMED:-1}"   # ARMED BY DEFAULT (gate-free objective; #96 explicit-arm retired) — the merge-trust boundary is the distinct-App gates + auto-merge's fail-closed re-check, not this flag; POLLER_ARMED=0 is a deliberate dry-run soak
 POLL_INTERVAL="${POLL_INTERVAL:-30}"   # fixed sweep cadence (a gentler 30s; no adaptive machinery)
 POLLER_FIXER="${POLLER_FIXER:-claude -p}"
+POLLER_REPAIR_MAX="${POLLER_REPAIR_MAX:-3}"   # R39/#278: bounded repair attempts before the maintainer
 # GENERATION FENCE (2026-07-28) — SHARED CONTRACT with bin/poller-service.sh: rc 92 means "I am running
 # in a container that no longer exists", and the supervisor must EXIT on it rather than relaunch.
 POLLER_ORPHAN_RC="${POLLER_ORPHAN_RC:-92}"
@@ -943,6 +986,29 @@ surface(){ # <pr> <sha> <kind> <message>
   gh pr comment "$pr" --repo "$SLUG" --body "**Poller → Arthur [$kind]:** $msg"$'\n\n<sub>dev-side poller (Step 5); no merge taken — needs your decision.</sub>' >/dev/null 2>&1 && : > "$m"
 }
 
+# surface_or_repair <pr> <ref> <sha> <kind> <reason> — THE NEW DEFAULT for an unexpected state.
+# Bounded self-repair FIRST; the maintainer only when repair is inapplicable (INFRA) or spent (ESCALATE).
+# A repair needs a real branch to commit to, so an empty ref degrades to surface() — honest, never silent.
+surface_or_repair(){
+  local pr="$1" ref="$2" sha="$3" kind="$4" reason="$5"
+  local budget="$STATE/repair-${pr}-${kind}.n" att=0
+  [ -f "$budget" ] && att="$(cat "$budget" 2>/dev/null || echo 0)"
+  case "$att" in ''|*[!0-9]*) att=0 ;; esac
+  local route; route="$(anomaly_route "$kind" "$att" "$POLLER_REPAIR_MAX")"
+  [ -n "$ref" ] || route=INFRA
+  case "$route" in
+    REPAIR)
+      att=$((att+1)); printf '%s' "$att" > "$budget" 2>/dev/null
+      log "ANOMALY $SLUG#$pr @ ${sha:0:7} [$kind] repair attempt $att/$POLLER_REPAIR_MAX: $reason"
+      run_fixer "$pr" "$ref" "$sha" "ANOMALY" "$reason" ;;
+    ESCALATE)
+      log "ANOMALY $SLUG#$pr @ ${sha:0:7} [$kind] — $att/$POLLER_REPAIR_MAX attempts spent; escalating"
+      surface "$pr" "$sha" "$kind" "$reason - the loop attempted bounded self-repair $att time(s) and could not clear it; this is now a maintainer decision." ;;
+    *)
+      surface "$pr" "$sha" "$kind" "$reason" ;;
+  esac
+}
+
 # The rc-3 question — asked ONCE per head, and ONLY once the bounded retries are exhausted (review_due).
 # It carries the reviewer harness's REAL stderr: a question that shrugs is not a question. Re-callable on
 # every later sweep at zero cost — surface() early-exits on its own marker, and RE-POSTS if a previous
@@ -1077,6 +1143,13 @@ looking for a build or live-gate failure; there isn't one. Address the reviewer'
 the reviewer's PROSE (advisory, not a machine signal): treat them as the requirements to satisfy, use your
 own judgment on HOW, and if you believe a finding is wrong, say so via FIXER_BLOCKED rather than
 half-fixing it."
+  elif [ "$cause" = ANOMALY ]; then
+    what="Neither gate failed. The PIPELINE ITSELF reached a state it has no rule for and is STUCK — this
+PR cannot progress until that state is resolved. The stuck-state is described below. DIAGNOSE the real
+cause from the repository as it actually is, then make the MINIMAL change that lets this PR move again.
+If the right repair is NOT a change to this branch — it needs a maintainer decision, access you do not
+have, or a change to the pipeline's own rules — do NOT improvise one: end with FIXER_BLOCKED and state
+precisely what is needed."
   else
     what="The HOST LIVE-GATE returned RED — the candidate failed to build or failed its live probes.
 Address the failure below."
