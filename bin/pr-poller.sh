@@ -487,10 +487,19 @@ fitness_login_default(){ # <same_identity> <current_login>
 #   REPAIR   - hand it to the fixer.
 # THE DEFAULT IS REPAIR, so a future call site that surfaces some new anomaly inherits self-repair
 # without anyone remembering to wire it up. That inversion is the entire point.
+#
+# THE INFRA LIST IS MATCHED BY PATTERN, NOT BY EXACT NAME. An exact-match list is the wrong shape for a
+# default-REPAIR router: every kind it fails to recognise falls through to the model, so a MISS here is a
+# miss toward handing the fixer a tool that is itself broken. The live `review-infra-down` kind (a GLOBAL
+# `claude -p` outage) proved it — under exact matching it missed `infra` and routed to REPAIR, i.e. the
+# poller's answer to "the model is unreachable" would have been to summon the model, once per PR. Every
+# review-* kind is the FITNESS GATE's own machinery and every *infra*/*trust* kind is the pipeline's, so
+# both are matched as families. Fail direction is deliberately inverted HERE and only here: for the
+# infra question a false INFRA costs one human ping, a false REPAIR loops a broken tool on itself.
 anomaly_route(){
   local kind="${1-}" att="${2-}" max="${3-}"
   case "$kind" in
-    infra|refused|escalate|trust) printf 'INFRA\n'; return 0 ;;
+    *infra*|*trust*|refused|escalate|review|review-*) printf 'INFRA\n'; return 0 ;;
   esac
   case "$att" in ''|*[!0-9]*) printf 'INFRA\n'; return 0 ;; esac
   case "$max" in ''|*[!0-9]*) printf 'INFRA\n'; return 0 ;; esac
@@ -677,14 +686,22 @@ if [ "${1:-}" = "--selftest" ]; then
   ck2 "NONE still waits"                  "$(pl _ NONE A NONE 1 0)" "NOOP"
   ck2 "back-compat: 4-arg call still works" "$(plan GREEN A PASS 1)" "MERGE"
   ar(){ local got; got="$(anomaly_route "$2" "$3" "$4")"; [ "$got" = "$5" ] && echo "ok: $1" || { echo "FAIL: $1 anomaly_route($2,$3,$4)=$got want=$5"; fail=1; }; }
+  # The KINDS below are the ones the poller ACTUALLY emits (grep surface_or_repair/surface): asserting a
+  # route for a kind nothing can produce is a green row naming a feature that is not there.
   ar "a brand-new anomaly repairs by DEFAULT"   stalled        0 3 REPAIR
-  ar "unenrolled PR repairs"                    unenrolled     0 3 REPAIR
+  ar "the wired 'cannot tell which gate' repairs" blocked      0 3 REPAIR
+  ar "the wired rebase-conflict repairs"        rebase         0 3 REPAIR
   ar "an unknown FUTURE kind repairs"           some-new-thing 0 3 REPAIR
   ar "mid-budget still repairs"                 stalled        2 3 REPAIR
   ar "budget spent escalates to the human"      stalled        3 3 ESCALATE
   ar "infra failure goes straight to human"     infra          0 3 INFRA
   ar "a refusal is not repairable"              refused        0 3 INFRA
   ar "a trust-boundary event is not repairable" trust          0 3 INFRA
+  # The review-* family IS the fitness gate's own machinery: summoning the model to fix "the model is
+  # unreachable" loops a broken tool on itself. These fell through to REPAIR under exact-match.
+  ar "a GLOBAL reviewer outage is NOT repairable"  review-infra-down 0 3 INFRA
+  ar "a per-head reviewer failure is NOT repairable" review-failed   0 3 INFRA
+  ar "a deliberate fitness ESCALATE is not repairable" review        0 3 INFRA
   ar "unreadable attempts -> human"             stalled        x 3 INFRA
   ar "unreadable budget -> human"               stalled        0 x INFRA
   ar "repair disabled (0) -> human"             stalled        0 0 INFRA
@@ -989,6 +1006,14 @@ surface(){ # <pr> <sha> <kind> <message>
 # surface_or_repair <pr> <ref> <sha> <kind> <reason> — THE NEW DEFAULT for an unexpected state.
 # Bounded self-repair FIRST; the maintainer only when repair is inapplicable (INFRA) or spent (ESCALATE).
 # A repair needs a real branch to commit to, so an empty ref degrades to surface() — honest, never silent.
+#
+# CONTRACT WITH THE CALLER (two channels, both load-bearing):
+#   rc        - passed through from whatever it did, so a caller that parks on a SUCCESSFUL POST keeps
+#               doing exactly that (a throttled comment must never silence a human touchpoint).
+#   SOR_ROUTE - the road actually taken (REPAIR|ESCALATE|INFRA). A caller that parks its head must NOT
+#               park a REPAIR: a repair mints a NEW head that re-gates on its own, which is PROGRESS,
+#               and parking it would strand the very PR the repair just unstuck.
+SOR_ROUTE=""
 surface_or_repair(){
   local pr="$1" ref="$2" sha="$3" kind="$4" reason="$5"
   local budget="$STATE/repair-${pr}-${kind}.n" att=0
@@ -996,6 +1021,14 @@ surface_or_repair(){
   case "$att" in ''|*[!0-9]*) att=0 ;; esac
   local route; route="$(anomaly_route "$kind" "$att" "$POLLER_REPAIR_MAX")"
   [ -n "$ref" ] || route=INFRA
+  # A repair that cannot be ISOLATED is not a repair. Without a local clone to bolt a throwaway worktree
+  # off, run_fixer refuses (fail-closed, correctly) and surfaces its OWN "check the repo clone" message —
+  # which would REPLACE this anomaly's diagnosis with a note about the repair machinery, leaving the
+  # maintainer told nothing about WHY the PR is stuck. The poller sweeps repos it may hold no clone of,
+  # so this is a live state, not a hypothetical. Degrade to surface() with the REAL reason, and charge
+  # NO budget: an attempt that could never happen must not consume one of the attempts.
+  [ "$route" != REPAIR ] || clone_for "$POLLER_REPO" >/dev/null 2>&1 || route=INFRA
+  SOR_ROUTE="$route"
   case "$route" in
     REPAIR)
       att=$((att+1)); printf '%s' "$att" > "$budget" 2>/dev/null
@@ -1008,6 +1041,23 @@ surface_or_repair(){
       surface "$pr" "$sha" "$kind" "$reason" ;;
   esac
 }
+
+# WHICH surface() CALL SITES STAY surface() — a boundary, not an oversight. The default is REPAIR, so
+# every site left alone below is left alone for a REASON, recorded here because "nobody wired it up" is
+# exactly how the first cut of this feature shipped as unreachable code:
+#   * anything INSIDE run_fixer/fix_in_tree (no-progress, no clone, unenterable worktree, FIXER_BLOCKED,
+#     no-commit, push-failed, did-not-land) — surface_or_repair CALLS run_fixer, so wiring these would
+#     re-enter the fixer from within itself. They are also, every one of them, the fixer reporting that
+#     the fixer could not run: the broken tool cannot be the repair for its own breakage.
+#   * review-failed / review-infra-down — the FITNESS GATE's own machinery. anomaly_route classifies the
+#     review-* family INFRA for the same reason; the call sites match, so neither layer stands alone.
+#   * refused — the MERGE-TRUST boundary disagreeing with the poller. A model must never be summoned to
+#     make a trust refusal go away. INFRA in anomaly_route, and it stays surface() here.
+#   * merge-failed (rc 3) — NOT stuck. It deliberately does not park and the poller re-attempts the merge
+#     every sweep until it lands; spending a model run on a state that is already self-healing is churn.
+#   * review (PRESENT) — a fitness ESCALATE is the reviewer DEFERRING a judgment call to the maintainer
+#     BY DESIGN. That is the one human path zero-gate keeps on purpose; repairing around it would route
+#     a deliberate escalation back into the machine.
 
 # The rc-3 question — asked ONCE per head, and ONLY once the bounded retries are exhausted (review_due).
 # It carries the reviewer harness's REAL stderr: a question that shrugs is not a question. Re-callable on
@@ -1534,7 +1584,11 @@ sweep_repo(){
             [ -n "$cdate" ] || continue
             age=$(( $(date +%s) - $(date -d "$cdate" +%s 2>/dev/null || echo 0) ))
             if [ "$(stall_verdict NONE 1 "$age" "$POLLER_STALL_MAX")" = STALL ]; then
-              surface "$pr" "$sha" "stalled" "this \`live-validate\`-labelled head has had NO host live-gate verdict for ~$((age/60))m (surfacing bound $((POLLER_STALL_MAX/60))m). The host gate produced no GREEN/RED for \`${sha:0:7}\` and will not re-gate on its own — most likely it SKIPPED this sha (a stale per-(repo,sha) \`.done\` marker on the host, or a transient PR-head fetch-failure deduped as a delivered SKIP; audit CAT-01/CAT-04). REMEDIATION: on the host, remove \`~/.local/state/live-gate/$(basename "$SLUG")-${sha}.done\` to force a re-gate, or push a new commit. (R18 idle-with-work-pending — the poller had been silently NOOPing on this since the head was pushed.)"
+              # R39/#278 — REPAIR FIRST. A head the host gate will never re-verdict is the archetypal
+              # stuck pipeline, and its own remediation text names an act the fixer can perform: push a
+              # new commit, which mints a head the gate has no `.done` marker for. Bounded twice over —
+              # POLLER_REPAIR_MAX attempts, and run_fixer's no-progress stop if a repair changes nothing.
+              surface_or_repair "$pr" "$ref" "$sha" "stalled" "this \`live-validate\`-labelled head has had NO host live-gate verdict for ~$((age/60))m (surfacing bound $((POLLER_STALL_MAX/60))m). The host gate produced no GREEN/RED for \`${sha:0:7}\` and will not re-gate on its own — most likely it SKIPPED this sha (a stale per-(repo,sha) \`.done\` marker on the host, or a transient PR-head fetch-failure deduped as a delivered SKIP; audit CAT-01/CAT-04). REMEDIATION: on the host, remove \`~/.local/state/live-gate/$(basename "$SLUG")-${sha}.done\` to force a re-gate, or push a new commit. (R18 idle-with-work-pending — the poller had been silently NOOPing on this since the head was pushed.)"
             fi
             ;;
         esac
@@ -1572,8 +1626,13 @@ sweep_repo(){
                        2>/dev/null | head -c 6000)"
             reason="${reason:-the independent fitness review RETURNed this head; see its verdict comment on the PR}" ;;
           *)
-            log "#$pr: FIX routed with no known cause (host=$host fitness=$fit) — refusing to invent a reason"
-            surface "$pr" "$sha" "blocked" "the poller routed this PR to the fixer but cannot tell which gate failed (host=$host, fitness=$fit) — a human decision is needed."
+            # R39/#278 — the PUREST unanticipated state there is: plan() routed FIX, so a gate DID fail,
+            # yet neither gate's comment body can be read to say which. The poller still refuses to
+            # INVENT a reason (the #135 R6 rule that stops the fixer hunting a failure that never
+            # happened) — it hands the model the TRUE one: the pipeline disagrees with itself, here are
+            # the raw verdict tokens, diagnose from the repo. INFRA/spent still reach the maintainer.
+            log "#$pr: FIX routed with no known cause (host=$host fitness=$fit) — refusing to invent a reason; routing to bounded self-repair"
+            surface_or_repair "$pr" "$ref" "$sha" "blocked" "the poller routed this PR to the fixer but cannot tell which gate failed (host=$host, fitness=$fit): plan() saw a failing gate, but neither the host nor the fitness comment body for \`${sha:0:7}\` could be read to say which. No gate reason is being invented here — that is the whole finding."
             continue ;;
         esac
         run_fixer "$pr" "$ref" "$sha" "$cause" "$reason"
@@ -1691,8 +1750,13 @@ sweep_repo(){
                 echo $((rc_n+1)) > "$rn"
                 log "#$pr auto-rebased onto main (behind, clean) — attempt $((rc_n+1))/$POLLER_REBASE_MAX; the new head re-gates, NOT parked (CAT-17)"
               else
-                surface "$pr" "$sha" "rebase" "auto-merge could not merge (behind \`main\` / conflict), and the poller's bounded auto-rebase then $( [ "$(rebase_due "$rc_n" "$POLLER_REBASE_MAX")" = GIVEUP ] && echo "hit its bound ($POLLER_REBASE_MAX attempts) — the head keeps falling behind" || echo "could not update-branch — likely a genuine merge CONFLICT to resolve by hand"). All gates were GREEN+PASS; NOT a merge-trust refusal. Rebase + push and it re-gates and auto-merges." \
-                  && : > "$done"
+                # R39/#278 — a genuine merge CONFLICT is a stuck pipeline the model can actually clear
+                # (resolving a conflict on the PR's own branch is ordinary dev work), so try bounded
+                # repair before spending the human. PARKING IS GATED ON THE ROAD TAKEN: a REPAIR mints a
+                # new head that re-gates, so parking it would strand the PR the repair just unstuck —
+                # only a surfaced (INFRA/spent) outcome parks, and then still only on a SUCCESSFUL post.
+                if surface_or_repair "$pr" "$ref" "$sha" "rebase" "auto-merge could not merge (behind \`main\` / conflict), and the poller's bounded auto-rebase then $( [ "$(rebase_due "$rc_n" "$POLLER_REBASE_MAX")" = GIVEUP ] && echo "hit its bound ($POLLER_REBASE_MAX attempts) — the head keeps falling behind" || echo "could not update-branch — likely a genuine merge CONFLICT to resolve by hand"). All gates were GREEN+PASS; NOT a merge-trust refusal. Rebase + push and it re-gates and auto-merges." \
+                   && [ "$SOR_ROUTE" != REPAIR ]; then : > "$done"; fi
               fi
               ;;
           3) surface "$pr" "$sha" "merge-failed" "auto-merge's merge command failed for a non-gate reason (transient / the head moved) — NOT a merge-trust refusal. The poller keeps retrying the merge every sweep until it lands or the head moves (this comment posts once; see poller.log)." ;;

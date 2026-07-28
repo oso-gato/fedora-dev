@@ -6,6 +6,13 @@
 # forever — while staying quiet when the head is fresh or unlabelled. MUTATION: neutralize stall_verdict
 # to never return STALL and the aged head must surface NOTHING (proving the WORK-age clock is what bites,
 # not the surface plumbing). No real GitHub/network/model.
+#
+# SUBJECT = THE CLOCK, so these rows run with POLLER_REPAIR_MAX=0. Since R39/#278 a STALL routes to
+# BOUNDED SELF-REPAIR first and only reaches the human when repair is inapplicable or spent, so with
+# repair enabled the clock's outcome is a fixer run, not a comment — and this fixture provisions no
+# fixable branch at origin. Disabling repair pins the clock's outcome back to the observable surface it
+# was written to assert (the documented repair-disabled mode, which is exactly the pre-#278 behaviour).
+# The repair-ENABLED path over this same clock is covered end to end by poller-anomaly-repair.test.sh.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; POLLER="$HERE/bin/pr-poller.sh"
 [ -f "$POLLER" ] || { echo "FATAL: $POLLER not found"; exit 2; }
@@ -48,6 +55,7 @@ run(){ # <script> <commit-date> [env…]
   local script="$1" cd="$2"; shift 2
   env PATH="$BIN:$PATH" HOME="$HOMEDIR" GH_LOG="$GH_LOG" \
     POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FLEET_HALT=true \
+    POLLER_REPAIR_MAX=0 \
     FAKE_SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef FAKE_COMMIT_DATE="$cd" "$@" \
     bash "$script" --once > "$ROOT/out.log" 2>&1
 }
