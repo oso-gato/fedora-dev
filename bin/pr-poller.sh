@@ -158,7 +158,38 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # extract the newest host live-gate verdict (GREEN|RED) from header lines on stdin. LINE-START
 # anchored: a verdict string quoted mid-line (embedded candidate log, prose) never matches — the
 # same G2 discipline as bin/auto-merge.sh, applied to ROUTING so forged strings can't even misroute.
-host_verdict(){ grep -oE '^\**Host live-gate \(Gate B\): VERDICT (GREEN|RED)' | grep -oE '(GREEN|RED)$' | tail -1; }
+# SKIPPED is a REAL verdict, not the absence of one (2026-07-28, MOVE 1b of #274). The host answers
+# GREEN / RED / SKIPPED, and SKIPPED means "there is nothing here for me to build or probe against this
+# base" — its own comment says "Neutral skip, not a failure". But it was matched by NOTHING here, so it
+# read as NONE ⇒ plan() returned NOOP ⇒ the PR froze SILENTLY AND FOREVER. Four of the six PRs in the
+# e2e-beta acceptance run (#11 run.sh, #12 Quadlet, #13 CI, #14 README) sat exactly there for 24h+.
+# A gate is allowed to say "not applicable"; it is NOT allowed to say nothing.
+host_verdict(){ grep -oE '^\**Host live-gate \(Gate B\): (VERDICT (GREEN|RED)|SKIPPED)' | grep -oE '(GREEN|RED|SKIPPED)$' | tail -1; }
+
+# gate_relevant <changed-files-newline-list> → 1 if this PR touches anything that DEFINES the runtime
+# the host gate exists to validate, else 0. PURE + selftested.
+#
+# This is the safety hinge of MOVE 1b. Treating SKIPPED as merge-eligible is correct for a PR the gate
+# genuinely cannot judge (a README, a CI workflow) — the host has no objection because there is nothing
+# to object to. It would be UNSAFE for a PR that changes the image, the run contract or the gate
+# contract itself: there, a SKIP means the gate could not evaluate a change it SHOULD have evaluated,
+# and merging on "no objection" would let a change dodge the gate by removing what the gate reads.
+gate_relevant(){
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      Containerfile*|*/Containerfile*) printf 1; return 0 ;;
+      .live-gate|*/.live-gate)         printf 1; return 0 ;;
+      run.sh|*/run.sh)                 printf 1; return 0 ;;
+      spin-up.sh|*/spin-up.sh)         printf 1; return 0 ;;
+      entrypoint.sh|*/entrypoint.sh)   printf 1; return 0 ;;
+      *.container)                     printf 1; return 0 ;;
+      install.sh|*/install.sh)         printf 1; return 0 ;;
+    esac
+  done
+  printf 0
+}
 # extract the newest fitness verdict (PASS|RETURN|ESCALATE) from header lines on stdin (line-start
 # anchored, same rationale).
 fitness_verdict(){ grep -oE '^Fitness review: VERDICT (PASS|RETURN|ESCALATE)' | grep -oE '(PASS|RETURN|ESCALATE)$' | tail -1; }
@@ -178,10 +209,24 @@ supersede_targets(){ tr -d '\r' | awk '/^ {0,3}(```|~~~)/{f=!f; next} !f' | grep
 # The single source of truth for "given the gates, what does the poller DO". Fail-closed toward the
 # human: any ambiguity (unknown tier, no host verdict) resolves to NOOP or PRESENT, never to a merge.
 plan(){
-  local host="$1" tier="$2" fit="$3" armed="$4"
+  local host="$1" tier="$2" fit="$3" armed="$4" gaterel="${5:-0}"
   case "$host" in
     RED)  echo FIX; return;;                          # host says broken → iterate a fix
     GREEN) : ;;                                        # fall through to the merge decision
+    SKIPPED)
+      # MOVE 1b (#274). The host had nothing to build or probe. EVERY outcome a gate can return must map
+      # to an action — merge, fix, or escalate once. Silence froze four acceptance-run PRs for 24h+.
+      #   * touches NOTHING the gate validates (docs, CI) ⇒ a genuine NOT-APPLICABLE. The host has no
+      #     objection because there is nothing to object to, so this is a NEUTRAL PASS: fall through and
+      #     let the INDEPENDENT fitness review decide. The merge still needs two identities to agree —
+      #     one of them simply has nothing to say, which is an honest answer.
+      #   * touches the image / run contract / gate contract ⇒ the gate could not evaluate a change it
+      #     SHOULD have. Merging on "no objection" would let a change dodge the gate by deleting what
+      #     the gate reads. Wait instead — the existing IDLE-WITH-WORK-PENDING surfacer alarms on it,
+      #     and an R25 base advance re-gates it (which is the real cure: these SKIP because their base
+      #     has no Containerfile YET, and gain one the moment the image PR lands).
+      [ "$gaterel" = 1 ] && { echo NOOP; return; }
+      : ;;
     *)    echo NOOP; return;;                          # no host verdict yet (NONE) → wait
   esac
   # ZERO-GATE (2026-07-10, Arthur's decision): tier NO LONGER routes to a human PRESENT. Every GREEN
@@ -574,6 +619,33 @@ if [ "${1:-}" = "--selftest" ]; then
   tc "tier unterminated last" $'README.md\npolicy/CLAUDE.md' 'A'
   tc "tier terminated parity" $'README.md\n'                 'C'
   tc "tier empty stdin"       ''                             'NONE'
+  # ── MOVE 1b (#274): SKIPPED is a verdict, and every verdict maps to an action ──────────────────────
+  hv(){ printf '%s\n' "$2" | host_verdict; }
+  ck2(){ if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "FAIL: $1 got=[$2] want=[$3]"; fail=1; fi; }
+  ck2 "host_verdict reads GREEN"   "$(hv _ '**Host live-gate (Gate B): VERDICT GREEN** - repo @ abc')" "GREEN"
+  ck2 "host_verdict reads RED"     "$(hv _ '**Host live-gate (Gate B): VERDICT RED** - repo @ abc')" "RED"
+  ck2 "THE 1b BUG: SKIPPED was invisible, now read" "$(hv _ '**Host live-gate (Gate B): SKIPPED** - `e2e-beta` @ `a5ee7f7` carries no top-level Containerfile')" "SKIPPED"
+  ck2 "prose mentioning skipped is not a verdict"   "$(hv _ 'the gate skipped it earlier')" ""
+
+  gr(){ printf '%s\n' "$2" | gate_relevant; }
+  ck2 "README is not gate-relevant"      "$(gr _ 'README.md')" "0"
+  ck2 "CI workflow is not gate-relevant" "$(gr _ '.github/workflows/build.yml')" "0"
+  ck2 "Containerfile IS gate-relevant"   "$(gr _ 'Containerfile')" "1"
+  ck2 ".live-gate IS gate-relevant"      "$(gr _ '.live-gate')" "1"
+  ck2 "run.sh IS gate-relevant"          "$(gr _ 'run.sh')" "1"
+  ck2 "Quadlet IS gate-relevant"         "$(gr _ 'e2e-beta.container')" "1"
+  ck2 "any gate-relevant file in a set taints it" "$(printf 'README.md\nrun.sh\n' | gate_relevant)" "1"
+  ck2 "empty file list is not gate-relevant"      "$(printf '' | gate_relevant)" "0"
+
+  pl(){ plan "$2" "$3" "$4" "$5" "$6"; }
+  ck2 "SKIPPED + docs-only + unreviewed -> REVIEW (unfrozen)" "$(pl _ SKIPPED A NONE 1 0)" "REVIEW"
+  ck2 "SKIPPED + docs-only + PASS -> MERGE (the freeze is over)" "$(pl _ SKIPPED A PASS 1 0)" "MERGE"
+  ck2 "SKIPPED + docs-only + RETURN -> FIX"                  "$(pl _ SKIPPED A RETURN 1 0)" "FIX"
+  ck2 "SKIPPED + GATE-RELEVANT -> NOOP (must NOT dodge the gate)" "$(pl _ SKIPPED A PASS 1 1)" "NOOP"
+  ck2 "GREEN unaffected by the new arg"   "$(pl _ GREEN A PASS 1 1)" "MERGE"
+  ck2 "RED still fixes"                   "$(pl _ RED A NONE 1 0)" "FIX"
+  ck2 "NONE still waits"                  "$(pl _ NONE A NONE 1 0)" "NOOP"
+  ck2 "back-compat: 4-arg call still works" "$(plan GREEN A PASS 1)" "MERGE"
   [ "$fail" = 0 ] && echo "ALL POLLER SELFTESTS PASS" || echo "POLLER SELFTESTS FAILED"
   exit "$fail"
 fi
@@ -1346,7 +1418,25 @@ sweep_repo(){
         fit="$(printf '%s' "$fitraw" | fitness_verdict)"; fit="${fit:-NONE}"
       fi
     fi
-    action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED")"
+    # MOVE 1b (#274): a SKIPPED host verdict is merge-eligible ONLY for a PR that changes nothing the
+    # gate exists to validate. Fetch the file list ONLY when it can change the decision (host=SKIPPED),
+    # so the common GREEN/RED path costs no extra API call. Unreadable ⇒ treat as GATE-RELEVANT: the
+    # fail-safe direction is to withhold the merge, never to grant one on missing evidence.
+    local gaterel=0
+    if [ "$host" = SKIPPED ]; then
+      local _files
+      if _files="$(timeout 20 gh pr view "$pr" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null)" \
+         && [ -n "$_files" ]; then
+        gaterel="$(printf '%s\n' "$_files" | gate_relevant)"
+      else
+        gaterel=1
+        log "#$pr SKIPPED but the changed-file list is UNREADABLE — treating as gate-relevant (fail-safe: no merge on missing evidence)"
+      fi
+      [ "$gaterel" = 1 ] \
+        && log "#$pr host=SKIPPED and the PR touches the image/run/gate contract — NOT merge-eligible; waiting for a base advance to re-gate" \
+        || log "#$pr host=SKIPPED and the PR touches nothing the gate validates — NEUTRAL PASS, routing on fitness alone"
+    fi
+    action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED" "$gaterel")"
     log "#$pr ${sha:0:7} host=$host tier=$tier fitness=$fit ⇒ $action"
     # R9 HALT (#151): OBSERVE-ONLY — the decision above is LOGGED (the operator sees the queue) but not
     # acted on: no fixer model run, no review model run, no merge, no PRESENT/blocked comment — and no

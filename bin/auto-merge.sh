@@ -46,7 +46,12 @@ decide(){
   # host live-gate GREEN + independent fitness PASS. `tier` is retained purely for the caller's
   # report/digest — it is not read here.
   local tier="$1" gate="$2" fit="$3"
-  [ "$gate" = GREEN ] || { echo REFUSE; return; }   # host must have live-gated GREEN
+  # GREEN, or SKIPPED-as-neutral. SKIPPED reaches this function ONLY after the caller above has
+  # independently confirmed the PR touches nothing the gate validates (unreadable file list ⇒ the
+  # caller downgrades to NONE ⇒ REFUSE here). A gate that has nothing to judge is an honest "not
+  # applicable"; it is not a pass, which is why the independent fitness PASS below is still required
+  # and why a gate-relevant SKIP never gets here. MOVE 1b of #274.
+  case "$gate" in GREEN|SKIPPED) : ;; *) echo REFUSE; return;; esac
   [ "$fit"  = PASS  ] || { echo REFUSE; return; }   # independent fitness must PASS
   echo MERGE
 }
@@ -160,8 +165,33 @@ tier="$(gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/n
 # from anyone else (incl. the PR author) is ignored. No trust anchor ⇒ gate=NONE ⇒ REFUSE.
 gate="NONE"
 if [ -n "$LG_HOST_LOGIN" ] && [ "$LG_HOST_LOGIN" != "$pr_author" ]; then
-  lgc="$(hdr_verdict "$LG_HOST_LOGIN" "@ $head_sha" '^\**Host live-gate \(Gate B\): VERDICT (GREEN|RED)')"
-  case "$lgc" in *GREEN) gate=GREEN;; *RED) gate=RED;; esac
+  # MOVE 1b (#274): SKIPPED is a REAL verdict — "nothing here for me to build or probe", the host's own
+  # comment calls it a neutral skip, not a failure. It was matched by nothing, so it read as NO VERDICT
+  # and the PR could never merge: four e2e-beta acceptance PRs froze for 24h+ with both gates content.
+  # It is accepted here ONLY for a PR that changes nothing the gate validates — that check is made by
+  # the caller (pr-poller gate_relevant) AND re-made below, because this script is the trust boundary
+  # and must not take the caller's word for it.
+  lgc="$(hdr_verdict "$LG_HOST_LOGIN" "@ $head_sha" '^\**Host live-gate \(Gate B\): (VERDICT (GREEN|RED)|SKIPPED)')"
+  case "$lgc" in *GREEN) gate=GREEN;; *RED) gate=RED;; *SKIPPED) gate=SKIPPED;; esac
+  if [ "$gate" = SKIPPED ]; then
+    # INDEPENDENT re-check at the trust boundary. Unreadable file list ⇒ REFUSE: never grant a merge on
+    # missing evidence. A SKIP on a PR that touches the image/run/gate contract means the gate could not
+    # judge a change it SHOULD have — merging there would let a change dodge the gate by deleting what
+    # the gate reads.
+    _sf="$(timeout 20 gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null)"
+    if [ -z "$_sf" ]; then
+      echo "[auto-merge] host=SKIPPED but the changed-file list is UNREADABLE — REFUSING (fail-closed)"
+      gate=NONE
+    else
+      case "$_sf" in
+        Containerfile*|*Containerfile*|*.live-gate*|*run.sh*|*spin-up.sh*|*entrypoint.sh*|*.container*|*install.sh*)
+          echo "[auto-merge] host=SKIPPED but this PR touches the image/run/gate contract — REFUSING (the gate could not judge a change it should have)"
+          gate=NONE ;;
+        *)
+          echo "[auto-merge] host=SKIPPED and this PR touches nothing the gate validates — accepting as a NEUTRAL (not-applicable) host verdict; the independent fitness review still decides" ;;
+      esac
+    fi
+  fi
 else
   echo "[auto-merge] live-gate trust anchor unset or == PR author — gate unverifiable (fail-closed)"
 fi
