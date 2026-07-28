@@ -241,7 +241,8 @@ done_case
 # R9 FLEET HALT (#151): the switch is read at the TOP of every tick, BEFORE any model run — a halted
 # sweep is OBSERVE-ONLY: it still logs the routing decision (the operator sees the queue) but spawns no
 # fixer, pushes nothing, posts nothing. FLEET_HALT=false stands in for every non-GO outcome at once
-# (HALT, PAUSE, a dead checker: rc ≠ 0 is the whole contract). This row is the mutation detector
+# (a maintainer HALT or a dead checker: rc ≠ 0 is the whole contract — rc 20/PAUSE is retired, and
+# since #274 an unreadable signal returns rc 0, so it is not one of these outcomes). This is the detector
 # requirement 8 demands for THIS sweeper: delete the halt check from sweep()/sweep_repo() and it fails
 # (the fixer runs and the RED PR is acted on under HALT).
 echo "== R9 FLEET HALT (#151): a HALTED tick is OBSERVE-ONLY — no fixer, no push, no comment =="

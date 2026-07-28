@@ -75,11 +75,14 @@ standalone-click rule — the ZERO-GATE decision removed it); the fitness review
 `bin/dev-loop.sh`, the host watcher) reads it via `bin/fleet-halt.sh` at the TOP of every sweep, BEFORE
 any model run is spawned or merge taken, and goes OBSERVE-ONLY while it stands (logs what it WOULD do;
 acts on nothing; does NOT exit — un-halting needs no restart). MAINTAINER-BOUND both directions from
-the label's own timeline events (an App identity can neither halt nor UN-halt the loop), and the ONE
-gate that fails CLOSED TOWARD STOPPING — a deliberate inversion of the loop's fail-safe-toward-progress
-bias, softened so a blip is not an outage: an unreadable signal PAUSES that sweep, only K consecutive
-unreadable reads HALT; the control issue ABSENT is a definite "no halt asserted". HALT stops NEW action
-only (in-flight work completes); the hard stop is App-key revocation, per R9.
+the label's own timeline events (an App identity can neither halt nor UN-halt the loop). ONLY a READ,
+PRESENT, maintainer-applied label halts: an UNREADABLE signal RUNS — logged, and loudly past K
+consecutive failures — and NEVER escalates to HALT. That direction was INVERTED 2026-07-28 (STEP 3 of
+#274) on measured evidence: failing closed produced 935 halts of which ZERO were maintainer-thrown,
+suppressing 338 concrete actions and blocking the very ticket that would have repaired a six-day
+outage. This label is not what makes a merge safe (the two INDEPENDENT gates are), so failing it open
+weakens nothing. The control issue ABSENT is likewise a definite "no halt asserted". HALT stops NEW
+action only (in-flight work completes); the hard stop is App-key revocation, per R9.
 
 ## THE LOOP — dev↔host, two-tier validation
 
