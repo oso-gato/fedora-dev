@@ -135,8 +135,11 @@ parse_backlog(){
 #                                 must never crowd the tail of the backlog out (the starvation above).
 #   QUESTION  rc 3|4|5|6|7|8    → the run spawned but could not finish, and dev-author POSTED a dev-task
 #                                 question on the issue — EVERY one of these paths calls its
-#                                 surface_blocked() (3 worktree, 4 BLOCKED, 5 no-progress, 6 in-box RED,
-#                                 7 push, 8 PR-create). Spends a slot; the question it left on the issue
+#                                 surface_blocked() (3 worktree, 4 BLOCKED, 5 no-progress, 7 push,
+#                                 8 PR-create). rc 6 is RETIRED — an in-box RED no longer asks anyone
+#                                 anything, it hands off to the host gate + fixer (MOVE 2 of #274) — but
+#                                 it stays mapped so a resurrected rc 6 parks rather than spins.
+#                                 Spends a slot; the question it left on the issue
 #                                 is what PARKS it next pass (park_state, below) — the driver itself
 #                                 records nothing.
 #   RETRY     any other rc      → dev-author posted NOTHING (rc 2 — it could not even read the issue, so
@@ -177,7 +180,7 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "rc0, no url → SKIPPED"   "$(run_class 0 '')" "SKIPPED"
   ck "rc4 BLOCKED → QUESTION"  "$(run_class 4 '')" "QUESTION"
   ck "rc5 no-progress → QUESTION" "$(run_class 5 '')" "QUESTION"
-  ck "rc6 in-box RED → QUESTION"  "$(run_class 6 '')" "QUESTION"
+  ck "rc6 (RETIRED — no longer emitted) still parks, never spins" "$(run_class 6 '')" "QUESTION"
   # 3|7|8 ALSO call dev-author's surface_blocked() — a question IS on the issue, so they must PARK like
   # any other surfaced question, never spin as RETRY (which re-spends a model run + re-asks every pass).
   ck "rc3 worktree → QUESTION"    "$(run_class 3 '')" "QUESTION"
