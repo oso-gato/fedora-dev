@@ -26,7 +26,10 @@ case "${1:-} ${2:-}" in
   "pr list")
     case "$*" in
       *"--state merged"*) : ;;                                                    # retire pass: nothing merged
-      *"--state open"*)   printf '%s\t%s\t%s\t%s\n' 1 feat/x "$FAKE_SHA" "${FAKE_LABELS:-live-validate}";;
+      # SIX fields, matching the poller's real list query. `labels` stays LAST because `IFS=$'\t' read`
+      # collapses runs of tabs, so an empty labels field must have nothing after it to slide.
+      *"--state open"*)   printf '%s\t%s\t%s\t%s\t%s\t%s\n' 1 feat/x "$FAKE_SHA" \
+                            "${FAKE_AUTHOR:-oso-gato-nox-claudebox}" false "${FAKE_LABELS-live-validate}";;
     esac ;;
   "pr view") : ;;                                                                 # NO host/fitness verdict → host=NONE
   "api "*)   case "$*" in *"/commits/"*) printf '%s\n' "$FAKE_COMMIT_DATE";; esac ;;
@@ -75,9 +78,13 @@ echo "== FRESH: same PR, head just pushed (< bound) → quiet NOOP =="
 setup; run "$POLLER" "$NOW"
 surfaced && no "a fresh head wrongly surfaced" || ok "fresh labelled host=NONE → quiet NOOP"
 
-echo "== UNLABELLED: aged host=NONE but no live-validate label → quiet NOOP (no gate expected) =="
+# NB the STALL CLOCK is this row's only subject: it must not fire on a head no gate was ever asked for.
+# Since R39/#278 an unlabelled DEV-authored head is no longer inert — it takes the enrolment self-heal
+# arm — so this asserts "no [stalled] SURFACE", NOT "the sweep did nothing". The enrolment path itself is
+# poller-anomaly-repair.test.sh's subject; calling this a "quiet NOOP" would now be a false claim.
+echo "== UNLABELLED: aged host=NONE but no live-validate label → the STALL clock stays silent =="
 setup; run "$POLLER" "$OLD" FAKE_LABELS="some-other-label"
-surfaced && no "an unlabelled aged head wrongly surfaced" || ok "unlabelled host=NONE → quiet NOOP"
+surfaced && no "an unlabelled aged head wrongly surfaced" || ok "unlabelled host=NONE → no [stalled] surface"
 
 echo "== MUTATION: neutralize stall_verdict (never STALL) → aged head surfaces NOTHING =="
 MUT="$ROOT/pr-poller-mut.sh"
