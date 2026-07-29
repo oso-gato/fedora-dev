@@ -25,6 +25,12 @@ ROOT="$(mktemp -d)"
 export GH_CALLS="$ROOT/gh.calls"
 export GH_SEARCH_RESULT=""
 export DEADMAN_REPO="oso-gato/fedora-bootstrap"
+# DO NOT WRITE THE PRODUCTION EVIDENCE FILE — see the same guard in apparatus-respond.test.sh. $DEADMAN_LOG
+# defaults to the box's real ~/.local/state/apparatus-deadman/deadman.log (#273), so an un-neutered suite
+# run interleaves fixture ANOMALY/SURFACE/CLEARED lines into the record used to judge the watchdog's real
+# behaviour. The NON-COLON `${DEADMAN_LOG-…}` makes an exported EMPTY value a genuine disable; stderr keeps
+# every line, and no row here asserts on the file.
+export DEADMAN_LOG=""
 
 pass=0; fail=0
 ok(){ pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
