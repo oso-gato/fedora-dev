@@ -113,14 +113,26 @@ fi
 
 # ---- build the dossier (the built product + the confirmed spec) — cap LOUD (R37) -------------------
 # Read the shipped aggregate from the bus, pinned to $aggregate_sha (see the note above).
-r(){ gh api "repos/$SLUG/contents/$1?ref=$aggregate_sha" -q .content 2>/dev/null | base64 -d 2>/dev/null; }
+r(){
+  local out
+  out="$(gh api "repos/$SLUG/contents/$1?ref=$aggregate_sha" -q .content 2>/dev/null | base64 -d 2>/dev/null)"
+  # A file that IS in the manifest but reads back empty is worth a line. Three causes are indistinguishable
+  # here — a genuinely empty file, a blob over 1MB (the contents API returns empty content for those), and a
+  # transient read failure — and all three hand the reviewer an empty section, so name the ambiguity rather
+  # than let it pass silently for "the file is empty".
+  [ -n "$out" ] || log "$SLUG @ ${aggregate_sha:0:7}: '$1' is in the manifest but read back EMPTY (empty file, a >1MB blob, or a failed read — indistinguishable here) — the reviewer sees an empty section"
+  printf '%s' "$out"
+}
 manifest="$(gh api "repos/$SLUG/git/trees/$aggregate_sha?recursive=1" \
             -q '.tree[] | select(.type=="blob") | .path' 2>/dev/null)"
+# EXACT whole-line path match, never a substring: `case "$manifest" in *"run.sh"*)` also matches
+# `docs/prerun.sh.md` and would append a section whose contents read 404s into nothing.
+manifest_has(){ printf '%s\n' "$manifest" | grep -qxF "$1"; }
 ledger="$(gh issue list --repo "$SLUG" --label backlog --state all --json number,title,state,url \
           -q '.[] | "#\(.number) [\(.state)] \(.title)  \(.url)"' 2>/dev/null)"
 contract=""
 for cf in Containerfile run.sh spin-up.sh .live-gate install.sh entrypoint.sh; do
-  case "$manifest" in *"$cf"*) contract="${contract}"$'\n===== '"$cf"$' =====\n'"$(r "$cf")";; esac
+  manifest_has "$cf" && contract="${contract}"$'\n===== '"$cf"$' =====\n'"$(r "$cf")"
 done
 
 # THE CONFIRMED SPEC. The apparatus's own repos carry the Trinity docs; a repo it develops FOR the
@@ -129,21 +141,39 @@ done
 # for a spec violation and so would rubber-stamp anything. A gate that cannot fail is not a gate.
 # So: files when the repo has them, else the objective issue + the backlog tickets that decompose it —
 # which IS the confirmed spec for such a repo, and is exactly what the maintainer approved.
-spec=""
+# `spec` is what the reviewer READS (framed with `===== <source> =====` headers); `spec_content` is the
+# BODIES ALONE, and it is what the emptiness guards below test. Framing is not content: if the tree read
+# succeeds but every contents read fails transiently, a guard applied to the framed text sees non-blank
+# header lines and passes a content-free spec — the exact fail-open this gate exists to close, wearing the
+# fix's own headers.
+spec=""; spec_content=""
 for sf in 00-OBJECTIVES.md 00-REQUIREMENTS.md 00-BUILDPRINCIPLE.md 00-GOVERNANCE.md; do
-  case "$manifest" in *"$sf"*) spec="${spec}"$'\n===== '"$sf"$' =====\n'"$(r "$sf")";; esac
+  manifest_has "$sf" || continue
+  sf_body="$(r "$sf")"
+  spec="${spec}"$'\n===== '"$sf"$' =====\n'"$sf_body"
+  spec_content="${spec_content}${sf_body}"
 done
-if [ -z "${spec//[[:space:]]/}" ]; then
+if [ -z "${spec_content//[[:space:]]/}" ]; then
   log "$SLUG ships no Trinity spec docs — sourcing the confirmed spec from the objective issue + backlog"
+  # SELF-EXCLUSION: `OBJECTIVE in:title` also matches this loop's OWN ship announcements (`SHIPPED: <repo>
+  # objective @ <sha>`), so after the first ship the gate would fold its past announcements into the
+  # "confirmed spec" it grades the product against — self-confirming noise. The filter is applied HERE, in
+  # shell, over the composed blocks: the remote query fetches candidates, it never decides what counts as
+  # the spec. (Same root cause as the ticket-selection defect in bin/ship-actuator.sh.) RESIDUAL, stated
+  # rather than implied: this matches on the composed HEADER line, so an issue BODY containing a line that
+  # mimics one could shift a block boundary. That is spec text handed to a reviewer, never a machine-read
+  # verdict (the verdict stays shell-owned and sha-bound), and any body could already contain `=====`.
   spec="$(gh issue list --repo "$SLUG" --state all --search 'OBJECTIVE in:title' \
-          --json number,title,body -q '.[] | "===== OBJECTIVE ISSUE #\(.number): \(.title) =====\n\(.body)"' 2>/dev/null)"
+          --json number,title,body -q '.[] | "===== OBJECTIVE ISSUE #\(.number): \(.title) =====\n\(.body)"' 2>/dev/null \
+          | awk '/^===== OBJECTIVE ISSUE #/ { drop = ($0 ~ /: SHIPPED: .* objective @ /) } !drop')"
   spec="${spec}"$'\n'"$(gh issue list --repo "$SLUG" --label backlog --state all \
           --json number,title,state,body \
           -q '.[] | "===== BACKLOG #\(.number) [\(.state)]: \(.title) =====\n\(.body)"' 2>/dev/null)"
+  spec_content="$spec"
 fi
 # FAIL-CLOSED: no spec, no gate. An unreadable or genuinely-absent spec must stop the review, never
 # produce a PASS the reviewer had no basis to give.
-[ -n "${spec//[[:space:]]/}" ] \
+[ -n "${spec_content//[[:space:]]/}" ] \
   || die "no confirmed spec found for $SLUG (no Trinity docs, no objective issue, no backlog) — refusing to ship-review against an empty spec (fail-closed)"
 
 dossier="# THE CONFIRMED SPEC — grade the product against THIS, in the order given

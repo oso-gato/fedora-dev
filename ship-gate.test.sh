@@ -31,7 +31,9 @@ cat > "$BIN/gh" <<EOF
 case "\$*" in
   *"branches/main"*)          printf '%s' "$SHA" ;;                       # -q .commit.sha equiv
   *"git/trees/"*)             cat "\${SHIPTEST_MANIFEST:-$MANIFEST_F}" 2>/dev/null ;;
-  *"contents/"*)              printf 'confirmed spec text\n' | base64 -w0 ;;
+  # CONTENTS_FAIL models the tree read succeeding while every blob read comes back empty (a >1MB blob, or
+  # a transient failure) — the case in which framing alone must NOT satisfy the emptiness guard.
+  *"contents/"*)              [ "\${SHIPTEST_CONTENTS_FAIL:-0}" = 1 ] || printf 'confirmed spec text\n' | base64 -w0 ;;
   *"commits/"*"/comments"*"POST"*|*"--method POST"*"/comments"*) echo "posted" >> "\$SHIPTEST_POSTS" ;;
   *"commits/"*"/comments"*)   cat "\${GH_COMMENTS_F:-/dev/null}" 2>/dev/null ;;
   *"OBJECTIVE in:title"*)     cat "\${SHIPTEST_OBJECTIVE:-/dev/null}" 2>/dev/null ;;
@@ -47,12 +49,13 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/repo-scope.sh"; chmod +x "$BIN/re
 # --- stub claude (the reviewer): emits $REVIEW, exits $RCODE; touches a sentinel so we can prove it RAN
 mkreviewer(){ # <reply> <rc>
   { printf '#!/usr/bin/env bash\ntouch "%s"\n' "$ROOT/reviewer.ran"
-    printf 'cat >/dev/null\n'                        # drain the prompt on stdin (avoid SIGPIPE)
+    printf 'cat > "%s"\n' "$ROOT/prompt.txt"         # KEEP the dossier: what the reviewer was handed is
+                                                     # itself under test (drains stdin, so no SIGPIPE)
     printf 'printf %s %q\n' '%s\\n' "$1"
     printf 'exit %s\n' "$2"; } > "$BIN/claude"; chmod +x "$BIN/claude"
 }
 run(){ # extra env… — drives the REAL ship-gate dry-run; captures OUT + RC
-  rm -f "$ROOT/reviewer.ran"; : > "$ROOT/posts.log"
+  rm -f "$ROOT/reviewer.ran" "$ROOT/prompt.txt"; : > "$ROOT/posts.log"
   OUT="$(env PATH="$BIN:$PATH" REPO_SCOPE="$BIN/repo-scope.sh" \
       SHIP_CLAUDE="claude" SHIPTEST_POSTS="$ROOT/posts.log" FITNESS_ENV_FILE=/nonexistent "$@" \
       bash "$SUT" e2e-alpha 2>&1)"; RC=$?
@@ -127,6 +130,65 @@ run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/empty.txt
 ck "objective-issue spec is accepted" "$([ "$RC" = 0 ] && echo 1)" "rc=$RC"
 ck "the reviewer ran against it"      "$([ -f "$ROOT/reviewer.ran" ] && echo 1)" "reviewer never ran"
 ck "verdict bound to the aggregate"   "$([ "$(line1)" = "SHIP GATE: VERDICT PASS aggregate $SHA" ] && echo 1)" "got [$(line1)]"
+
+echo "== the gate does NOT fold its own past ship ANNOUNCEMENTS into the confirmed spec =="
+# `OBJECTIVE in:title` matches the actuator's `SHIPPED: <repo> objective @ <sha>` announcements too, so
+# after the first ship the gate would grade the product against its own prior verdicts — self-confirming.
+{ printf '===== OBJECTIVE ISSUE #9: SHIPPED: e2e-alpha objective @ aaaaaaa =====\nan earlier ship notice\n'
+  printf '===== OBJECTIVE ISSUE #1: a minimal status-page image =====\nserve 200 on /\n'; } > "$ROOT/obj+ann.txt"
+mkreviewer 'SHIP_VERDICT: PASS' 0
+run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/empty.txt" \
+    SHIPTEST_OBJECTIVE="$ROOT/obj+ann.txt"
+ck "the real objective still reaches the reviewer" "$(grep -q 'serve 200 on /' "$ROOT/prompt.txt" && echo 1)" "the objective was dropped"
+ck "a past ship announcement does NOT"             "$(grep -q 'an earlier ship notice' "$ROOT/prompt.txt" || echo 1)" "the gate graded the product against its own announcement"
+
+echo "== FAIL-CLOSED: header FRAMING is not spec CONTENT =="
+# The tree read succeeds (so the four Trinity docs are in the manifest) but every contents read comes back
+# empty. A guard applied to the framed text sees `===== 00-OBJECTIVES.md =====` and passes a content-free
+# spec — the same fail-open this gate closes, wearing its own headers.
+mkreviewer 'SHIP_VERDICT: PASS' 0
+run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_CONTENTS_FAIL=1
+ck "content-free spec refuses (rc 1)"  "$([ "$RC" = 1 ] && echo 1)" "rc=$RC — reviewed against headers only"
+ck "…and refuses FOR THAT REASON"      "$(printf '%s' "$OUT" | grep -qi 'no confirmed spec' && echo 1)" "died for another reason: $(printf '%s' "$OUT" | tail -1)"
+ck "the model was NOT run"             "$([ ! -f "$ROOT/reviewer.ran" ] && echo 1)" "the model judged empty headings"
+
+echo "== manifest matching is per-path EXACT, not substring =="
+printf '00-OBJECTIVES.md\ndocs/prerun.sh.md\n' > "$ROOT/manifest-sub.txt"
+mkreviewer 'SHIP_VERDICT: PASS' 0
+run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/manifest-sub.txt"
+ck "no phantom 'run.sh' section from docs/prerun.sh.md" "$(grep -q '^===== run.sh =====' "$ROOT/prompt.txt" || echo 1)" "a substring match appended an empty section"
+
+echo "== MUTATIONS RUN IN-SUITE: the three rows above must BITE, not pass vacuously =="
+MUT="$ROOT/mut"; mkdir -p "$MUT"; MUTSUT="$MUT/ship-gate.sh"
+mutate(){ # <sed-expr> <name>
+  cp "$SUT" "$MUTSUT"; sed -i "$1" "$MUTSUT"
+  cmp -s "$SUT" "$MUTSUT" && { ck "mutation '$2' changed the copy" "" "VACUOUS — the sed matched nothing"; return 1; }
+  return 0
+}
+runmut(){ rm -f "$ROOT/reviewer.ran" "$ROOT/prompt.txt"
+  OUT="$(env PATH="$BIN:$PATH" REPO_SCOPE="$BIN/repo-scope.sh" SHIP_CLAUDE="claude" \
+      SHIPTEST_POSTS="$ROOT/posts.log" FITNESS_ENV_FILE=/nonexistent "$@" \
+      bash "$MUTSUT" e2e-alpha 2>&1)"; RC=$?; }
+
+mkreviewer 'SHIP_VERDICT: PASS' 0
+# M1 — drop the self-exclusion filter: the announcement returns to the spec.
+if mutate '/awk .\/\^===== OBJECTIVE ISSUE #\//s/ *| *awk [^)]*//' 'drop the announcement filter'; then
+  runmut SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/empty.txt" \
+         SHIPTEST_OBJECTIVE="$ROOT/obj+ann.txt"
+  ck "M1: the announcement is folded back into the spec" \
+     "$(grep -q 'an earlier ship notice' "$ROOT/prompt.txt" && echo 1)" "the defect did not reappear — the row may be vacuous"
+fi
+# M2 — let the emptiness guard count FRAMING as content (append the filename, not the body).
+if mutate 's/spec_content="${spec_content}${sf_body}"/spec_content="${spec_content}${sf}"/' 'guard counts framing'; then
+  runmut SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_CONTENTS_FAIL=1
+  ck "M2: a content-free spec is reviewed" "$([ -f "$ROOT/reviewer.ran" ] && echo 1)" "the fail-open did not reappear — the row may be vacuous"
+fi
+# M3 — restore substring path matching.
+if mutate 's/grep -qxF/grep -qF/' 'substring path match'; then
+  runmut SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/manifest-sub.txt"
+  ck "M3: docs/prerun.sh.md conjures a run.sh section" \
+     "$(grep -q '^===== run.sh =====' "$ROOT/prompt.txt" && echo 1)" "the defect did not reappear — the row may be vacuous"
+fi
 
 echo
 echo "ship-gate: $pass passed, $fail failed"
