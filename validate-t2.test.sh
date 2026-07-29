@@ -25,12 +25,36 @@
 set -uo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 VSH_SRC="$REPO/bin/validate.sh"
-podman info >/dev/null 2>&1 || { echo "FATAL: no podman engine reachable — this suite drives REAL scratch builds (CONTAINER_HOST)"; exit 1; }
+# CAPABILITY GUARD — exit 77 = SKIP, the contract .github/workflows/tests.yml honours. Probe the
+# ENGINE, not the binary: `command -v podman` succeeding proves nothing (CI run 30417457651 printed
+# "container engine available: 1" and still failed), whereas `podman info` exercises it.
+podman info >/dev/null 2>&1 || {
+    echo "SKIP: no usable podman engine (podman info failed) — every row drives a REAL scratch build"
+    exit 77
+}
 TMP=$(mktemp -d)
 # DISCARD=1 reaps each candidate on validate.sh's own exit; the trap is belt-and-braces for an interrupted run
-trap 'podman rmi -f localhost/t2-cmd-only:candidate-Containerfile- localhost/t2-no-start:candidate-Containerfile- localhost/t2-fleet-lost:candidate-Containerfile- localhost/t2-fleet-ok:candidate-Containerfile- >/dev/null 2>&1; rm -rf "$TMP"' EXIT
-pass=0; fail=0
+trap 'podman rmi -f localhost/t2-cmd-only:candidate-Containerfile- localhost/t2-no-start:candidate-Containerfile- localhost/t2-fleet-lost:candidate-Containerfile- localhost/t2-fleet-ok:candidate-Containerfile- localhost/t2-probe-nostart:candidate >/dev/null 2>&1; rm -rf "$TMP"' EXIT
+pass=0; fail=0; skip=0
 ck(){ if [ "$2" = "$3" ]; then echo "  PASS: $1"; pass=$((pass+1)); else echo "  FAIL: $1 (got=$2 want=$3)"; fail=$((fail+1)); fi; }
+sk(){ echo "  SKIP: $1"; skip=$((skip+1)); }
+
+# Does THIS engine create a container from an image declaring NO startup process? podman 5 does; the
+# GitHub runner's podman 4 refuses ("no command or entrypoint provided"), so validate.sh's `podman
+# create` yields no cid and it never reaches its rootfs-size line. Row 2's rootfs-size assertion is an
+# ATTRIBUTION guard (it proves that row's RED comes from the startup check ALONE), not the subject
+# under test — so where the engine cannot express the scenario that ONE assertion is skipped and the
+# other 18 rows keep biting. Probe the exact capability; never sniff a version.
+nostart_create_ok(){
+  local d="$TMP/probe-nostart" tag="localhost/t2-probe-nostart:candidate" cid=""
+  mkdir -p "$d"; : > "$d/f"; printf 'FROM scratch\nCOPY f /\n' > "$d/Containerfile"
+  podman build -q --isolation=chroot -t "$tag" "$d" >/dev/null 2>&1 || return 1
+  cid=$(podman create "$tag" 2>/dev/null)
+  [ -n "$cid" ] && podman rm -f "$cid" >/dev/null 2>&1
+  podman rmi -f "$tag" >/dev/null 2>&1
+  [ -n "$cid" ]
+}
+if nostart_create_ok; then NOSTART_CREATE=yes; else NOSTART_CREATE=no; fi
 
 mkdir -p "$TMP/vbin"; cp "$VSH_SRC" "$TMP/vbin/validate.sh"; VSH="$TMP/vbin/validate.sh"
 
@@ -76,7 +100,11 @@ run_v "$VSH" "$R_NONE"
 ck "verdict RED (rc=1)"                                     "$RC" 1
 ck "startup-process FAIL"                                   "$(has 'startup-process +FAIL')" yes
 ck "the FAIL line names the remedy (set ENTRYPOINT or CMD)" "$(has 'set ENTRYPOINT or CMD')" yes
-ck "rootfs-size PASS (the RED is the startup check ALONE)"  "$(has 'rootfs-size +PASS')" yes
+if [ "$NOSTART_CREATE" = yes ]; then
+  ck "rootfs-size PASS (the RED is the startup check ALONE)"  "$(has 'rootfs-size +PASS')" yes
+else
+  sk "rootfs-size attribution — this engine's \`create\` refuses a startup-less image, so validate.sh cannot reach its rootfs-size line (the startup assertions above still bite)"
+fi
 
 echo "== row 3: a fleet-convention tree whose image LOST /usr/local/bin/entrypoint*.sh -> RED =="
 run_v "$VSH" "$R_LOST"
@@ -100,4 +128,4 @@ ck "the CMD-only repo now goes RED (row 1 discriminates)"   "$RC" 1
 ck "via the restored unconditional entrypoint-present FAIL" "$(has 'entrypoint-present +FAIL')" yes
 ck "while startup-process still PASSes (the RED is the grep ALONE)" "$(has 'startup-process +PASS')" yes
 
-echo "-----"; echo "validate-t2: PASS=$pass FAIL=$fail"; [ "$fail" -eq 0 ]
+echo "-----"; echo "validate-t2: PASS=$pass FAIL=$fail SKIP=$skip"; [ "$fail" -eq 0 ]

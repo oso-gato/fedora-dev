@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+
+# HERMETICITY (2026-07-29). This box EXPORTS DEVBOX_MANIFEST_V2=1, while the v2-gate cases below assert
+# that the DEFAULT is OFF. So this test read its answer from the shell it happened to run in: green in
+# CI, red in the devbox, for no reason connected to the code. A test that inherits ambient env is not a
+# test of the code. Isolate it explicitly rather than excusing the failure.
+unset DEVBOX_MANIFEST_V2
 # rebuild-request.test.sh — MOCK end-to-end test of bin/rebuild-request.sh (the R17 dev-side producer,
 # fedora-dev#174 + the D4/#191 multi-tenant session-id). Drives the REAL script against a STUB session
 # source (SESSION_SOURCE seam, emitting `name<TAB>cwd<TAB>sid` fixtures the way enumerate_claude_procs

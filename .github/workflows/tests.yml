@@ -14,14 +14,46 @@ name: tests
 # Measured across ~9,900 agent runs: 45-48% of all failures were FALSE CLAIMS OF COMPLETION where
 # nothing independent could check; where an independent process could check, that fell to 3%.
 #
-# NO SILENT TRUNCATION. Every test file and every --selftest is discovered and run. Nothing is excluded,
-# capped or sampled. If a test cannot run here it FAILS here — it is not quietly skipped. A gate that
-# silently drops coverage reads as "everything passed" when it means "we did not look".
+# NO SILENT TRUNCATION — but capability-honest. Every test file and every --selftest is discovered.
+# Nothing is capped or sampled. A test that CANNOT run in this environment says so ITSELF: it prints one
+# `SKIP: <reason>` line and exits 77. This workflow honours that ONE code, announces the skip by NAME
+# with its REASON in the log AND the step summary, and treats every OTHER non-zero exit as a real
+# failure. Skipping loudly is not dropping coverage quietly: the sin is a gate that reads "everything
+# passed" when it means "we did not look".
 #
-# Probed before shipping: 43/43 test files and 24/24 selftests pass in a clean environment. The one
-# apparent failure (rebuild-request) was an AMBIENT ENV LEAK — the box exports DEVBOX_MANIFEST_V2=1 and
-# the test does not isolate itself from it; unset, it passes. That is a test-hygiene bug worth fixing,
-# not a reason to exclude it: CI does not export that variable, so it runs green here.
+# WHY THIS EXISTS (2026-07-29). The first version of this workflow ran everything unconditionally and
+# FAILED 10 runs out of 10 — 43 passed, 3 failed: assemble-stamp, claudebox-reassemble and validate-t2.
+# Had the check been made REQUIRED at that point it would have blocked EVERY pull request and stopped
+# the loop dead. The maintainer asked for confirmation before switching it on; that question is the only
+# reason it was caught. A required gate that can never go green is not a safety net, it is an outage.
+#
+# The "probed: 43/43 pass" claim that shipped it was measured INSIDE the devbox, where those three pass.
+# A real measurement of the wrong environment.
+#
+# THEN THE FIRST FIX REPEATED THE ERROR. It excused a failure when `command -v podman` found nothing and
+# the test mentioned podman/distrobox/CONTAINER_HOST. That fix was a NO-OP, and its own CI run said so
+# in its first line of output: `container engine available: 1`. The GitHub ubuntu runner SHIPS podman,
+# so the excuse branch was unreachable, `0 skipped`, and the same three files failed identically. The
+# mechanism was reasoned about instead of measured — twice on the same change.
+#
+# WHAT THOSE THREE ACTUALLY NEED — read off the failing run 30417457651, then reproduced in the devbox:
+#   * assemble-stamp, claudebox-reassemble — NOT an engine at all. They drive the REAL
+#     claudebox-assemble.sh, which exits 1 with "must run as core (uid 1000)" under any other user; a
+#     GitHub runner is uid 1001. Stubbing `id -u` to 1001 in the devbox reproduces CI's signatures
+#     exactly (PASS=11 FAIL=17, and 1 passed/5 failed).
+#   * validate-t2 — HAS a working engine and passes 18 of its 19 rows on the runner. ONE row needs an
+#     engine whose `podman create` accepts an image declaring no startup process (podman 5 does; the
+#     runner's podman 4 refuses), so validate.sh never reaches its rootfs-size line. That ONE assertion
+#     is skipped there; the other 18 keep biting.
+#
+# So a blanket "container engine" excuse was wrong twice over: wrong about the cause, and broad enough
+# to excuse a GENUINE regression in any file that merely mentions podman. Each test now declares its
+# OWN requirement and skips itself for that reason alone — the excuse can never be wider than the reason
+# for it, and a new test inherits nothing it did not ask for.
+#
+# EVERY STEP RUNS EVEN AFTER ONE FAILS (`if: !cancelled()`). The run above stopped at the first failing
+# step, so nothing has ever observed the --selftest and parse steps on a runner. A gate being brought up
+# must report the WHOLE truth in one run, not one layer per attempt.
 #
 # TO MAKE THIS A REQUIRED CHECK (one-time, maintainer): Settings → Branches/Rulesets → require the
 # "tests" status check. Until that is done this workflow REPORTS but does not BLOCK — it is an
@@ -46,45 +78,88 @@ jobs:
       - name: Run every *.test.sh
         run: |
           set -uo pipefail
-          pass=0; fail=0; failed=""
+          pass=0; fail=0; skip=0; failed=""
+          SKIPLOG=$(mktemp); LOGF=$(mktemp)
           shopt -s nullglob
           for t in *.test.sh bin/*.test.sh; do
+            # RUN EVERYTHING, and let the TEST decide whether it can run here. Exit 77 (+ a printed
+            # `SKIP: <reason>` line) is the only excuse this loop accepts; the test names its OWN
+            # requirement, so the excuse is exactly as wide as the reason for it. Every other non-zero
+            # exit is a real failure — including one in a file that happens to mention podman.
             printf '\n\033[1m== %s ==\033[0m\n' "$t"
-            if timeout 120 bash "$t"; then
+            # CAPTURE BY REDIRECT, NEVER `| tee` — the bound must actually bound. `timeout 120 … | tee`
+            # puts the bound on the LEFT of a pipe only: `tee` reads until every holder of the write end
+            # closes it, and a test's leaked descendants inherit that fd. MEASURED, not reasoned:
+            # apparatus-deadman.test.sh PASSES in 31s (rc=0) and leaves `sleep 100000` children alive, so
+            # `tee` blocks FOREVER on a test that SUCCEEDED — the timeout never even applies. Run
+            # 30418639031 did exactly that: 20+ min, `cancelled`, nothing reported, and the later steps
+            # `skipped` (`!cancelled()` is false under cancellation) — where the form it replaced was red
+            # in 2.5 min naming 3 real failures. Redirect + `cat` bounds it and keeps the `^SKIP: ` grep.
+            rc=0; timeout 120 bash "$t" > "$LOGF" 2>&1 || rc=$?
+            cat "$LOGF"
+            if [ "$rc" -eq 0 ]; then
               pass=$((pass+1))
+            elif [ "$rc" -eq 77 ]; then
+              reason=$(grep -m1 '^SKIP: ' "$LOGF" 2>/dev/null); reason="${reason#SKIP: }"
+              printf '   ^ SKIPPED (self-declared): %s\n' "${reason:-no reason given}"
+              skip=$((skip+1)); printf '%s\t%s\n' "$t" "${reason:-no reason given}" >> "$SKIPLOG"
             else
               fail=$((fail+1)); failed="$failed $t"
             fi
           done
-          printf '\n=== test files: %s passed, %s failed ===\n' "$pass" "$fail"
+          printf '\n=== test files: %s passed, %s failed, %s skipped ===\n' "$pass" "$fail" "$skip"
+          if [ "$skip" -ne 0 ]; then
+            printf 'SKIPPED (self-declared — NOT covered by this gate):\n'
+            sed 's/^/  /' "$SKIPLOG"
+            { printf '### Skipped test files — NOT covered here\n'
+              while IFS=$'\t' read -r f r; do printf -- '- `%s` — %s\n' "$f" "$r"; done < "$SKIPLOG"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ "$fail" -ne 0 ]; then
             printf 'FAILED:\n'; for f in $failed; do printf '  %s\n' "$f"; done
             exit 1
           fi
-          printf '%s test files passed\n' "$pass" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s test files passed, %s skipped\n' "$pass" "$skip" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run every --selftest
+        if: ${{ !cancelled() }}
         run: |
           set -uo pipefail
-          pass=0; fail=0; failed=""
+          pass=0; fail=0; skip=0; failed=""
+          SKIPLOG=$(mktemp); LOGF=$(mktemp)
           shopt -s nullglob
           for s in bin/*.sh *.sh; do
             grep -q -- '--selftest' "$s" 2>/dev/null || continue
             printf '\n\033[1m== %s --selftest ==\033[0m\n' "$s"
-            if timeout 120 bash "$s" --selftest; then
+            # Redirect, not `| tee` — same reason as the loop above.
+            rc=0; timeout 120 bash "$s" --selftest > "$LOGF" 2>&1 || rc=$?
+            cat "$LOGF"
+            if [ "$rc" -eq 0 ]; then
               pass=$((pass+1))
+            elif [ "$rc" -eq 77 ]; then
+              reason=$(grep -m1 '^SKIP: ' "$LOGF" 2>/dev/null); reason="${reason#SKIP: }"
+              printf '   ^ SKIPPED (self-declared): %s\n' "${reason:-no reason given}"
+              skip=$((skip+1)); printf '%s\t%s\n' "$s" "${reason:-no reason given}" >> "$SKIPLOG"
             else
               fail=$((fail+1)); failed="$failed $s"
             fi
           done
-          printf '\n=== selftests: %s passed, %s failed ===\n' "$pass" "$fail"
+          printf '\n=== selftests: %s passed, %s failed, %s skipped ===\n' "$pass" "$fail" "$skip"
+          if [ "$skip" -ne 0 ]; then
+            printf 'SKIPPED (self-declared — NOT covered by this gate):\n'
+            sed 's/^/  /' "$SKIPLOG"
+            { printf '### Skipped selftests — NOT covered here\n'
+              while IFS=$'\t' read -r f r; do printf -- '- `%s` — %s\n' "$f" "$r"; done < "$SKIPLOG"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ "$fail" -ne 0 ]; then
             printf 'FAILED:\n'; for f in $failed; do printf '  %s\n' "$f"; done
             exit 1
           fi
-          printf '%s selftests passed\n' "$pass" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s selftests passed, %s skipped\n' "$pass" "$skip" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Every bin/*.sh must parse
+        if: ${{ !cancelled() }}
         # Cheap and absolute: a syntax error in any shipped script is a defect, and bash -n catches the
         # class that has bitten this repo repeatedly (an escaped backtick inside a ${...} expansion, an
         # apostrophe inside a ${VAR:-default}) where the parse error surfaces ~50 lines from its cause.
