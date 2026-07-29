@@ -7,11 +7,18 @@
 # never holds a merge credential; this script does, and it cannot be talked into merging a Tier-A
 # change — it just reads the gates.
 #
-# THE THREE GATES (all required to merge; ANY missing/ambiguous/UNVERIFIABLE → REFUSE):
-#   1. TIER = B or C   (bin/tier-classify.sh over the PR's changed files). Tier A → HUMAN (never auto).
-#   2. HOST LIVE-GATE = GREEN   — a `Host live-gate (Gate B): VERDICT GREEN` comment AUTHORED BY THE
+# THE TWO GATES (both required to merge; ANY missing/ambiguous/UNVERIFIABLE → REFUSE):
+#
+# CORRECTED 2026-07-29 (STEP 4 of #274). This header used to claim a THIRD gate: "TIER = B or C ...
+# Tier A → HUMAN (never auto)". **That was false and had been for weeks.** The merge decision
+# (merge_decision, below) reads only `gate` and `fit`; it never reads the tier at all, and the
+# ZERO-GATE decision deliberately removed tier routing — every tier auto-merges on two greens.
+# Anyone auditing this merge boundary from its header would have concluded a human gate existed
+# where none does. The BEHAVIOUR is correct and intended; the CLAIM was not, so the claim is deleted.
+# A false statement in the merge boundary is worse than a missing guard, because reviewers act on it.
+#   1. HOST LIVE-GATE = GREEN   — a `Host live-gate (Gate B): VERDICT GREEN` comment AUTHORED BY THE
 #      HOST BOT ($LG_HOST_LOGIN). Comments from anyone else (incl. the PR author) are ignored.
-#   3. FITNESS = PASS  — a `Fitness review: VERDICT PASS` comment AUTHORED BY THE FITNESS-REVIEW BOT
+#   2. FITNESS = PASS  — a `Fitness review: VERDICT PASS` comment AUTHORED BY THE FITNESS-REVIEW BOT
 #      ($FITNESS_LOGIN), NOT a self-appliable label. A verdict authored by the PR author is invalid.
 # Both trust anchors MUST be configured, MUST differ from the PR author, AND MUST differ from EACH
 # OTHER (G1 — one compromised token must never satisfy both gates). Verdict SELECTION and EXTRACTION
