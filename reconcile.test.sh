@@ -63,7 +63,17 @@ case "$sub" in
     printf '%s\n' ${TREE_PATHS-.github/workflows/build.yml bin/x.sh}
     ;;
   # record the ACTUAL issue closed ($3), not a hardcoded one — N refs mean N distinct closes.
-  "issue close") echo "CLOSE $3 :: $*" >> "$CLOSED";;
+  # The close and the proof comment are now SEPARATE calls (close first, so a failed close can
+  # never leave an anchor on an open issue). Record both: `closed()` reads the CLOSE lines,
+  # `says()` reads the COMMENT body — what the posted proof record actually asserts.
+  # FAITHFUL to real gh: `issue close --comment` posts the COMMENT FIRST and then closes. Modelling
+  # that ordering is the whole point — it is what leaves an anchor on a still-OPEN issue when the
+  # close fails, and a stub that skipped it would let the strand row pass vacuously.
+  "issue close")
+    case "$*" in *--comment*) echo "COMMENT $3 :: $*" >> "$CLOSED";; esac
+    [ "${CLOSE_FAIL:-0}" = 1 ] && exit 1
+    echo "CLOSE $3 :: $*" >> "$CLOSED";;
+  "issue comment") echo "COMMENT $3 :: $*" >> "$CLOSED";;
   "pr comment")  : ;;   # PR stamp — recorded implicitly by the close row
 esac
 exit 0
@@ -213,6 +223,17 @@ else
   closed && ok "mutant: pending-CI issue wrongly closed ⇒ the real CI-PENDING row discriminates" || no "mutant did not close (the proof-gate row would not bite)"
 fi
 
+
+echo "== A FAILED CLOSE MUST LEAVE NO ANCHOR (the permanent-strand class, found by adversarial review) =="
+# `gh issue close --comment` posts the comment and THEN closes. A close that fails after the comment
+# landed leaves the issue OPEN carrying its own anchor, so the next scan reads prior=1 on an OPEN issue
+# and answers SKIP:reopened-or-half-closed — PERMANENTLY, unrecoverable without a human. Closing first,
+# as a separate call, makes an anchor impossible unless the close really happened.
+run "$SCRIPT" REFS='400 401' HOST_GREEN=1 PUB=success FILES=bin/x.sh ANCESTOR=1 CLOSE_FAIL=1
+{ [ "$(ncloses)" = 0 ] && ! grep -q '^COMMENT ' "$CLOSED"; } \
+  && ok "failed close writes NO proof comment ⇒ no anchor ⇒ the ref retries" \
+  || no "a failed close still wrote an anchor: $(tr '\n' '|' <"$CLOSED")"
+grep -q 'close FAILED' "$ROOT/out" && ok "and it says so in the log" || no "silent close failure"
 
 echo "== MULTI-TICKET: a superseding PR closes EVERY ticket it declares (the e2e-beta #15 shape) =="
 # #15 delivered #2, #3 AND #6 after #9/#10 were closed unmerged, but declared only #6 — so #2 and #3
