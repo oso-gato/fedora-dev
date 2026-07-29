@@ -101,6 +101,12 @@ setup_case(){
     git -C "$c" config user.email claudebox@fedora-dev.local; git -C "$c" config user.name claudebox
   done
   STATEDIR="$HOMEDIR/.local/state/pr-poller"; mkdir -p "$STATEDIR"
+  # $STATE is ONE dir shared across the 13-repo sweep, so these markers are REPO-QUALIFIED — a bare
+  # `<pr>` made fedora-desktop#100 and any other repo's #100 the same file. DERIVED from the repo the
+  # harness sweeps, not hardcoded, so a future rename cannot silently desync this suite again.
+  MK_REPAIR="repair-fedora-dev-1-stalled.n"
+  MK_ENROLLED="enrolled-fedora-dev-1.done"
+  MK_ENROLL_N="enroll-fedora-dev-1.n"
   WTDIR="$CASE/wt"
   LABEL_CREATED="$CASE/label-created"
 }
@@ -134,13 +140,13 @@ ck "$(stalled_surfaced && echo 0 || echo 1)" "it surfaced [stalled] to the human
 ck "$([ "$(origin_sha feat/x)" != "$SHA" ] && echo 1 || echo 0)" "origin/feat/x did NOT advance — the repair never landed"
 ck "$([ "$(origin_sha main)" = "$MAIN_SHA" ] && echo 1 || echo 0)" "origin/main moved — a repair must NEVER touch main"
 ck "$(grep -q 'ANOMALY.*\[stalled\] repair attempt 1/3' "$CASE/out.log" && echo 1 || echo 0)" "the repair attempt was not logged with its budget"
-ck "$([ "$(cat "$STATEDIR/repair-1-stalled.n" 2>/dev/null)" = 1 ] && echo 1 || echo 0)" "the repair budget was not charged (an uncharged budget never escalates)"
+ck "$([ "$(cat "$STATEDIR/$MK_REPAIR" 2>/dev/null)" = 1 ] && echo 1 || echo 0)" "the repair budget was not charged (an uncharged budget never escalates)"
 done_case
 
 echo "== ESCALATE: the budget is SPENT → the human, and no further model run is spent =="
 DESC="a spent repair budget escalates to the maintainer instead of churning the model"; OK=1
 setup_case
-printf '3' > "$STATEDIR/repair-1-stalled.n"
+printf '3' > "$STATEDIR/$MK_REPAIR"
 sweep "$POLLER" POLLER_REPAIR_MAX=3
 ck "$(ran && echo 0 || echo 1)" "the model ran despite a spent budget — the bound does not bind"
 ck "$(stalled_surfaced && echo 1 || echo 0)" "a spent budget did not reach the human at all (the PR is now stranded silently)"
@@ -166,7 +172,7 @@ setup_case
 sweep "$POLLER" POLLER_REPAIR_MAX=3 FAKE_LABELS=
 ck "$(enrolled && echo 1 || echo 0)" "the PR was NEVER enrolled — an unlabelled PR can never be verdicted, so it stays invisible to the gate forever (the exact #271/#277/bootstrap#283 stall)"
 ck "$(grep -q 'SELF-HEAL.*enrolled in the host live-gate' "$CASE/out.log" && echo 1 || echo 0)" "the self-heal was not logged — a silent repair is indistinguishable from the silence it replaced"
-ck "$([ -f "$STATEDIR/enrolled-1.done" ] && echo 1 || echo 0)" "no one-shot marker written — without it the loop re-adds a label a human may have deliberately removed"
+ck "$([ -f "$STATEDIR/$MK_ENROLLED" ] && echo 1 || echo 0)" "no one-shot marker written — without it the loop re-adds a label a human may have deliberately removed"
 ck "$(grep -q 'SURFACE' "$FIX_LOG" && echo 0 || echo 1)" "it bothered the maintainer with something it could fix itself"
 ck "$(ran && echo 0 || echo 1)" "it summoned the MODEL to add a label — run_fixer commits code in a worktree; it cannot label anything"
 done_case
@@ -174,7 +180,7 @@ done_case
 echo "== SELF-HEAL is ONE SHOT: we heal an omission, we do not fight a decision =="
 DESC="a second sweep does not re-add a label that was removed after we enrolled it"; OK=1
 setup_case
-: > "$STATEDIR/enrolled-1.done"                    # we already enrolled this PR once
+: > "$STATEDIR/$MK_ENROLLED"                    # we already enrolled this PR once
 sweep "$POLLER" POLLER_REPAIR_MAX=3 FAKE_LABELS=
 ck "$(enrolled && echo 0 || echo 1)" "it re-enrolled an already-enrolled PR — the label is gone because somebody removed it, and re-adding it every 30s is the loop arguing with a human"
 done_case
@@ -213,7 +219,7 @@ setup_case
 sweep "$POLLER" POLLER_REPAIR_MAX=3 FAKE_LABELS= ENROLL_FAIL=until-create
 ck "$(grep -q 'LABELCREATE.*live-validate' "$FIX_LOG" && echo 1 || echo 0)" "it never tried to CREATE the missing label — \`gh pr edit --add-label\` hard-fails on an unknown label, which is precisely the 12-hour stall"
 ck "$(enrolled && echo 1 || echo 0)" "the retry behind the create never ran, so a brand-new repo can still never enrol a PR"
-ck "$([ -f "$STATEDIR/enrolled-1.done" ] && echo 1 || echo 0)" "create-on-use succeeded but was not recorded as enrolled"
+ck "$([ -f "$STATEDIR/$MK_ENROLLED" ] && echo 1 || echo 0)" "create-on-use succeeded but was not recorded as enrolled"
 done_case
 
 echo "== SELF-HEAL bounded: a PERMANENT label-write failure reaches the human, and not the model =="
@@ -222,8 +228,8 @@ setup_case
 sweep "$POLLER" POLLER_REPAIR_MAX=3 POLLER_ENROLL_MAX=1 FAKE_LABELS= ENROLL_FAIL=always
 ck "$(grep -q 'SURFACE.*\[enroll-infra\]' "$FIX_LOG" && echo 1 || echo 0)" "a permanently un-enrollable PR reached nobody — it would re-try at sweep cadence forever, silently (R4)"
 ck "$(ran && echo 0 || echo 1)" "it summoned the model to fix a credential fact — anomaly_route's *infra* family exists to stop exactly this"
-ck "$([ -f "$STATEDIR/enrolled-1.done" ] && echo 0 || echo 1)" "it marked a FAILED enrolment as done, which would suppress every future retry"
-ck "$([ "$(cat "$STATEDIR/enroll-1.n" 2>/dev/null)" = 1 ] && echo 1 || echo 0)" "the failure counter was not charged, so the bound can never be reached"
+ck "$([ -f "$STATEDIR/$MK_ENROLLED" ] && echo 0 || echo 1)" "it marked a FAILED enrolment as done, which would suppress every future retry"
+ck "$([ "$(cat "$STATEDIR/$MK_ENROLL_N" 2>/dev/null)" = 1 ] && echo 1 || echo 0)" "the failure counter was not charged, so the bound can never be reached"
 done_case
 
 echo "== SELF-HEAL does not fire on a transient blip =="
@@ -231,14 +237,16 @@ DESC="a first failure under a bound of 3 retries quietly instead of paging the m
 setup_case
 sweep "$POLLER" POLLER_REPAIR_MAX=3 POLLER_ENROLL_MAX=3 FAKE_LABELS= ENROLL_FAIL=always
 ck "$(grep -q 'SURFACE' "$FIX_LOG" && echo 0 || echo 1)" "one transient API blip paged the maintainer — the bound exists so a blip self-heals on the next sweep"
-ck "$([ "$(cat "$STATEDIR/enroll-1.n" 2>/dev/null)" = 1 ] && echo 1 || echo 0)" "the attempt was not counted toward the bound"
+ck "$([ "$(cat "$STATEDIR/$MK_ENROLL_N" 2>/dev/null)" = 1 ] && echo 1 || echo 0)" "the attempt was not counted toward the bound"
 done_case
 
 echo "== MUTATION: un-wire the enrolment call site → the label is never added =="
 DESC="mutation: dropping the enroll_pr call restores the silent unlabelled NOOP"; OK=1
 EMUTBIN="$ROOT/emutbin"; rm -rf "$EMUTBIN"; cp -a "$HERE/bin" "$EMUTBIN"
 EMUT="$EMUTBIN/pr-poller.sh"
-sed 's/^            enroll_pr "$pr" "$ref" "$sha" || true$/            : ;/' "$POLLER" > "$EMUT"
+# #305 moved the enrol into a `case` arm on unenrolled_action, so the old whole-line sed no longer
+# matches. Target the call itself, wherever it sits — and the vacuity guard below still proves it bit.
+sed 's/enroll_pr "$pr" "$ref" "$sha" || true/: ;/' "$POLLER" > "$EMUT"
 chmod +x "$EMUT"
 # grep -F for the same reason the row below uses it: these literals carry `$`, which BRE would mangle.
 if grep -qF 'enroll_pr "$pr" "$ref" "$sha" || true' "$EMUT"; then

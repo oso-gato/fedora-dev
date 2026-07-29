@@ -424,10 +424,14 @@ host_green_p(){
 #   * reopened, no new work       → prior=1 → skip (the reopen is respected, not overridden)
 #   * a NEW PR delivers it        → prior=0 → closable again on that PR's own proof
 issue_facts(){
+  # `gh` takes ONE positional jq program and supports NO jq variables — there is no `--arg`. Passing
+  # one makes cobra reject the command before any network call ("accepts 1 arg(s), received 4"), which
+  # would empty every field, turn every ref into SKIP:unreadable, and stop the reconciler closing
+  # anything at all. So the PR number is interpolated into the program itself.
   gh issue view "$2" --repo "$1" --json state,labels,comments \
-    -q --arg pr "$3" '[.state,
-         (if ([.comments[]?|select(.body|contains("reconcile → closed:") and contains("PR #\($pr) merged"))]|length) > 0 then "1" else "0" end),
-         ([.labels[]?.name]|join(","))] | @tsv' 2>/dev/null
+    -q "[.state,
+         (if ([.comments[]?|select(.body|contains(\"reconcile → closed:\") and contains(\"PR #$3 merged\"))]|length) > 0 then \"1\" else \"0\" end),
+         ([.labels[]?.name]|join(\",\"))] | @tsv" 2>/dev/null
 }
 
 # publish_state <slug> <merge-oid> → SUCCESS | PENDING | FAILED | NONE (the merge commit's build.yml run).

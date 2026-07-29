@@ -52,12 +52,18 @@ case "$sub" in
     esac ;;
   # issue_facts: state \t prior-close \t labels. The ANCHOR moved from the PR to the ISSUE, so the
   # prior-close flag is now a property of the issue being closed, not of the PR that closed it.
-  # issue_facts passes the PR via `--arg pr N`, and `prior` is scoped to THAT PR. $ANCHOR_PR names the
-  # PR an existing anchor was written by; the anchor answers 1 only for that PR, so a LATER PR sees 0.
+  # issue_facts scopes `prior` to ONE PR by interpolating its number into the jq program. $ANCHOR_PR
+  # names the PR an existing anchor was written by, so a LATER PR sees 0.
   "issue view")
+    # BE AS STRICT AS REAL gh. gh takes ONE positional jq program and has NO jq variables — an `--arg`
+    # is rejected by cobra before any network call ("accepts 1 arg(s), received 4"). The first cut of
+    # this stub accepted `--arg` happily, so both scoping rows passed against an invocation real gh
+    # refuses: the reconciler would have closed NOTHING, in any repo, and the suite called it green.
+    # A stub that accepts more than production does is not a test, it is a second implementation.
+    case "$*" in *--arg*) echo "accepts 1 arg(s), received 4" >&2; exit 1;; esac
     _p=1
     if [ -n "${ANCHOR_PR:-}" ]; then
-      case "$*" in *"--arg pr $ANCHOR_PR"*) _p=1;; *) _p=0;; esac
+      case "$*" in *"PR #$ANCHOR_PR merged"*) _p=1;; *) _p=0;; esac
     else _p="${ANCHOR:-0}"; fi
     printf '%s\t%s\t%s\n' "${ISSUE_STATE:-OPEN}" "$_p" "${ISSUE_LABELS-backlog}";;
   # `-` (not `:-`): an explicitly EMPTY PUB is "no run for this commit", which is what publish_applicable_p
