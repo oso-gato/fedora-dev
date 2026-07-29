@@ -15,6 +15,18 @@
 #
 #   bash claudebox-reassemble.test.sh  → exit 0 = all rows pass. No GitHub/network/model/real engine.
 set -u
+
+# CAPABILITY GUARD — exit 77 = SKIP, the contract .github/workflows/tests.yml honours (it prints this
+# reason by name in the log and the step summary). The REAL claudebox-assemble.sh exits 1 with "must
+# run as core (uid 1000)" before the --if-stale gate is ever reached, so off a uid-1000 host every row
+# fails for that ONE reason. MEASURED, not assumed: stubbing `id -u` to 1001 in the devbox reproduces
+# CI run 30417457651's exact "1 passed, 5 failed" signature. The engine is stubbed here and the runner
+# HAS podman anyway — a container engine was never what this needed.
+if [ "$(id -u)" != 1000 ]; then
+    printf 'SKIP: needs uid 1000 — claudebox-assemble.sh refuses any other user; this host is uid %s\n' "$(id -u)"
+    exit 77
+fi
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASM="$HERE/claudebox-assemble.sh"
 ROOT="$(mktemp -d)"; trap 'rm -rf "$ROOT"' EXIT
