@@ -5,14 +5,18 @@
 #
 # It reviews the BUILT PRODUCT (the repo at its current main tip = the "shipped aggregate") against the
 # CONFIRMED spec, IN ORDER — (1) 00-OBJECTIVES.md, (2) 00-REQUIREMENTS.md (functional + non-functional),
-# (3) 00-BUILDPRINCIPLE.md — plus 00-GOVERNANCE.md. The DESIGN (00-DESIGN.md) is the dev's own mutable means
+# (3) 00-BUILDPRINCIPLE.md — plus 00-GOVERNANCE.md. A repo the apparatus develops FOR the maintainer
+# generally ships none of those four; there the confirmed spec is the OBJECTIVE ISSUE plus the backlog
+# tickets that decompose it, and the gate reads that instead. If NEITHER source yields a spec the gate
+# REFUSES to review (rc 1) rather than grade a product against nothing — a gate that cannot fail is not
+# a gate. The DESIGN (00-DESIGN.md) is the dev's own mutable means
 # and is NOT a conformance target (deliberately excluded). The reviewer is a FRESH agent-context (a
 # `claude -p` that did not build the product); the verdict LINE is shell-owned (a hallucinated reply
 # cannot forge a PASS); it is posted by a DISTINCT identity (the fitness App, != the author); it is
 # idempotent (bound to the aggregate sha — a new commit to main forces a fresh review); and it is
 # fail-closed (no sanctioned verdict ⇒ nothing on the bus ⇒ objective-status reads not-PASS ⇒ NOT shipped).
 #
-#   ship-gate.sh [--post] <repo> [--clone <path>]   review the current main aggregate; rc 0 verdict
+#   ship-gate.sh [--post] <repo>                   review the current main aggregate; rc 0 verdict
 #                                                    extracted (PASS|RETURN), 1 precondition refused,
 #                                                    3 reviewer could-not-run / produced no verdict.
 #   ship-gate.sh --selftest                          exercise the pure verdict extractor (no gh/model).
@@ -50,8 +54,7 @@ fi
 
 # ---- config -----------------------------------------------------------------------------------------
 POST=0; [ "${1:-}" = "--post" ] && { POST=1; shift; }
-REPO="${1:?usage: ship-gate.sh [--post] <repo> [--clone <path>]}"; shift || true
-CLONE=""; [ "${1:-}" = "--clone" ] && { CLONE="${2:?--clone needs a path}"; shift 2; }
+REPO="${1:?usage: ship-gate.sh [--post] <repo>}"; shift || true
 SLUG="oso-gato/$REPO"
 
 # TOKEN FERRY FALLBACK — reuse the fitness App's ferried token (the ship-gate verdict is posted by the
@@ -66,7 +69,6 @@ SHIPGATE_LOGIN="${SHIPGATE_LOGIN:-oso-gato-fitness-claudebox}"   # the independe
 DEV_LOGIN="${DEV_LOGIN:-oso-gato-nox-claudebox}"                 # the product author identity
 SHIP_CLAUDE="${SHIP_CLAUDE:-claude -p}"
 SHIP_DOSSIER_CAP="${SHIP_DOSSIER_CAP:-200000}"
-REPO_CLONE="${CLONE:-${REPO_CLONE:-$HOME/$REPO}}"
 
 log(){ echo "[ship-gate] $*" >&2; }
 die(){ log "$*"; exit 1; }
@@ -87,7 +89,12 @@ else
   [ "$SHIPGATE_LOGIN" != "$DEV_LOGIN" ] || die "SHIPGATE_LOGIN == author ($DEV_LOGIN) — self-judge is invalid (fail-closed)"
 fi
 
-[ -d "$REPO_CLONE/.git" ] || die "REPO_CLONE '$REPO_CLONE' is not a git clone of $SLUG — cannot read the built product (fail-closed)"
+# NO LOCAL CLONE IS REQUIRED. The gate used to die here unless $HOME/<repo> was a git clone, which meant
+# it could never run for a repo the apparatus develops but does not keep checked out — ~/e2e-beta has
+# never existed, so this line alone made the whole R34 gate unreachable for every customer repo. A
+# working tree is also the WRONG source even when present: it can be stale or on another branch, and the
+# gate would then grade something other than what shipped. Every product read below is pinned to
+# $aggregate_sha and comes from the bus.
 
 # ---- resolve the shipped aggregate (the current main tip) -------------------------------------------
 aggregate_sha="$(gh api "repos/$SLUG/branches/main" -q .commit.sha 2>/dev/null)"
@@ -105,26 +112,42 @@ if [ -n "$existing" ]; then
 fi
 
 # ---- build the dossier (the built product + the confirmed spec) — cap LOUD (R37) -------------------
-r(){ cat "$REPO_CLONE/$1" 2>/dev/null; }
-manifest="$(git -C "$REPO_CLONE" ls-tree -r --name-only "$aggregate_sha" 2>/dev/null)"
+# Read the shipped aggregate from the bus, pinned to $aggregate_sha (see the note above).
+r(){ gh api "repos/$SLUG/contents/$1?ref=$aggregate_sha" -q .content 2>/dev/null | base64 -d 2>/dev/null; }
+manifest="$(gh api "repos/$SLUG/git/trees/$aggregate_sha?recursive=1" \
+            -q '.tree[] | select(.type=="blob") | .path' 2>/dev/null)"
 ledger="$(gh issue list --repo "$SLUG" --label backlog --state all --json number,title,state,url \
           -q '.[] | "#\(.number) [\(.state)] \(.title)  \(.url)"' 2>/dev/null)"
 contract=""
 for cf in Containerfile run.sh spin-up.sh .live-gate install.sh entrypoint.sh; do
-  [ -f "$REPO_CLONE/$cf" ] && contract="${contract}"$'\n===== '"$cf"$' =====\n'"$(r "$cf")"
+  case "$manifest" in *"$cf"*) contract="${contract}"$'\n===== '"$cf"$' =====\n'"$(r "$cf")";; esac
 done
 
-dossier="# CONFIRMED OBJECTIVE (grade the product against THIS, first)
-$(r 00-OBJECTIVES.md)
+# THE CONFIRMED SPEC. The apparatus's own repos carry the Trinity docs; a repo it develops FOR the
+# maintainer generally does not — e2e-beta carries none of the four. Reading only files therefore handed
+# the reviewer four EMPTY headings and asked it to grade conformance against nothing, which cannot RETURN
+# for a spec violation and so would rubber-stamp anything. A gate that cannot fail is not a gate.
+# So: files when the repo has them, else the objective issue + the backlog tickets that decompose it —
+# which IS the confirmed spec for such a repo, and is exactly what the maintainer approved.
+spec=""
+for sf in 00-OBJECTIVES.md 00-REQUIREMENTS.md 00-BUILDPRINCIPLE.md 00-GOVERNANCE.md; do
+  case "$manifest" in *"$sf"*) spec="${spec}"$'\n===== '"$sf"$' =====\n'"$(r "$sf")";; esac
+done
+if [ -z "${spec//[[:space:]]/}" ]; then
+  log "$SLUG ships no Trinity spec docs — sourcing the confirmed spec from the objective issue + backlog"
+  spec="$(gh issue list --repo "$SLUG" --state all --search 'OBJECTIVE in:title' \
+          --json number,title,body -q '.[] | "===== OBJECTIVE ISSUE #\(.number): \(.title) =====\n\(.body)"' 2>/dev/null)"
+  spec="${spec}"$'\n'"$(gh issue list --repo "$SLUG" --label backlog --state all \
+          --json number,title,state,body \
+          -q '.[] | "===== BACKLOG #\(.number) [\(.state)]: \(.title) =====\n\(.body)"' 2>/dev/null)"
+fi
+# FAIL-CLOSED: no spec, no gate. An unreadable or genuinely-absent spec must stop the review, never
+# produce a PASS the reviewer had no basis to give.
+[ -n "${spec//[[:space:]]/}" ] \
+  || die "no confirmed spec found for $SLUG (no Trinity docs, no objective issue, no backlog) — refusing to ship-review against an empty spec (fail-closed)"
 
-# CONFIRMED REQUIREMENTS (functional + non-functional — grade second)
-$(r 00-REQUIREMENTS.md)
-
-# BUILD PRINCIPLES (grade third)
-$(r 00-BUILDPRINCIPLE.md)
-
-# GOVERNANCE (maintainer rulings that bind the grading)
-$(r 00-GOVERNANCE.md)
+dossier="# THE CONFIRMED SPEC — grade the product against THIS, in the order given
+$spec
 
 NOTE: 00-DESIGN.md is the dev's own MUTABLE MEANS and is NOT a conformance target — do NOT grade against it.
 

@@ -109,9 +109,35 @@ sha="$(gh api "repos/$SLUG/branches/main" -q .commit.sha 2>/dev/null)"
 marker="$STATE/shipped-${REPO}-${sha}.done"
 [ -e "$marker" ] && { log "$SLUG @ ${sha:0:7}: already announced — silent"; exit 0; }
 
+# CLOSE THE OBJECTIVE TICKET. Announcing a ship while the objective issue stays OPEN is the same
+# "merged ≠ done" dishonesty the reconciler exists to prevent, one level up: the bus would carry a SHIPPED
+# notice and an open objective at the same time, and the open ticket is what a reader believes. rc 0 when
+# it closed OR when there was nothing open to close; rc 1 only on a real failure, so the caller can defer
+# the done-marker and retry. Idempotent: it searches OPEN objectives, so a re-tick finds none.
+close_objective(){
+  local n
+  n="$(gh issue list --repo "$SLUG" --state open --search 'OBJECTIVE in:title' \
+       --json number -q '.[0].number' 2>/dev/null)"
+  [ -n "$n" ] || { log "$SLUG: no OPEN objective issue to close — nothing to do"; return 0; }
+  if gh issue close "$n" --repo "$SLUG" --comment "**Objective SHIPPED — closed autonomously (R40).**
+
+- **Aggregate:** \`$sha\`
+- **R30 completion:** no drivable work remains — every backlog ticket closed on observed proof.
+- **R34 ship gate:** an independent adversarial spec-vs-build review PASSED this exact aggregate.
+
+Closed by \`bin/ship-actuator.sh\` on the same evidence as the ship announcement. No human declared this
+finished — a run only a human can declare finished is not an autonomous run." >/dev/null 2>&1; then
+    log "$SLUG: CLOSED objective issue #$n @ ${sha:0:7}"; return 0
+  fi
+  log "$SLUG: could not close objective issue #$n — the ship stands; deferring the marker so this retries"
+  return 1
+}
+
 title="SHIPPED: $REPO objective @ ${sha:0:7}"
 if gh api -X GET search/issues -f q="repo:$SLUG in:title \"$title\"" -q '.items[0].number' 2>/dev/null | grep -q '[0-9]'; then
-  log "$SLUG: a ship announcement for ${sha:0:7} already exists — marking done"; : > "$marker"; exit 0
+  log "$SLUG: a ship announcement for ${sha:0:7} already exists — reconciling the objective ticket"
+  close_objective && : > "$marker"
+  exit 0
 fi
 
 body="**The objective is SHIPPED — declared autonomously (R40), with no human sign-off.**
@@ -128,8 +154,8 @@ triggered this; a run only a human can declare finished is not an autonomous run
 
 if gh issue create --repo "$SLUG" --title "$title" --body "$body" --label "$SHIP_ANNOUNCE_LABEL" >/dev/null 2>&1 \
    || gh issue create --repo "$SLUG" --title "$title" --body "$body" >/dev/null 2>&1; then
-  : > "$marker"
   log "$SLUG @ ${sha:0:7}: SHIP ANNOUNCED on the bus"
+  close_objective && : > "$marker"
 else
   log "$SLUG: announce post FAILED — no marker written, retrying next tick"; exit 0
 fi

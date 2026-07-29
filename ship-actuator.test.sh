@@ -24,6 +24,8 @@ case "\$*" in
   *"branches/main"*)  printf '%s' "\${FAKE_SHA:-$SHA}" ;;
   *"search/issues"*)  cat "\${FAKE_SEARCH:-/dev/null}" 2>/dev/null ;;
   *"issue create"*)   [ "\${GH_CREATE_FAIL:-0}" = 1 ] && exit 1; echo "created" >> "$ROOT/created.log" ;;
+  *"issue close"*)    [ "\${GH_CLOSE_FAIL:-0}" = 1 ] && exit 1; echo "closed \$3" >> "$ROOT/closed.log" ;;
+  *"issue list"*)     printf '%s' "\${FAKE_OBJECTIVE:-}" ;;   # the OPEN objective issue number, if any
 esac
 exit 0
 EOF
@@ -50,7 +52,7 @@ EOF
 chmod +x "$BIN/gate"
 
 run(){ # extra env…
-  : > "$ROOT/gate.log"; : > "$ROOT/created.log"; rm -f "$ROOT/oracle.n"
+  : > "$ROOT/gate.log"; : > "$ROOT/created.log"; : > "$ROOT/closed.log"; rm -f "$ROOT/oracle.n"
   OUT="$(env PATH="$BIN:$PATH" HOME="$ROOT/home" STATE="$ROOT/state" AUTONOMY_RUNS_DIR="$ROOT/runs" \
       OBJECTIVE_STATUS="$BIN/oracle" SHIP_GATE="$BIN/gate" "$@" bash "$SUT" e2e-alpha 2>&1)"; RC=$?
 }
@@ -92,5 +94,25 @@ run ORACLE_STATUS=SHIPPED GH_CREATE_FAIL=1
 { [ "$RC" = 0 ]; } && ok "failed announce → rc 0 (no marker, so it retries)" || no "a failed announce broke the tick (rc=$RC)"
 run ORACLE_STATUS=SHIPPED GH_CREATE_FAIL=1
 announced && no "marker was written despite a failed post (the ship would be lost)" || ok "no marker on failure — the announcement is not lost"
+
+echo "== the OBJECTIVE TICKET is CLOSED, not merely announced =="
+# Announcing a ship while the objective issue stays open leaves the bus carrying a SHIPPED notice and an
+# open objective at once — and the open ticket is what a reader believes.
+closed(){ [ -s "$ROOT/closed.log" ]; }
+rm -rf "$ROOT/state"
+run ORACLE_STATUS=SHIPPED FAKE_OBJECTIVE=1
+{ announced && closed; } && ok "the ship was announced AND the objective ticket closed" || no "announced but left the objective OPEN"
+grep -q '^closed 1$' "$ROOT/closed.log" && ok "closed the objective the bus reported (#1)" || no "closed the wrong issue: $(cat "$ROOT/closed.log")"
+
+echo "== no OPEN objective to close ⇒ still a clean ship (not an error) =="
+rm -rf "$ROOT/state"
+run ORACLE_STATUS=SHIPPED
+{ announced && ! closed && [ "$RC" = 0 ]; } && ok "nothing to close → announced, rc 0" || no "a missing objective ticket broke the ship (rc=$RC)"
+
+echo "== a FAILED close defers the done-marker, so the next tick retries the close =="
+rm -rf "$ROOT/state"
+run ORACLE_STATUS=SHIPPED FAKE_OBJECTIVE=1 GH_CLOSE_FAIL=1
+[ "$RC" = 0 ] && ok "failed close → rc 0 (never stalls the loop)" || no "a failed close broke the tick (rc=$RC)"
+[ -z "$(ls "$ROOT/state" 2>/dev/null)" ] && ok "no done-marker written — the close retries next tick" || no "marker written despite an unclosed objective"
 
 echo; echo "ship-actuator: $pass passed, $fail failed"; [ "$fail" = 0 ]

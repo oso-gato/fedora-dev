@@ -15,22 +15,27 @@ BIN="$ROOT/bin"; mkdir -p "$BIN"
 pass=0; fail=0
 ck(){ [ "$2" = 1 ] && { pass=$((pass+1)); printf '  ok   %s\n' "$1"; } || { fail=$((fail+1)); printf '  FAIL %s: %s\n' "$1" "$3"; }; }
 
-# --- fixture clone: a real git repo with the confirmed-spec docs + a deploy-contract file ------------
-CLONE="$ROOT/clone"; mkdir -p "$CLONE"
-git -C "$CLONE" init -q
-git -C "$CLONE" config user.email t@t; git -C "$CLONE" config user.name t
-for d in 00-OBJECTIVES 00-REQUIREMENTS 00-BUILDPRINCIPLE 00-GOVERNANCE; do printf '# %s\ndummy\n' "$d" > "$CLONE/$d.md"; done
-printf 'FROM scratch\n' > "$CLONE/Containerfile"
-git -C "$CLONE" add -A; git -C "$CLONE" commit -qm init
-SHA="$(git -C "$CLONE" rev-parse HEAD)"
+# --- fixture: the SHIPPED AGGREGATE is read from the BUS at a pinned sha, never from a working tree ---
+# (ship-gate used to require $HOME/<repo> to be a git clone, which made it unreachable for every repo the
+# apparatus develops but does not keep checked out. There is no fixture clone any more, by design.)
+SHA=0123456789abcdef0123456789abcdef01234567
+MANIFEST_F="$ROOT/manifest.txt"
+printf '00-OBJECTIVES.md\n00-REQUIREMENTS.md\n00-BUILDPRINCIPLE.md\n00-GOVERNANCE.md\nContainerfile\n' > "$MANIFEST_F"
+: > "$ROOT/empty.txt"
 
-# --- stub gh: branches/main → SHA; commits/<sha>/comments → $GH_COMMENTS_F; issue list → ledger; POST record
+# --- stub gh (the bus): tree → manifest; contents → base64 blob; comments → $GH_COMMENTS_F; POST record.
+# The two `issue list` shapes are distinguished by the fields asked for: `state,url` is the shipped-feature
+# LEDGER, `state,body` is the SPEC fallback — so a test can starve the spec without starving the ledger.
 cat > "$BIN/gh" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
   *"branches/main"*)          printf '%s' "$SHA" ;;                       # -q .commit.sha equiv
+  *"git/trees/"*)             cat "\${SHIPTEST_MANIFEST:-$MANIFEST_F}" 2>/dev/null ;;
+  *"contents/"*)              printf 'confirmed spec text\n' | base64 -w0 ;;
   *"commits/"*"/comments"*"POST"*|*"--method POST"*"/comments"*) echo "posted" >> "\$SHIPTEST_POSTS" ;;
   *"commits/"*"/comments"*)   cat "\${GH_COMMENTS_F:-/dev/null}" 2>/dev/null ;;
+  *"OBJECTIVE in:title"*)     cat "\${SHIPTEST_OBJECTIVE:-/dev/null}" 2>/dev/null ;;
+  *"state,body"*)             cat "\${SHIPTEST_BACKLOG_SPEC:-/dev/null}" 2>/dev/null ;;
   *"issue list"*)             printf '#1 [CLOSED] a feature  https://x/1\n' ;;
   *) : ;;
 esac
@@ -48,9 +53,9 @@ mkreviewer(){ # <reply> <rc>
 }
 run(){ # extra env… — drives the REAL ship-gate dry-run; captures OUT + RC
   rm -f "$ROOT/reviewer.ran"; : > "$ROOT/posts.log"
-  OUT="$(env PATH="$BIN:$PATH" REPO_SCOPE="$BIN/repo-scope.sh" REPO_CLONE="$CLONE" \
+  OUT="$(env PATH="$BIN:$PATH" REPO_SCOPE="$BIN/repo-scope.sh" \
       SHIP_CLAUDE="claude" SHIPTEST_POSTS="$ROOT/posts.log" FITNESS_ENV_FILE=/nonexistent "$@" \
-      bash "$SUT" e2e-alpha --clone "$CLONE" 2>&1)"; RC=$?
+      bash "$SUT" e2e-alpha 2>&1)"; RC=$?
 }
 line1(){ printf '%s\n' "$OUT" | grep -m1 '^SHIP GATE: VERDICT'; }
 
@@ -91,6 +96,37 @@ mkreviewer 'SHIP_VERDICT: RETURN' 0     # would flip it if it ran — prove it d
 run SHIPGATE_LOGIN=oso-gato-fitness-claudebox GH_COMMENTS_F="$ROOT/existing.txt"
 ck "idempotent no-op exits 0"              "$([ "$RC" = 0 ] && echo 1)" "rc=$RC"
 ck "the reviewer model was NOT re-run"     "$([ ! -f "$ROOT/reviewer.ran" ] && echo 1)" "the model re-ran on an already-reviewed aggregate"
+
+echo "== no local clone is needed: the aggregate is read from the bus =="
+# The whole suite above already proves this (no clone exists anywhere in this fixture), but state it
+# explicitly: ~/e2e-alpha must NOT be required, because it is exactly what made the gate unreachable.
+mkreviewer 'SHIP_VERDICT: PASS' 0
+run SHIPGATE_LOGIN=oso-gato-fitness-claudebox HOME="$ROOT/nonexistent-home"
+ck "runs with no clone on disk"      "$([ "$RC" = 0 ] && echo 1)" "rc=$RC — still clone-dependent"
+ck "the reviewer actually ran"       "$([ -f "$ROOT/reviewer.ran" ] && echo 1)" "reviewer never ran"
+
+echo "== FAIL-CLOSED: an EMPTY confirmed spec REFUSES the review (a gate that cannot fail is not a gate) =="
+# A repo with no Trinity docs, no objective issue and no backlog bodies. Previously the reviewer was
+# handed four empty headings and asked to grade conformance against nothing — it could not RETURN for a
+# spec violation, so it would rubber-stamp anything.
+mkreviewer 'SHIP_VERDICT: PASS' 0
+run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/empty.txt"
+# Assert the REASON, not just the rc: the pre-fix gate also exited 1 here, but for the unrelated missing
+# -clone precondition. A test that passes against the pre-fix code proves nothing.
+ck "empty spec refuses (rc 1)"       "$([ "$RC" = 1 ] && echo 1)" "rc=$RC — reviewed against an empty spec"
+ck "…and refuses FOR THAT REASON"    "$(printf '%s' "$OUT" | grep -qi 'no confirmed spec' && echo 1)" "died for another reason: $(printf '%s' "$OUT" | tail -1)"
+ck "the model was NOT run"           "$([ ! -f "$ROOT/reviewer.ran" ] && echo 1)" "the model judged an empty spec"
+ck "no verdict composed"             "$([ -z "$(line1)" ] && echo 1)" "leaked [$(line1)]"
+
+echo "== a repo with NO Trinity docs sources its spec from the objective issue + backlog =="
+# This is the e2e-beta shape: the confirmed spec lives on the bus, not in the tree.
+printf '===== OBJECTIVE ISSUE #1: a minimal status-page image =====\nserve 200 on /\n' > "$ROOT/objective.txt"
+mkreviewer 'SHIP_VERDICT: PASS' 0
+run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/empty.txt" \
+    SHIPTEST_OBJECTIVE="$ROOT/objective.txt"
+ck "objective-issue spec is accepted" "$([ "$RC" = 0 ] && echo 1)" "rc=$RC"
+ck "the reviewer ran against it"      "$([ -f "$ROOT/reviewer.ran" ] && echo 1)" "reviewer never ran"
+ck "verdict bound to the aggregate"   "$([ "$(line1)" = "SHIP GATE: VERDICT PASS aggregate $SHA" ] && echo 1)" "got [$(line1)]"
 
 echo
 echo "ship-gate: $pass passed, $fail failed"
