@@ -69,14 +69,19 @@ backlog_ref(){
   printf '%s\n' "$1" | grep -oiE '^Backlog-ticket:[[:space:]]*#[0-9]+' | head -1 | grep -oE '[0-9]+'
 }
 
-# close_decision <merged:0|1> <host_green:0|1> <publish:SUCCESS|PENDING|FAILED|NONE> <live:LIVE|PENDING|NA>
-#   → CLOSE | WAIT:<why> | SKIP:<why>. Fail-closed: closes ONLY when EVERY link holds.
+# close_decision <merged:0|1> <host_green:0|1> <publish:SUCCESS|PENDING|FAILED|NONE|NA> <live:LIVE|PENDING|NA>
+#   → CLOSE | WAIT:<why> | SKIP:<why>. Fail-closed: closes ONLY when EVERY APPLICABLE link holds.
+#
+# NA means "this link cannot be taken on this change" — not "skip the check". It is only ever produced
+# from POSITIVE evidence (a cleanly-read tree with no publish workflow; a repo the apparatus runs no
+# instance of), never from a read that failed. The two links that CANNOT be NA are the two that carry the
+# proof: the change MERGED, and the host live-gate posted GREEN on it. Every close still rests on those.
 close_decision(){
   local merged="$1" green="$2" pub="$3" live="$4"
   [ "$merged" = 1 ] || { echo "SKIP:not-merged"; return; }
   [ "$green"  = 1 ] || { echo "WAIT:no-host-green"; return; }   # retryable: transient fetch, or gate lag
   case "$pub" in
-    SUCCESS) : ;;
+    SUCCESS|NA) : ;;
     PENDING|NONE) echo "WAIT:ci-$( [ "$pub" = NONE ] && echo not-started || echo pending )"; return;;
     *)       echo "SKIP:ci-$pub"; return;;                      # FAILED/CANCELLED — artifact never exists
   esac
@@ -84,6 +89,24 @@ close_decision(){
     LIVE|NA) echo "CLOSE";;
     *)       echo "WAIT:not-live-yet";;                         # PENDING — box has not yet run this merge
   esac
+}
+
+# live_readback <slug> <class> <merge-oid> → LIVE | PENDING | NA
+#   CLONE class on THIS repo (fedora-dev): LIVE iff the merge sha is an ancestor of the DEPLOYED clone HEAD
+#   (the running box self-refreshed onto code that includes it). IMAGE class here: PENDING — the host
+#   redeploy is a real pending event, so waiting for it is waiting for something that actually arrives.
+#   ANY OTHER REPO: NA. The apparatus runs no instance of a repo it merely develops, so there is no
+#   read-back to take — and a link that can NEVER be satisfied must not be reported as "not yet". What
+#   proves such a change delivered is the link that IS taken on it: the host live-gate, which builds the
+#   candidate on a real host and probes it. See close_decision for the full chain.
+# Lives with the decision functions, not the I/O helpers: the routing above is pure (and is what broke),
+# and the one git probe is reached only for this repo's own clone, behind an existence guard.
+live_readback(){
+  local slug="$1" class="$2" oid="$3"
+  [ "$slug" = "$ORG/fedora-dev" ] || { echo NA; return; }
+  [ "$class" = CLONE ] || { echo PENDING; return; }
+  [ -d "$DEV_CLONE/.git" ] || { echo PENDING; return; }
+  if git -C "$DEV_CLONE" merge-base --is-ancestor "$oid" HEAD 2>/dev/null; then echo LIVE; else echo PENDING; fi
 }
 
 # ---- SELFTEST --------------------------------------------------------------------------------------
@@ -110,6 +133,26 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "ci not-started → WAIT"           "$(close_decision 1 1 NONE LIVE)" "WAIT:ci-not-started"
   ck "ci failed → SKIP"                "$(close_decision 1 1 FAILED LIVE)" "SKIP:ci-FAILED"
   ck "published but not live → WAIT"   "$(close_decision 1 1 SUCCESS PENDING)" "WAIT:not-live-yet"
+  echo "== close_decision — NA links (the observed permanent-WAIT bug: 147 logged waits that could never end) =="
+  # fedora-bootstrap ships no build.yml at all, so it waited on a run that will never exist (124 times).
+  ck "no publish workflow → CLOSE"     "$(close_decision 1 1 NA LIVE)" "CLOSE"
+  # e2e-beta #11-13: merged, host-GREEN, image published — but the apparatus runs no instance to read back.
+  ck "not-our-clone → CLOSE"           "$(close_decision 1 1 SUCCESS NA)" "CLOSE"
+  # e2e-beta #14/#15: merged BEFORE build.yml landed, so no run was ever going to appear.
+  ck "both links N/A → CLOSE"          "$(close_decision 1 1 NA NA)" "CLOSE"
+  # NA must relax ONLY the two links that can be N/A. The proof links stay mandatory.
+  ck "NA never bypasses host-green"    "$(close_decision 1 0 NA NA)" "WAIT:no-host-green"
+  ck "NA never bypasses merged"        "$(close_decision 0 1 NA NA)" "SKIP:not-merged"
+  ck "NA-live still SKIPs a failed CI" "$(close_decision 1 1 FAILED NA)" "SKIP:ci-FAILED"
+  ck "workflow present, run pending"   "$(close_decision 1 1 PENDING NA)" "WAIT:ci-pending"
+  echo "== live_readback — a link that can never be taken is NA, never a forever-PENDING =="
+  ck "other repo → NA"        "$(live_readback oso-gato/e2e-beta CLONE deadbeef)" "NA"
+  ck "other repo, IMAGE → NA" "$(live_readback oso-gato/e2e-beta IMAGE deadbeef)" "NA"
+  ck "host repo → NA"         "$(live_readback oso-gato/fedora-bootstrap CLONE deadbeef)" "NA"
+  # On fedora-dev itself the read-back IS takeable, so it stays mandatory — an image-baked change there is
+  # live only once the host redeploys, which is a real event that actually arrives.
+  ck "own repo, IMAGE → PENDING" "$(DEV_CLONE=/nonexistent live_readback oso-gato/fedora-dev IMAGE deadbeef)" "PENDING"
+  ck "own repo, no clone → PENDING" "$(DEV_CLONE=/nonexistent live_readback oso-gato/fedora-dev CLONE deadbeef)" "PENDING"
   echo; echo "reconcile selftest: $p passed, $f failed"; [ "$f" -eq 0 ]; exit
 fi
 
@@ -146,16 +189,20 @@ publish_state(){
   esac
 }
 
-# live_readback <slug> <class> <merge-oid> → LIVE | PENDING | NA
-#   CLONE class on THIS repo (fedora-dev): LIVE iff the merge sha is an ancestor of the DEPLOYED clone HEAD
-#   (the running box self-refreshed onto code that includes it). Other repos / IMAGE class: PENDING here
-#   (the host-redeploy read-back is the disclosed follow-up), so they are never wrongly closed.
-live_readback(){
-  local slug="$1" class="$2" oid="$3"
-  [ "$class" = CLONE ] || { echo PENDING; return; }
-  [ "$slug" = "$ORG/fedora-dev" ] || { echo PENDING; return; }
-  [ -d "$DEV_CLONE/.git" ] || { echo PENDING; return; }
-  if git -C "$DEV_CLONE" merge-base --is-ancestor "$oid" HEAD 2>/dev/null; then echo LIVE; else echo PENDING; fi
+# publish_applicable_p <slug> <merge-oid> — rc 0 iff $RECONCILE_WORKFLOW EXISTS in the repo tree AT that
+# merge commit, i.e. publishing an image is part of THIS commit's delivery. Separates the two cases that
+# an absent run cannot tell apart on its own:
+#   present + no run  → the run is genuinely still coming        (PENDING/NONE → WAIT, retryable)
+#   absent            → nothing will ever publish this commit    (NA, so it stops gating the close)
+# Absence is only ever concluded from a tree we READ CLEANLY. Unreadable or truncated ⇒ rc 0 (applicable)
+# ⇒ keep waiting: never manufacture "not applicable" out of a read that failed.
+publish_applicable_p(){
+  local tree
+  tree="$(gh api "repos/$1/git/trees/$2?recursive=1" \
+          -q '"\(.truncated)", (.tree[]?.path)' 2>/dev/null)" || return 0
+  [ -n "$tree" ] || return 0
+  printf '%s\n' "$tree" | head -1 | grep -qx false || return 0
+  printf '%s\n' "$tree" | grep -qxF ".github/workflows/$RECONCILE_WORKFLOW"
 }
 
 # ---- ONE SCAN over a repo --------------------------------------------------------------------------
@@ -179,6 +226,11 @@ scan_repo(){ # <repo bare name>
     [ "$issue_state" = OPEN ] || { log "$slug#$pr → #$ref: issue already $issue_state (nothing to close)"; continue; }
     class="$(gh pr view "$pr" --repo "$slug" --json files -q '.files[].path' 2>/dev/null | change_class)"
     pub="$(publish_state "$slug" "$oid")"
+    # No run found: is one still coming, or does this commit ship no image at all? Only ask when there is
+    # no run (a run of any state proves the workflow applies), so this costs one API call in the rare case.
+    if [ "$pub" = NONE ] && ! publish_applicable_p "$slug" "$oid"; then
+      pub=NA; log "$slug#$pr: no \`$RECONCILE_WORKFLOW\` at ${oid:0:7} — this commit publishes no image (link N/A)"
+    fi
     live="$(live_readback "$slug" "$class" "$oid")"
     local verdict; verdict="$(close_decision 1 "$(host_green_p "$slug" "$pr" && echo 1 || echo 0)" "$pub" "$live")"
     case "$verdict" in
