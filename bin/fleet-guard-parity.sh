@@ -64,9 +64,30 @@ canon="${parts[0]}"
 # divergence lives in CLAUDE.md role docs — NOT in managed-settings.json.)
 hr "CHECK 1: policy/managed-settings.json byte-parity (canonical: $canon)"
 csum="$(fetch "$canon" policy/managed-settings.json | sha256sum | cut -d' ' -f1)"
+# LOCKSTEP: the self-overlay is incoherent when SELF *is* the canon. It asks "does the canon match the
+# canon?" (trivially yes) and then requires the FOLLOWERS to match a canon that DOES NOT EXIST YET —
+# so a canonical PR that changes this payload can never pass, and neither can the follower PR that
+# would resolve it (its head cannot match a canon@main that has not moved). Both halves of every
+# lockstep control-plane change were therefore unmergeable, from either side, forever. Observed
+# 2026-07-29: fedora-dev#296 and fedora-bootstrap#307 deadlocked against each other on exactly this.
+# fedora-dev does not "drift from" canon; it DEFINES it. So when the canonical repo's own PR proposes a
+# NEW payload, followers are measured against the canon they can actually be expected to match — canon
+# @main — and the porting debt is REPORTED rather than treated as drift. This establishes an order
+# (canon lands first, followers follow) instead of a deadlock.
+cmain="$csum"
+if [ "$SELF" = "$canon" ]; then
+  # Strictly the PRE-merge canon. An unreadable fetch keeps $csum, i.e. the old strict behaviour: a read
+  # that failed must never be the thing that RELAXES a guard.
+  m="$(curl -fsSL "$RAW/$canon/$REF/policy/managed-settings.json" 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  [ -n "$m" ] && [ "$m" != "$(printf '' | sha256sum | cut -d' ' -f1)" ] && cmain="$m"
+fi
 for r in "${parts[@]}"; do
   s="$(fetch "$r" policy/managed-settings.json | sha256sum | cut -d' ' -f1)"
-  [ "$s" = "$csum" ] && ok "$r matches $canon" || bad "$r managed-settings.json DIFFERS from $canon"
+  if [ "$r" = "$canon" ]; then ok "$r matches $canon"
+  elif [ "$s" = "$csum" ]; then ok "$r matches $canon"
+  elif [ "$s" = "$cmain" ]; then
+    ok "$r matches $canon@$REF — this PR proposes a NEW canon; $r must port it (its own PR passes once this lands)"
+  else bad "$r managed-settings.json DIFFERS from $canon"; fi
 done
 
 # CHECK 2 — claude-code self-update LOCKOUT present in every box (the PR #45 invariant). Semantic
