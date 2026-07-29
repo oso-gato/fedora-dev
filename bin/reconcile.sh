@@ -95,10 +95,13 @@ close_decision(){
 #   CLONE class on THIS repo (fedora-dev): LIVE iff the merge sha is an ancestor of the DEPLOYED clone HEAD
 #   (the running box self-refreshed onto code that includes it). IMAGE class here: PENDING — the host
 #   redeploy is a real pending event, so waiting for it is waiting for something that actually arrives.
-#   ANY OTHER REPO: NA. The apparatus runs no instance of a repo it merely develops, so there is no
-#   read-back to take — and a link that can NEVER be satisfied must not be reported as "not yet". What
-#   proves such a change delivered is the link that IS taken on it: the host live-gate, which builds the
-#   candidate on a real host and probes it. See close_decision for the full chain.
+#   ANY OTHER REPO: NA. The one read-back this slice can take is a git ancestor check against a deployed
+#   checkout, and $DEV_CLONE is the only one the dev box can read — so for every other repo there is no
+#   read-back to take FROM HERE, ever. (That is a statement about this box's vantage, not about whether the
+#   apparatus runs the thing: fedora-bootstrap IS the host it runs on, and is still NA here because the dev
+#   box holds no readable deployed checkout of it.) A link that can NEVER be satisfied must not be reported
+#   as "not yet". What proves such a change delivered is the link that IS taken on it: the host live-gate,
+#   which builds the candidate on a real host and probes it. See close_decision for the full chain.
 # Lives with the decision functions, not the I/O helpers: the routing above is pure (and is what broke),
 # and the one git probe is reached only for this repo's own clone, behind an existence guard.
 live_readback(){
@@ -107,6 +110,35 @@ live_readback(){
   [ "$class" = CLONE ] || { echo PENDING; return; }
   [ -d "$DEV_CLONE/.git" ] || { echo PENDING; return; }
   if git -C "$DEV_CLONE" merge-base --is-ancestor "$oid" HEAD 2>/dev/null; then echo LIVE; else echo PENDING; fi
+}
+
+# proof_summary <pub> <live> <class> → the proof record the closing comment carries. EACH LINK REPORTS ITS
+# OWN STATE: a link that was NOT TAKEN says "N/A" and why, instead of being folded into a blanket claim
+# that everything was satisfied. That comment is this actuator's PERMANENT audit record AND its dedup
+# anchor (never rewritten), for a component whose entire purpose is proof-gated closure — so a close that
+# skipped a link while asserting it held would be a false proof on the one artifact that must not lie.
+# merged + host-GREEN are unconditional here because close_decision can never reach CLOSE without them.
+proof_summary(){
+  local pub="$1" live="$2" class="$3" p l
+  case "$pub" in
+    SUCCESS) p="CI \`$RECONCILE_WORKFLOW\` published";;
+    NA)      p="CI: N/A — this commit publishes no image (no \`$RECONCILE_WORKFLOW\` in the tree at it)";;
+    *)       p="CI: $pub";;   # unreachable via close_decision; report the raw state rather than invent one
+  esac
+  case "$live" in
+    LIVE) l="live read-back OK ($class class)";;
+    NA)   l="live read-back: N/A — no deployed checkout of this repo is readable from the dev box; the proof of delivery is the host live-gate";;
+    *)    l="live read-back: $live";;
+  esac
+  echo "host live-gate GREEN, $p, $l"
+}
+
+# proof_tag <pub> <live> <class> → the same record, compressed for the log line (which made the same claim).
+proof_tag(){
+  local pub="$1" live="$2" class="$3" p l
+  if [ "$pub"  = NA ]; then p="ci-N/A";   else p="published";     fi
+  if [ "$live" = NA ]; then l="live-N/A"; else l="live/$class";   fi
+  echo "merged+green+$p+$l"
 }
 
 # ---- SELFTEST --------------------------------------------------------------------------------------
@@ -153,6 +185,23 @@ if [ "${1:-}" = "--selftest" ]; then
   # live only once the host redeploys, which is a real event that actually arrives.
   ck "own repo, IMAGE → PENDING" "$(DEV_CLONE=/nonexistent live_readback oso-gato/fedora-dev IMAGE deadbeef)" "PENDING"
   ck "own repo, no clone → PENDING" "$(DEV_CLONE=/nonexistent live_readback oso-gato/fedora-dev CLONE deadbeef)" "PENDING"
+  echo "== proof_summary / proof_tag — the record must state each link's REAL state, never a blanket claim =="
+  # A close that skipped a link while asserting it held is a false proof on the actuator's own audit record.
+  has(){ case "$2" in *"$3"*) ck "$1" yes yes;; *) ck "$1" "$2" "…$3…";; esac; }
+  hasnt(){ case "$2" in *"$3"*) ck "$1" "$2" "NOT …$3…";; *) ck "$1" yes yes;; esac; }
+  has   "taken CI link says published"  "$(proof_summary SUCCESS LIVE CLONE)" "CI \`$RECONCILE_WORKFLOW\` published"
+  has   "taken live link says OK"       "$(proof_summary SUCCESS LIVE CLONE)" "live read-back OK (CLONE class)"
+  has   "NA publish reported as N/A"    "$(proof_summary NA LIVE CLONE)" "CI: N/A"
+  hasnt "NA publish never says published" "$(proof_summary NA LIVE CLONE)" "published"
+  has   "NA live reported as N/A"       "$(proof_summary SUCCESS NA CLONE)" "live read-back: N/A"
+  hasnt "NA live never says read-back OK" "$(proof_summary SUCCESS NA CLONE)" "read-back OK"
+  has   "both N/A: neither is claimed"  "$(proof_summary NA NA CLONE)" "CI: N/A"
+  hasnt "both N/A: no 'published'"      "$(proof_summary NA NA CLONE)" "published"
+  has   "host-GREEN stays unconditional" "$(proof_summary NA NA CLONE)" "host live-gate GREEN"
+  ck "tag: all links taken"  "$(proof_tag SUCCESS LIVE CLONE)" "merged+green+published+live/CLONE"
+  ck "tag: publish N/A"      "$(proof_tag NA LIVE CLONE)"      "merged+green+ci-N/A+live/CLONE"
+  ck "tag: live N/A"         "$(proof_tag SUCCESS NA CLONE)"   "merged+green+published+live-N/A"
+  ck "tag: both N/A"         "$(proof_tag NA NA CLONE)"        "merged+green+ci-N/A+live-N/A"
   echo; echo "reconcile selftest: $p passed, $f failed"; [ "$f" -eq 0 ]; exit
 fi
 
@@ -235,13 +284,16 @@ scan_repo(){ # <repo bare name>
     local verdict; verdict="$(close_decision 1 "$(host_green_p "$slug" "$pr" && echo 1 || echo 0)" "$pub" "$live")"
     case "$verdict" in
       CLOSE)
+        local proof tag
+        proof="$(proof_summary "$pub" "$live" "$class")"   # each link's REAL state — an N/A says so
+        tag="$(proof_tag "$pub" "$live" "$class")"
         gh issue close "$ref" --repo "$slug" \
-          --comment "**reconcile → closed:** proof-gated closure of #$ref — authored PR #$pr merged (\`${oid:0:7}\`), host live-gate GREEN, CI \`$RECONCILE_WORKFLOW\` published, live read-back OK ($class class). $slug#$pr"$'\n\n<sub>bin/reconcile.sh (task #19) — closed on OBSERVED proof, not on merge. This comment is the wiped-state dedup anchor.</sub>' \
+          --comment "**reconcile → closed:** proof-gated closure of #$ref — authored PR #$pr merged (\`${oid:0:7}\`), $proof. $slug#$pr"$'\n\n<sub>bin/reconcile.sh (task #19) — closed on OBSERVED proof, not on merge. Each link above reports its own state; an N/A link was not taken and says why. This comment is the wiped-state dedup anchor.</sub>' \
           >/dev/null 2>&1 \
-          && log "$slug#$pr → CLOSED #$ref (proof: merged+green+published+live/$class)" \
+          && log "$slug#$pr → CLOSED #$ref (proof: $tag)" \
           || log "$slug#$pr → #$ref: close FAILED (will retry next scan)"
         # stamp the PR too, so the dedup anchor exists even if the issue-close comment is unreadable later.
-        gh pr comment "$pr" --repo "$slug" --body "**reconcile → closed:** #$ref closed on observed proof (merged \`${oid:0:7}\` · host GREEN · CI published · live/$class)." >/dev/null 2>&1 || true
+        gh pr comment "$pr" --repo "$slug" --body "**reconcile → closed:** #$ref closed on observed proof — merged \`${oid:0:7}\`, $proof." >/dev/null 2>&1 || true
         ;;
       WAIT:*) log "$slug#$pr → #$ref: ${verdict#WAIT:} — not closing yet (re-scan)";;
       SKIP:*) log "$slug#$pr → #$ref: ${verdict#SKIP:} — not a proof-gated close";;
