@@ -125,6 +125,22 @@ r(){
 }
 manifest="$(gh api "repos/$SLUG/git/trees/$aggregate_sha?recursive=1" \
             -q '.tree[] | select(.type=="blob") | .path' 2>/dev/null)"
+# FAIL-CLOSED ON THE PRODUCT, exactly as on the spec below. The tree read is `2>/dev/null`, so a failed
+# or rate-limited call yields an EMPTY manifest silently — and then `manifest_has` matches nothing, the
+# contract section is empty, and the reviewer is handed a real SPEC with NO PRODUCT and asked whether the
+# product conforms. It cannot RETURN for a defect in code it was never shown, so it PASSes. Reproduced on
+# this exact script: with the tree call stubbed to fail, ship-gate emitted `VERDICT PASS` rc=0 against an
+# empty manifest and an empty contract. The spec side already dies here; the product side did not, which
+# left half the gate able to rubber-stamp. A gate that cannot see what it is judging must refuse.
+[ -n "${manifest//[[:space:]]/}" ] \
+  || die "cannot read the built product of $SLUG at ${aggregate_sha:0:7} (tree read failed or returned nothing) — refusing to ship-review a product I cannot see (fail-closed)"
+# A TRUNCATED tree is a PARTIAL product. Not fatal — but the reviewer must be told, or it would grade a
+# subset while believing it saw the whole thing, and a PASS would mean less than it appears to.
+manifest_trunc=""
+if [ "$(gh api "repos/$SLUG/git/trees/$aggregate_sha?recursive=1" -q .truncated 2>/dev/null)" = true ]; then
+  manifest_trunc=$'\n[MANIFEST TRUNCATED by the GitHub tree API: the file list below is INCOMPLETE. If what is missing could change the judgment, RETURN rather than PASS.]'
+  log "WARNING: $SLUG tree at ${aggregate_sha:0:7} is TRUNCATED — the reviewer is told the manifest is partial"
+fi
 # EXACT whole-line path match, never a substring: `case "$manifest" in *"run.sh"*)` also matches
 # `docs/prerun.sh.md` and would append a section whose contents read 404s into nothing.
 manifest_has(){ printf '%s\n' "$manifest" | grep -qxF "$1"; }
@@ -182,7 +198,7 @@ $spec
 NOTE: 00-DESIGN.md is the dev's own MUTABLE MEANS and is NOT a conformance target — do NOT grade against it.
 
 # BUILT PRODUCT — aggregate $aggregate_sha
-## file manifest
+## file manifest$manifest_trunc
 $manifest
 ## deploy-contract / entry files
 $contract
