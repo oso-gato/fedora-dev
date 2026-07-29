@@ -23,7 +23,9 @@ chmod +x "$BIN/repo-scope.sh"
 
 # stub gh — answers each subcommand from scenario env. ONE merged PR #500 → Backlog-ticket: #400.
 #   HAS_TRAILER(1) · HOST_GREEN(1|0) · PUB(success|pending|failure|'') · FILES(bin/x.sh|Containerfile) ·
-#   ISSUE_STATE(OPEN|CLOSED) · ANCHOR(0|1 → a prior 'reconcile → closed:' comment on the PR) ·
+#   ISSUE_STATE(OPEN|CLOSED) · ANCHOR(0|1 → a prior 'reconcile → closed:' comment on the ISSUE — the
+#     per-ref dedup anchor; a PR-level mark cannot say WHICH of N refs it attests to) ·
+#   ISSUE_LABELS(default 'backlog'; the gate requires it so a stray number cannot close a PR) ·
 #   TREE_PATHS(the git-trees listing publish_applicable_p reads; omit build.yml → the publish link is N/A) ·
 #   TREE_TRUNCATED(false|true).
 cat > "$BIN/gh" <<EOF
@@ -35,18 +37,22 @@ sub="${1:-} ${2:-}"
 case "$sub" in
   "pr list")
     body="Autonomously authored.\n"
-    [ "${HAS_TRAILER:-1}" = 1 ] && body="${body}Backlog-ticket: #400\n"
+    # $REFS = the tickets this PR declares (default one, the pre-existing single-ref shape).
+    if [ "${HAS_TRAILER:-1}" = 1 ]; then
+      for _n in ${REFS-400}; do body="${body}Backlog-ticket: #${_n}\n"; done
+    fi
     printf '500\tdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\t2026-07-18T12:00:00Z\t%s\n' "$body"
     ;;
   "pr view")
     case "$*" in
       *"--json comments"*)
-        [ "${ANCHOR:-0}" = 1 ] && echo "reconcile → closed: prior"
         [ "${HOST_GREEN:-1}" = 1 ] && echo "Host live-gate (Gate B): VERDICT GREEN — fedora-dev @ deadbeef"
         ;;
       *"--json files"*) printf '%s\n' "${FILES:-bin/x.sh}";;
     esac ;;
-  "issue view") echo "${ISSUE_STATE:-OPEN}";;
+  # issue_facts: state \t prior-close \t labels. The ANCHOR moved from the PR to the ISSUE, so the
+  # prior-close flag is now a property of the issue being closed, not of the PR that closed it.
+  "issue view") printf '%s\t%s\t%s\n' "${ISSUE_STATE:-OPEN}" "${ANCHOR:-0}" "${ISSUE_LABELS-backlog}";;
   # `-` (not `:-`): an explicitly EMPTY PUB is "no run for this commit", which is what publish_applicable_p
   # then has to disambiguate. `:-` would fold that scenario back into a successful run.
   "run list")   echo "${PUB-success}";;
@@ -56,7 +62,8 @@ case "$sub" in
     echo "${TREE_TRUNCATED:-false}"
     printf '%s\n' ${TREE_PATHS-.github/workflows/build.yml bin/x.sh}
     ;;
-  "issue close") echo "CLOSE 400 :: $*" >> "$CLOSED";;
+  # record the ACTUAL issue closed ($3), not a hardcoded one — N refs mean N distinct closes.
+  "issue close") echo "CLOSE $3 :: $*" >> "$CLOSED";;
   "pr comment")  : ;;   # PR stamp — recorded implicitly by the close row
 esac
 exit 0
@@ -85,7 +92,8 @@ run(){ # <script> [env=val ...]
   env PATH="$BIN:$PATH" REPO_SCOPE="$BIN/repo-scope.sh" DEV_CLONE="$ROOT/clone" ORG=oso-gato \
       RECONCILE_MAX_AGE=99999999999 "$@" bash "$sc" --once >"$ROOT/out" 2>&1
 }
-closed(){ grep -q '^CLOSE 400' "$CLOSED"; }
+closed(){ grep -q "^CLOSE ${1:-400} " "$CLOSED"; }
+ncloses(){ grep -c '^CLOSE ' "$CLOSED"; }
 says(){   grep -qF -- "$1" "$CLOSED"; }   # what the POSTED closing comment actually asserts
 
 echo "== FULL proof chain (merged+green+published+live/CLONE) → CLOSE =="
@@ -205,4 +213,39 @@ else
   closed && ok "mutant: pending-CI issue wrongly closed ⇒ the real CI-PENDING row discriminates" || no "mutant did not close (the proof-gate row would not bite)"
 fi
 
-echo; echo "reconcile.test: $pass passed, $fail failed"; [ "$fail" -eq 0 ]
+
+echo "== MULTI-TICKET: a superseding PR closes EVERY ticket it declares (the e2e-beta #15 shape) =="
+# #15 delivered #2, #3 AND #6 after #9/#10 were closed unmerged, but declared only #6 — so #2 and #3
+# were delivered and permanently unclaimable, and drivable could never reach 0.
+run "$SCRIPT" REFS='400 401 402' HOST_GREEN=1 PUB=success FILES=bin/x.sh ANCESTOR=1
+{ closed 400 && closed 401 && closed 402 && [ "$(ncloses)" = 3 ]; } \
+  && ok "all three declared tickets closed (3 closes, no more)" \
+  || no "multi-ref close: got $(ncloses) closes — $(tr '\n' '|' <"$CLOSED")"
+
+echo "== a ref the gate REFUSES must not block its siblings =="
+# ISSUE_LABELS is global in this harness, so refuse ALL of them: the point is that a refusal is per-ref
+# and silent-safe, never a close.
+run "$SCRIPT" REFS='400 401' HOST_GREEN=1 PUB=success FILES=bin/x.sh ANCESTOR=1 ISSUE_LABELS=''
+{ [ "$(ncloses)" = 0 ]; } && ok "unlabelled refs close nothing (a stray number cannot close a PR)" \
+  || no "closed something unlabelled: $(tr '\n' '|' <"$CLOSED")"
+
+echo "== the per-ref anchor: an ISSUE already stamped is skipped, not re-closed =="
+run "$SCRIPT" REFS='400 401' HOST_GREEN=1 PUB=success FILES=bin/x.sh ANCESTOR=1 ANCHOR=1
+{ [ "$(ncloses)" = 0 ]; } && ok "prior per-issue anchor ⇒ no re-close (reopened issues stay open)" \
+  || no "re-closed an anchored issue: $(tr '\n' '|' <"$CLOSED")"
+
+echo "== MUTATION RUN IN-SUITE: restore the first-match-only parser ⇒ only ref 1 closes =="
+MUT1="$ROOT/reconcile-mut1.sh"
+sed 's@^backlog_refs(){@backlog_refs(){ printf "%s\\n" "$1" | grep -oiE "^Backlog-ticket:[[:space:]]*#[0-9]+" | head -1 | grep -oE "[0-9]+"; return; @' "$SCRIPT" > "$MUT1"
+if ! grep -q 'head -1 | grep -oE "\[0-9\]+"; return;' "$MUT1"; then
+  no "first-only mutation VACUOUS (sed did not change the copy)"
+else
+  run "$MUT1" REFS='400 401 402' HOST_GREEN=1 PUB=success FILES=bin/x.sh ANCESTOR=1
+  { closed 400 && ! closed 401 && ! closed 402; } \
+    && ok "mutant: only the FIRST ref closes ⇒ the multi-ticket rows discriminate" \
+    || no "mutant did not reproduce the first-ref-only defect (closes=$(ncloses))"
+fi
+
+echo
+echo "reconcile.test: $pass passed, $fail failed"
+[ "$fail" = 0 ]
