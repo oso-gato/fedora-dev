@@ -12,7 +12,8 @@
 #           until GREEN or until it stops making progress (same failure signature twice / the fixer
 #           reports BLOCKED), which is SURFACED as a decision — never a quiet quit (doctrine mandate 6).
 #   GREEN → run the independent fitness harness (bin/fitness-review.sh); then the merge decision:
-#           Tier A → present to Arthur (never auto); Tier B/C + fitness PASS → bin/auto-merge.sh.
+#           fitness PASS → bin/auto-merge.sh (ANY change, control-plane included — ZERO-GATE);
+#           fitness ESCALATE → present to Arthur. The tier is read by nobody (STEP 5 of #274).
 #
 #   RETIRE → each sweep FIRST retires SUPERSEDED PRs: a MERGED PR whose body carries a WHOLE LINE that
 #           is exactly `Supersedes #N[, #M…]` (same-repo, case-insensitive, nothing else on the line)
@@ -57,7 +58,7 @@
 #   POLLER_REPO       repo to watch (default: fedora-dev — the poller watches its OWN repo's PRs)
 #   LG_HOST_LOGIN     host bot login whose verdict is trusted (default: oso-gato-erebus-claudebox[bot])
 #   FITNESS_LOGIN     fitness bot login (passed through to fitness-review.sh + auto-merge.sh)
-#   POLLER_ARMED      1 → GREEN+B/C+PASS actually merges (auto-merge --commit). Default 0 (dry-run).
+#   POLLER_ARMED      1 → GREEN+PASS actually merges (auto-merge --commit). Default 0 (dry-run).
 #   POLL_INTERVAL     seconds between --watch sweeps (default 30 — a simple fixed cadence).
 #                     Cost at 30s (fetch-BATCHED sweep): steady state ≈ 120×(2+N)/h — the open-PR
 #                     list (TSV: number+ref+sha in ONE call), the retire merged-list, and ONE
@@ -65,10 +66,12 @@
 #                     PRESENT posted / dry-run decided / merge attempted) is terminal-state-skipped
 #                     on its acted marker, so it too costs exactly 1 comments call/sweep; only a
 #                     GREEN PR whose routing is PENDING (fitness verdict not yet posted, or
-#                     fitness-RETURN driving the fixer) costs +2 (files + fitness comments) per
+#                     fitness-RETURN driving the fixer) costs +1 (fitness comments) per
 #                     sweep until it parks — short-lived, and bounded by the fitness/fixer
-#                     turnaround. A REVIEW-PARKED head (#156: the reviewer failed its bounded
-#                     retries and a question is asked) keeps costing that +2 by DESIGN: it is not
+#                     turnaround. (It was +2 until STEP 5 of #274 retired the tier: the second
+#                     call fetched the changed-file list for the tier classifier, whose output
+#                     only ever reached a log field.) A REVIEW-PARKED head (#156: the reviewer
+#                     failed its bounded retries and a question is asked) keeps costing that +1 by DESIGN: it is not
 #                     acted-marker-parked, precisely so a hand-posted verdict is still seen — no
 #                     model run is spent on it, only the reads. Against the dev App's 5k/h REST budget (SHARED with the fixer,
 #                     fitness reviewer and auto-merge): N=10 open PRs ≈ 4.3k/h — the ceiling is
@@ -204,12 +207,16 @@ fitness_verdict(){ grep -oE '^Fitness review: VERDICT (PASS|RETURN|ESCALATE)' | 
 # `#N` — letters — in prose examples). The superseding PR carries the declaration as its own line.
 supersede_targets(){ tr -d '\r' | awk '/^ {0,3}(```|~~~)/{f=!f; next} !f' | grep -ioE '^ {0,3}supersedes:?[[:space:]]+#[0-9]+([[:space:]]*,[[:space:]]*#[0-9]+)*[[:space:]]*$' | grep -oE '#[0-9]+' | tr -d '#' | sort -un; }
 
-# plan <host:GREEN|RED|NONE> <tier:A|B|C|""> <fitness:PASS|RETURN|ESCALATE|NONE> <armed:0|1>
+# plan <host:GREEN|RED|NONE> <tier:IGNORED> <fitness:PASS|RETURN|ESCALATE|NONE> <armed:0|1>
 #   -> NOOP | FIX | REVIEW | MERGE | MERGE_DRYRUN | PRESENT
 # The single source of truth for "given the gates, what does the poller DO". Fail-closed toward the
-# human: any ambiguity (unknown tier, no host verdict) resolves to NOOP or PRESENT, never to a merge.
+# human: any ambiguity (unknown fitness token, no host verdict) resolves to NOOP or PRESENT, never to
+# a merge.
+# <tier> is ACCEPTED AND IGNORED (STEP 5 of #274) — kept in the signature so the selftest rows below
+# ("green tierA merges", "green unknown tier") remain the executable proof that no tier value can
+# change any routing decision. The sweep passes an empty string; nothing computes a tier any more.
 plan(){
-  local host="$1" tier="$2" fit="$3" armed="$4" gaterel="${5:-0}"
+  local host="$1" _tier_ignored="$2" fit="$3" armed="$4" gaterel="${5:-0}"
   case "$host" in
     RED)  echo FIX; return;;                          # host says broken → iterate a fix
     GREEN) : ;;                                        # fall through to the merge decision
@@ -233,8 +240,9 @@ plan(){
   # PR flows by its fitness verdict alone (host-GREEN + fitness-PASS auto-merges ANY tier, control-
   # plane included). The old Tier-A→click was misrepresented-requirement harness; recoverability is
   # kept automatic (host rollback + git revert + fitness's standing "preserve recoverability" rule),
-  # not a tier gate. `tier` is retained for the log line only. ESCALATE still surfaces (below) — that
-  # is the REVIEWER deferring on genuine ambiguity, not a tier gate.
+  # not a tier gate. The tier survived as a log field until STEP 5 of #274 removed the classifier
+  # that filled it. ESCALATE still surfaces (below) — that is the REVIEWER deferring on genuine
+  # ambiguity, not a tier gate.
   case "$fit" in
     NONE)     echo REVIEW;   return;;                  # GREEN but not yet fitness-reviewed → review it
     PASS)     [ "$armed" = 1 ] && echo MERGE || echo MERGE_DRYRUN; return;;
@@ -379,7 +387,7 @@ infra_down_note(){ # <pr> <sha>
 # refresh_decision <clean:0|1> <running-sha> <origin-sha> <origin-is-descendant-of-running:0|1>
 #   -> NOFETCH | UPTODATE | DIRTY | DIVERGED | RELOAD
 # THE SELF-REFRESH DECISION (#162). The dev loop merges improvements to THIS machinery — the poller, the
-# fitness harness, dev-{plan,author,loop}, tier-classify, auto-merge — and nothing used to pull the live
+# fitness harness, dev-{plan,author,loop}, auto-merge — and nothing used to pull the live
 # clone, so the RUNNING poller kept executing the OLD code until a human ran `git pull` + bounced --watch.
 # This pure core decides, given what origin holds vs. what we run, whether the poller should STEP ASIDE
 # so poller-service.sh can fast-forward the clone + relaunch us on the new code. FAIL-SAFE TOWARD PROGRESS
@@ -677,16 +685,9 @@ if [ "${1:-}" = "--selftest" ]; then
   st "retire tilde fence" $'~~~\nSupersedes #56\n~~~'                                       ''
   st "retire code indent" '    Supersedes #55'                                              ''
   st "retire post-fence" $'```\ndoc example\n```\nSupersedes #57'                           '57 '
-  # tier-classify --stdin regression harness (the sibling script IS a dependency of sweep routing):
-  # the gather loop must keep a FINAL UNTERMINATED line — a command-substituted variable loses its
-  # trailing newline, and dropping that line classified a one-file PR from ZERO paths (round-2
-  # review blocker). Empty stdin must stay "no files" — asserted here as EMPTY OUTPUT (the property
-  # the sweep's ${tier:-A} consumes; the script also exits 2, not asserted).
-  tc(){ local got; got="$(printf '%s' "$2" | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; got="${got:-NONE}"; [ "$got" = "$3" ] && echo "ok: $1" || { echo "FAIL: $1 — got '$got' want '$3'"; fail=1; }; }
-  tc "tier unterminated one"  'README.md'                    'C'
-  tc "tier unterminated last" $'README.md\npolicy/CLAUDE.md' 'A'
-  tc "tier terminated parity" $'README.md\n'                 'C'
-  tc "tier empty stdin"       ''                             'NONE'
+  # (STEP 5 of #274) The tier classifier's --stdin regression harness that stood here is DELETED with the
+  # script it guarded. It protected the classifier's final-unterminated-line gather because the sweep
+  # fed it a command-substituted variable — a real hazard for a real caller, and there is now neither.
   # ── MOVE 1b (#274): SKIPPED is a verdict, and every verdict maps to an action ──────────────────────
   hv(){ printf '%s\n' "$2" | host_verdict; }
   ck2(){ if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "FAIL: $1 got=[$2] want=[$3]"; fail=1; fi; }
@@ -1607,7 +1608,7 @@ sweep_repo(){
   # The rows ride FD 3, NOT stdin: loop-body children (the fixer's `claude -p`, fitness-review.sh)
   # may read stdin — off FD 0 they would EAT the remaining rows / hang the sweep. FD 9 is the
   # --watch flock; FD 3 is free.
-  local pr ref sha author draft labels comments host tier fit action files fitraw ferr frc nf ef n last now since
+  local pr ref sha author draft labels comments host fit action fitraw ferr frc nf ef n last now since
   while IFS=$'\t' read -r -u 3 pr ref sha author draft labels; do
     [ -n "$pr" ] || continue
     [ -n "$sha" ] || { log "#$pr: no head sha — skip"; continue; }
@@ -1644,32 +1645,27 @@ sweep_repo(){
       log "#$pr ${sha:0:7} host=$host — acted-marker EXPIRED after ${_mage}s (> ${POLLER_ACTED_TTL}s); RE-EVALUATING (a stop is a pause with a timer, never a dead end)"
       rm -f "$done" 2>/dev/null || true
     fi
-    # BATCHED gate reads: plan() consults tier + fitness ONLY on GREEN — so fetch them ONLY then
-    # (a NOOP/RED PR costs exactly one comments call per sweep). Both GREEN-moment fetches are
-    # rc-checked and SKIP this PR for THIS sweep on a transient failure (retry next sweep) — they
-    # must never misroute: a failed files fetch defaulting to tier=A would PRESENT an
-    # auto-mergeable PR and stick via the acted marker; a failed fitness fetch reading as NONE
-    # would spuriously re-run the review harness. rc is only distinguishable on an UNPIPED
-    # capture, hence the fetch-to-var-then-filter shape.
-    tier=""; fit="NONE"
-    if [ "$host" = "GREEN" ]; then
-      files="$(gh pr view "$pr" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null)" \
-        || { log "#$pr: files fetch failed — skip this sweep, retry next"; continue; }
-      # newline-TERMINATE the captured paths ($(…) strips the final newline; an unterminated last
-      # line would be dropped by a plain while-read gather — the single-file PR would classify
-      # from ZERO paths). The [ -n ] guard keeps a zero-file PR fail-closed to A: a bare
-      # printf '%s\n' "" would feed one EMPTY line and flip it to all-docs → C.
-      tier="$([ -n "$files" ] && printf '%s\n' "$files" | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; tier="${tier:-A}"
-      if [ -n "$FITNESS_LOGIN" ]; then
-        # fitness verdicts are also per-head — LINE 1 of the fitness comment carries
-        # "… VERDICT X — head <full-sha>" (bin/fitness-review.sh); bind to THIS head's FULL sha on
-        # that machine-owned line only, so a stale PASS/RETURN from a previous head — or an anchor
-        # planted in the reviewer's rationale prose — never routes the new one.
-        fitraw="$(gh pr view "$pr" --repo "$SLUG" --json comments \
-               -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | .body | split(\"\n\")[0] | select(contains(\"head $sha\"))" 2>/dev/null)" \
-          || { log "#$pr: fitness-comments fetch failed — skip this sweep, retry next"; continue; }
-        fit="$(printf '%s' "$fitraw" | fitness_verdict)"; fit="${fit:-NONE}"
-      fi
+    # BATCHED gate read: plan() consults fitness ONLY on GREEN — so fetch it ONLY then (a NOOP/RED PR
+    # costs exactly one comments call per sweep). The fetch is rc-checked and SKIPs this PR for THIS
+    # sweep on a transient failure (retry next sweep) — it must never misroute: a failed fitness fetch
+    # reading as NONE would spuriously re-run the review harness. rc is only distinguishable on an
+    # UNPIPED capture, hence the fetch-to-var-then-filter shape.
+    # STEP 5 of #274: the changed-file fetch that stood beside this one is GONE. It existed solely to
+    # feed the tier classifier, whose verdict reached the log line below and nothing else — plan() has
+    # never read the tier on any branch. Removing it removes one API call per GREEN sweep and one way
+    # to delay a merge (a transient files-fetch failure used to skip the PR for a whole sweep); it
+    # removes NO gate — merge eligibility is host-GREEN + fitness-PASS, re-checked independently by
+    # auto-merge.sh at the trust boundary.
+    fit="NONE"
+    if [ "$host" = "GREEN" ] && [ -n "$FITNESS_LOGIN" ]; then
+      # fitness verdicts are also per-head — LINE 1 of the fitness comment carries
+      # "… VERDICT X — head <full-sha>" (bin/fitness-review.sh); bind to THIS head's FULL sha on
+      # that machine-owned line only, so a stale PASS/RETURN from a previous head — or an anchor
+      # planted in the reviewer's rationale prose — never routes the new one.
+      fitraw="$(gh pr view "$pr" --repo "$SLUG" --json comments \
+             -q ".comments[] | select(.author.login==\"$FITNESS_LOGIN\") | .body | split(\"\n\")[0] | select(contains(\"head $sha\"))" 2>/dev/null)" \
+        || { log "#$pr: fitness-comments fetch failed — skip this sweep, retry next"; continue; }
+      fit="$(printf '%s' "$fitraw" | fitness_verdict)"; fit="${fit:-NONE}"
     fi
     # MOVE 1b (#274): a SKIPPED host verdict is merge-eligible ONLY for a PR that changes nothing the
     # gate exists to validate. Fetch the file list ONLY when it can change the decision (host=SKIPPED),
@@ -1689,8 +1685,12 @@ sweep_repo(){
         && log "#$pr host=SKIPPED and the PR touches the image/run/gate contract — NOT merge-eligible; waiting for a base advance to re-gate" \
         || log "#$pr host=SKIPPED and the PR touches nothing the gate validates — NEUTRAL PASS, routing on fitness alone"
     fi
-    action="$(plan "$host" "$tier" "$fit" "$POLLER_ARMED" "$gaterel")"
-    log "#$pr ${sha:0:7} host=$host tier=$tier fitness=$fit ⇒ $action"
+    # The empty second argument is the retired tier (STEP 5 of #274) — plan() ignores it, and the log
+    # line drops the field rather than printing a constant `tier=n/a`: a field with one possible value
+    # is noise in every sweep line forever, and "n/a" would keep teaching a distinction that no longer
+    # exists. The routing inputs are exactly what the line now shows: host, fitness, armed.
+    action="$(plan "$host" "" "$fit" "$POLLER_ARMED" "$gaterel")"
+    log "#$pr ${sha:0:7} host=$host fitness=$fit ⇒ $action"
     # R9 HALT (#151): OBSERVE-ONLY — the decision above is LOGGED (the operator sees the queue) but not
     # acted on: no fixer model run, no review model run, no merge, no PRESENT/blocked comment — and no
     # state marker is written, so a halted sweep can never park, dedup or no-progress-signature a PR.
@@ -1916,7 +1916,7 @@ sweep_repo(){
         # tuple (the terminal-state skip would otherwise silence the human touchpoint forever
         # after one throttled POST — comment CREATION rate-limits while reads still succeed).
         # surface() returns 0 on its already-surfaced early-exit, so idempotence is preserved.
-        surface "$pr" "$sha" "review" "GREEN PR needs your decision (tier=$tier, fitness=$fit). Present for a clickable merge — the poller does not auto-merge this." \
+        surface "$pr" "$sha" "review" "GREEN PR needs your decision (fitness=$fit). Present for a clickable merge — the poller does not auto-merge this." \
           && : > "$done"
         ;;
     esac
