@@ -407,6 +407,20 @@ infra_down_note(){ # <pr> <sha>
 #   DIRTY    — the clone carries local edits → a human touched it → never clobber, leave it.
 #   DIVERGED — origin is NOT a fast-forward of what we run (rewritten history / local commits) → leave.
 #   RELOAD   — clean, and origin strictly fast-forwards past what we run → step aside for a reload.
+# refresh_due <sweeps> <every> <elapsed-s> <max-age-s> → DUE | WAIT (pure). Either leg fires it: N sweeps
+# OR M wall-clock seconds. The wall-clock leg exists because a sweep's DURATION is unbounded — a fitness
+# review or a fixer runs synchronously inside it — so a sweep-count is not a clock. UNREADABLE/negative
+# elapsed (a clock the caller could not read, passed as -1) falls back to the sweep leg alone rather than
+# firing: a refresh is an EXIT-and-relaunch, so a bad clock must never turn it into a restart loop.
+refresh_due(){
+  local sweeps="${1:-0}" every="${2:-0}" elapsed="${3:--1}" max="${4:-0}"
+  case "$sweeps$every$elapsed$max" in *[!0-9-]*) echo WAIT; return;; esac
+  [ "$every" -gt 0 ] 2>/dev/null && [ "$sweeps" -ge "$every" ] && { echo DUE; return; }
+  [ "$max"   -gt 0 ] 2>/dev/null && [ "$elapsed" -ge 0 ] 2>/dev/null && [ "$elapsed" -ge "$max" ] \
+    && { echo DUE; return; }
+  echo WAIT
+}
+
 refresh_decision(){
   local clean="$1" run="$2" org="$3" desc="$4"
   [ -n "$org" ] || { printf 'NOFETCH'; return; }        # no resolvable origin tip → can't reload
@@ -644,6 +658,25 @@ if [ "${1:-}" = "--selftest" ]; then
   rf "diverged (not a ff) → leave"  1 aaa bbb 0 DIVERGED
   rf "dirty even when diverged"     0 aaa bbb 0 DIRTY
   rf "uptodate beats dirty"         0 aaa aaa 1 UPTODATE
+  # refresh_due — WHEN the check above is even reached. A sweep-count is not a clock: a sweep contains
+  # synchronous model runs (fitness, fixer up to FIX_TIMEOUT), so N sweeps can span hours.
+  rd(){ local got; got="$(refresh_due "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — refresh_due($2,$3,$4,$5)=$got want $6"; fail=1; }; }
+  rd "under both legs → wait"        5  30 60   900 WAIT
+  rd "sweep leg fires"               30 30 60   900 DUE
+  rd "sweep leg fires past N"        31 30 0    900 DUE
+  # THE MEASURED CASE (2026-07-29): busy with model runs, only a few sweeps done, but 4h08m of
+  # wall-clock elapsed and two merges sitting on main unexecuted. The old code waited; this fires.
+  rd "slow sweeps, clock fires"      5  30 14880 900 DUE
+  rd "clock leg exactly at max"      1  30 900  900 DUE
+  rd "clock leg one short"           1  30 899  900 WAIT
+  # Fail direction: an unreadable clock (-1) must fall back to the sweep leg, never fire on its own —
+  # a refresh EXITS the process for a supervised relaunch, so a bad clock must not become a restart loop.
+  rd "unreadable clock → sweep only" 5  30 -1   900 WAIT
+  rd "unreadable clock, sweep due"   30 30 -1   900 DUE
+  rd "clock leg disabled (0)"        5  30 99999 0  WAIT
+  rd "sweep leg disabled (0)"        99 0  60   900 WAIT
+  rd "both disabled → never"         99 0  99999 0  WAIT
+  rd "garbage input → wait"          x  30 60   900 WAIT
   # #173 — the lock-liveness adjudication. ONLY a positively-confirmed live, same-generation holder
   # defers a start; every doubt resolves toward STARTING (a silently dead poller is unrecoverable).
   lk(){ local got; got="$(lock_verdict "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — lock_verdict('$2','$3','$4','$5')=$got want $6"; fail=1; }; }
@@ -851,6 +884,14 @@ SELF_REFRESH_CLONE="${SELF_REFRESH_CLONE:-$(dirname "$HERE")}"
 SELF_REFRESH_REMOTE="${SELF_REFRESH_REMOTE:-origin}"
 SELF_REFRESH_BRANCH="${SELF_REFRESH_BRANCH:-main}"
 SELF_REFRESH_EVERY="${SELF_REFRESH_EVERY:-30}"            # fetch once per N sweeps (cheap, rate-limited; req 5)
+# …AND at least once per this many WALL-CLOCK seconds. A sweep-COUNT alone is not a cadence, because a
+# sweep has no bounded duration: fitness reviews and the fixer run SYNCHRONOUSLY inside sweep() (up to
+# FIX_TIMEOUT, 1800s each). So "every 30 sweeps" stretches to hours exactly when the loop is busiest —
+# i.e. precisely when fixes are landing on main and it most needs to be running them. MEASURED
+# 2026-07-29: the poller last refreshed at 06:15 and was still executing that code at 10:23, two merges
+# behind, having spent the interval on model runs. The loop reported those merges as done while running
+# code that did not contain them. 0 disables the wall-clock leg (pure sweep-count, the old behaviour).
+SELF_REFRESH_MAX_AGE="${SELF_REFRESH_MAX_AGE:-900}"
 SELF_REFRESH_FETCH_TIMEOUT="${SELF_REFRESH_FETCH_TIMEOUT:-60}"
 # the exit code the poller uses to ask poller-service.sh to ff-pull + relaunch. SHARED CONTRACT: the same
 # default lives in bin/poller-service.sh; override via env in BOTH (the service passes its env through).
@@ -1976,6 +2017,7 @@ case "${1:-}" in
     trap 'log "poller stopping (signal)"; exit 0' TERM INT HUP
     log "pr-poller --watch up (repo=$SLUG interval=${POLL_INTERVAL}s armed=$POLLER_ARMED self-refresh=$SELF_REFRESH every=${SELF_REFRESH_EVERY} sweeps running=${LAUNCH_HEAD:0:7})"
     sweeps=0
+    _last_refresh="$(date -u +%s 2>/dev/null)"; case "$_last_refresh" in ''|*[!0-9]*) _last_refresh="";; esac
     while :; do
       # GENERATION FENCE (2026-07-28) — FIRST, and before any work. The box can be REBUILT underneath a
       # running poller: the old container is torn down while this process keeps executing against its
@@ -1998,8 +2040,10 @@ case "${1:-}" in
       # supervised relaunch that keeps a (rare) failed ff-pull from re-exiting immediately: real work
       # runs before the loop re-checks, so a stuck refresh is bounded to once per N sweeps, never a spin.
       sweeps=$((sweeps+1))
-      if [ "$sweeps" -ge "$SELF_REFRESH_EVERY" ]; then
-        sweeps=0
+      _now="$(date -u +%s 2>/dev/null)"; case "$_now" in ''|*[!0-9]*) _now="";; esac
+      if [ -n "$_now" ] && [ -n "$_last_refresh" ]; then _el=$((_now - _last_refresh)); else _el=-1; fi
+      if [ "$(refresh_due "$sweeps" "$SELF_REFRESH_EVERY" "$_el" "$SELF_REFRESH_MAX_AGE")" = DUE ]; then
+        sweeps=0; _last_refresh="${_now:-$_last_refresh}"
         self_refresh_check; rc=$?
         if [ "$rc" = "$POLLER_RELOAD_RC" ]; then
           log "self-refresh: exiting for a supervised reload (rc=$rc) — poller-service.sh will ff-pull + relaunch on the new code"
