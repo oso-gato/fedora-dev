@@ -20,12 +20,14 @@
 #   3. CI-PUBLISHED  — the merge commit's build.yml run CONCLUDED SUCCESS (the artifact exists). PENDING ⇒
 #                      WAIT (re-scan); FAILED/absent ⇒ the artifact will never exist for this merge.
 #   4. LIVE READ-BACK — the change is actually RUNNING. FIRST SLICE covers the LIVE-CLONE class (bin/**,
-#                      policy/**, tests, docs — what the running box executes from its live clone): the
-#                      merge sha is an ANCESTOR of the deployed clone's HEAD, i.e. the poller self-refresh
-#                      (or a box rebuild) has advanced the box onto code that includes this merge. The
-#                      IMAGE-BAKED class (Containerfile/install/entrypoint — only a rebuilt+redeployed
-#                      image delivers it) needs the host redeploy-DONE signal, which is a DISCLOSED
-#                      FOLLOW-UP: such merges WAIT here (never wrongly closed).
+#                      policy/**, tests, docs — what the running box executes from its live clone) OF THIS
+#                      REPO: the merge sha is an ANCESTOR of the deployed clone's HEAD, i.e. the poller
+#                      self-refresh (or a box rebuild) has advanced the box onto code that includes this
+#                      merge. Everything else the apparatus DEPLOYS ($RECONCILE_DEPLOYED — the IMAGE-BAKED
+#                      class here, plus fedora-desktop and fedora-bootstrap, all of which need the host
+#                      redeploy/apply-DONE signal) is a DISCLOSED FOLLOW-UP: such merges WAIT here, never
+#                      wrongly closed. A repo the apparatus merely DEVELOPS has no instance anywhere, so
+#                      this link is N/A on it rather than a wait for an event that is never coming.
 #
 # NO LOCAL STATE (the host-refresh precedent): every decision input is GitHub- or clone-derived, and the
 # dedup anchor is a `reconcile → closed:` comment posted on the PR (a wiped box re-derives + never
@@ -38,7 +40,8 @@
 # ENV: ORG (oso-gato) · RECONCILE_LOOKBACK (15 merged PRs/repo) · RECONCILE_MAX_AGE (172800s catch-up) ·
 #      LG_HOST_LOGIN (oso-gato-erebus-claudebox) · RECONCILE_WORKFLOW (build.yml) · DEV_CLONE
 #      (~/.local/share/fedora-dev — the deployed live clone, for the live read-back) · REPO_SCOPE
-#      (bin/repo-scope.sh — R16) · BACKLOG_LABEL (backlog).
+#      (bin/repo-scope.sh — R16) · BACKLOG_LABEL (backlog) · RECONCILE_DEPLOYED ("fedora-dev
+#      fedora-desktop fedora-bootstrap" — the repos an instance of which the apparatus runs; see below).
 set -uo pipefail
 
 ORG="${ORG:-oso-gato}"
@@ -47,6 +50,19 @@ MAX_AGE="${RECONCILE_MAX_AGE:-172800}"
 LG_HOST_LOGIN="${LG_HOST_LOGIN:-oso-gato-erebus-claudebox}"
 RECONCILE_WORKFLOW="${RECONCILE_WORKFLOW:-build.yml}"
 BACKLOG_LABEL="${BACKLOG_LABEL:-backlog}"
+# THE REPOS THE APPARATUS RUNS A DEPLOYED INSTANCE OF — the discriminator between the live read-back's
+# "not yet" (PENDING) and "never" (NA). Membership MIRRORS bin/host-refresh.sh's own deploy set: its
+# WORKLOADS (`fedora-dev fedora-desktop` — itself a mirror of the host agent's KNOWN_WORKLOADS arg
+# allowlist, the repos the apparatus files `redeploy <workload>` tickets for) plus its CONTROL_REPO
+# (fedora-bootstrap — the host itself). Kept as a DEDICATED knob rather than read from
+# $HOST_REFRESH_WORKLOADS because that variable answers a DIFFERENT question — "should I file redeploy
+# tickets?" — and its documented empty-disables contract would then silently mean "nothing is deployed"
+# here, re-arming the exact close-on-CI-alone defect this routing exists to prevent. `:-` (not `-`), so
+# an empty value takes the default: an EMPTY deploy set is the unsafe direction here (every repo becomes
+# NA and closes without a delivery link), the mirror-image of host-refresh, where empty is a safe no-op.
+# reconcile.test.sh pins the two enumerations in lockstep so they cannot drift silently.
+RECONCILE_DEPLOYED_DEFAULT='fedora-dev fedora-desktop fedora-bootstrap'
+RECONCILE_DEPLOYED="${RECONCILE_DEPLOYED:-$RECONCILE_DEPLOYED_DEFAULT}"
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
 DEV_CLONE="${DEV_CLONE:-$HOME/.local/share/fedora-dev}"
@@ -91,37 +107,57 @@ close_decision(){
   esac
 }
 
+# deployed_p <slug> → 0 iff the apparatus RUNS A DEPLOYED INSTANCE of this repo ($RECONCILE_DEPLOYED).
+# THIS IS THE WHOLE DISCRIMINATOR between "not yet" and "never", so it is a set membership rather than a
+# slug literal: the question a live read-back asks is "does an instance of this exist to read back from?",
+# and every repo the apparatus deploys answers yes — not just the one whose name someone remembered.
+# The `:-` re-applies the default here too, not just at the assignment above: an EMPTY set is the unsafe
+# state (every repo reads NA and closes with no delivery link), so it can never be reached — by an empty
+# env at load, or by a caller emptying the variable at runtime. One literal, guarded at both levels.
+deployed_p(){
+  local slug="$1" w
+  for w in ${RECONCILE_DEPLOYED:-$RECONCILE_DEPLOYED_DEFAULT}; do [ "$slug" = "$ORG/$w" ] && return 0; done
+  return 1
+}
+
 # live_readback <slug> <class> <merge-oid> → LIVE | PENDING | NA
-#   CLONE class on THIS repo (fedora-dev): LIVE iff the merge sha is an ancestor of the DEPLOYED clone HEAD
-#   (the running box self-refreshed onto code that includes it). IMAGE class here: PENDING — the host
-#   redeploy is a real pending event, so waiting for it is waiting for something that actually arrives.
-#   THE CONTROL REPO (fedora-bootstrap): PENDING, never NA — the apparatus RUNS it, and a real delivery
-#   signal for it already exists on the bus (the host App's `**host-agent: DONE|FAILED**` on the apply
-#   ticket). Not yet wired here, so it waits. See the block above live_readback for why calling it NA
-#   would have closed a ticket whose feature has failed 27 times out of 27.
-#   ANY OTHER REPO: NA. The one read-back this slice can take is a git ancestor check against a deployed
-#   checkout, and $DEV_CLONE is the only one the dev box can read — and for a repo the apparatus merely
-#   DEVELOPS there is no deployed instance of it anywhere in the apparatus to read back from. A link that
-#   can NEVER be satisfied must not be reported as "not yet". What proves such a change delivered is the
-#   link that IS taken on it: the host live-gate, which builds the candidate on a real host and probes it.
-#   NA is therefore about the ABSENCE OF ANY INSTANCE, not about this box's convenience — which is exactly
-#   why the control repo, an instance that demonstrably exists, must not be folded into it.
+#   A REPO THE APPARATUS DEPLOYS (deployed_p — the workloads + the control repo): never NA. An instance
+#   exists, so the link is takeable in principle and a real delivery event is still coming; only the READ
+#   is missing here. Within that set:
+#     · THIS repo (fedora-dev), CLONE class: LIVE iff the merge sha is an ancestor of the DEPLOYED clone
+#       HEAD (the running box self-refreshed onto code that includes it) — the one read-back this slice
+#       can actually take, because $DEV_CLONE is the one deployed checkout the dev box can read.
+#     · THIS repo, IMAGE class: PENDING — delivery needs the host redeploy, a real pending event.
+#     · EVERY OTHER DEPLOYED REPO (fedora-desktop, fedora-bootstrap): PENDING — their delivery signal
+#       already exists on the bus (the host App's `**host-agent: DONE|FAILED**` on the redeploy /
+#       apply ticket the merge files, which bin/host-refresh.sh ticket_outcome() already reads), it is
+#       just not wired into this actuator yet. A DISCLOSED FOLLOW-UP; until then they wait.
+#   ANY OTHER REPO: NA. For a repo the apparatus merely DEVELOPS there is no deployed instance of it
+#   ANYWHERE in the apparatus to read back from, so the link can NEVER be satisfied and must not be
+#   reported as "not yet" (that was the 147-permanent-wait bug). What proves such a change delivered is
+#   the link that IS taken on it: the host live-gate, which builds the candidate on a real host + probes it.
+#   NA is therefore about the ABSENCE OF ANY INSTANCE, never about this box's convenience — the dev box
+#   cannot read erebus, but that is a missing READ, not a missing INSTANCE, and the two must not be folded
+#   together: doing so closes a deployed workload's ticket the instant CI publishes, i.e. on merge alone,
+#   which is the "merged ≠ live" pattern this whole actuator exists to kill.
 # Lives with the decision functions, not the I/O helpers: the routing above is pure (and is what broke),
 # and the one git probe is reached only for this repo's own clone, behind an existence guard.
 live_readback(){
   local slug="$1" class="$2" oid="$3"
-  # THE CONTROL REPO IS NOT "NO READ-BACK AVAILABLE" — it is "read-back NOT WIRED HERE YET", which is a
-  # PENDING, not an NA. fedora-bootstrap IS the host the apparatus runs on, and a real delivery signal
-  # already exists for it: the host App posts `**host-agent: DONE|FAILED**` on the apply ticket a merge
-  # files, which bin/host-refresh.sh ticket_outcome() already reads. Calling that NA would close its
-  # tickets on merged+host-GREEN alone — and MEASURED 2026-07-29 that is not delivery there: every one of
-  # the 27 apply-bootstrap tickets (#239…#317) reads FAILED, none DONE, so #187's issue #133 would be
-  # closed as shipped while its feature has never once run on the host. Today only the 48h age window
-  # stops that, and the window protects nothing for the NEXT such merge. PENDING is the honest answer
-  # until the outcome read is wired (follow-up); it costs only that these tickets keep waiting, which is
-  # what they should do while the thing they track does not work.
-  [ "$slug" = "$ORG/fedora-bootstrap" ] && { echo PENDING; return; }
-  [ "$slug" = "$ORG/fedora-dev" ] || { echo NA; return; }
+  # A DEPLOYED REPO IS NOT "NO READ-BACK AVAILABLE" — it is "read-back NOT WIRED HERE YET" (PENDING, not
+  # NA). Two measured reasons this must hold for the whole deploy set, not just this repo:
+  #   · fedora-bootstrap: MEASURED 2026-07-29, every one of the 27 apply-bootstrap tickets (#239…#317)
+  #     reads FAILED and none DONE — so merged+host-GREEN is demonstrably NOT delivery there, and an NA
+  #     would have closed #187's issue #133 as shipped for a feature that has never once run on the host.
+  #   · fedora-desktop: the apparatus files `redeploy fedora-desktop` tickets for it
+  #     (bin/host-refresh.sh WORKLOADS) and that signal demonstrably works (`redeploy fedora-dev` #255 →
+  #     `host-agent: DONE`). An NA here closes its tickets the instant CI publishes — BEFORE, and
+  #     regardless of, the host redeploy that actually delivers the image.
+  # Today only the 48h age window stops either, and the window protects nothing for the NEXT such merge.
+  # PENDING is the honest answer until the outcome read is wired (follow-up); it costs only that these
+  # tickets keep waiting, which is what they should do while nothing has proven the change is running.
+  deployed_p "$slug" || { echo NA; return; }
+  [ "$slug" = "$ORG/fedora-dev" ] || { echo PENDING; return; }
   [ "$class" = CLONE ] || { echo PENDING; return; }
   [ -d "$DEV_CLONE/.git" ] || { echo PENDING; return; }
   if git -C "$DEV_CLONE" merge-base --is-ancestor "$oid" HEAD 2>/dev/null; then echo LIVE; else echo PENDING; fi
@@ -142,7 +178,7 @@ proof_summary(){
   esac
   case "$live" in
     LIVE) l="live read-back OK ($class class)";;
-    NA)   l="live read-back: N/A — no deployed checkout of this repo is readable from the dev box; the proof of delivery is the host live-gate";;
+    NA)   l="live read-back: N/A — the apparatus deploys no instance of this repo, so there is nothing anywhere to read back from; the proof of delivery is the host live-gate";;
     *)    l="live read-back: $live";;
   esac
   echo "host live-gate GREEN, $p, $l"
@@ -202,6 +238,23 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "control repo → PENDING, not NA"  "$(live_readback oso-gato/fedora-bootstrap CLONE deadbeef)" "PENDING"
   ck "control repo, IMAGE → PENDING"   "$(live_readback oso-gato/fedora-bootstrap IMAGE deadbeef)" "PENDING"
   ck "…so the control repo cannot close" "$(close_decision 1 1 NA "$(live_readback oso-gato/fedora-bootstrap CLONE deadbeef)")" "WAIT:not-live-yet"
+  # NEITHER IS A DEPLOYED WORKLOAD. fedora-desktop is in host-refresh.sh's WORKLOADS: the apparatus files
+  # `redeploy fedora-desktop` tickets for it and that signal works (`redeploy fedora-dev` #255 → DONE), so
+  # an NA here would close its tickets the instant CI publishes — before the redeploy that delivers them.
+  # Keying the carve-out on the fedora-bootstrap SLUG missed exactly this; deployed_p keys on the set.
+  ck "workload → PENDING, not NA"      "$(live_readback oso-gato/fedora-desktop CLONE deadbeef)" "PENDING"
+  ck "workload, IMAGE → PENDING"       "$(live_readback oso-gato/fedora-desktop IMAGE deadbeef)" "PENDING"
+  ck "…so a workload cannot close"     "$(close_decision 1 1 SUCCESS "$(live_readback oso-gato/fedora-desktop CLONE deadbeef)")" "WAIT:not-live-yet"
+  ck "deployed_p: workload"            "$(deployed_p oso-gato/fedora-desktop   && echo y || echo n)" "y"
+  ck "deployed_p: control repo"        "$(deployed_p oso-gato/fedora-bootstrap && echo y || echo n)" "y"
+  ck "deployed_p: own repo"            "$(deployed_p oso-gato/fedora-dev       && echo y || echo n)" "y"
+  ck "deployed_p: developed-only"      "$(deployed_p oso-gato/e2e-beta         && echo y || echo n)" "n"
+  # Set membership is exact — a repo whose name merely CONTAINS a deployed one is not deployed.
+  ck "deployed_p: no substring match"  "$(deployed_p oso-gato/fedora-desktop-x && echo y || echo n)" "n"
+  ck "deployed_p: org-bound"           "$(deployed_p other-org/fedora-desktop  && echo y || echo n)" "n"
+  # An EMPTY deploy set is the unsafe direction (everything NA ⇒ everything closes), so it takes the
+  # default rather than emptying — the mirror-image of host-refresh.sh, where empty is a safe no-op.
+  ck "empty deploy set → default"      "$(RECONCILE_DEPLOYED= live_readback oso-gato/fedora-desktop CLONE deadbeef)" "PENDING"
   # …while the repos that genuinely have no instance still do close (the unblock this PR exists for).
   ck "developed repo still closes"     "$(close_decision 1 1 NA "$(live_readback oso-gato/e2e-beta CLONE deadbeef)")" "CLOSE"
   # On fedora-dev itself the read-back IS takeable, so it stays mandatory — an image-baked change there is

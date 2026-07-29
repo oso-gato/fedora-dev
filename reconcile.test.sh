@@ -139,6 +139,50 @@ closed && ok "live N/A → still closed" || no "N/A live read-back did not close
 says 'live read-back: N/A' && ok "comment reports the live link as N/A" || no "comment does not report the N/A live link"
 says 'read-back OK' && no "comment claims 'read-back OK' for a read-back never taken" || ok "comment never claims read-back OK"
 
+echo "== A DEPLOYED WORKLOAD (fedora-desktop) → NOT closed, however green CI is =="
+# THE BLOCKER'S INVERSION, driven through the REAL scan rather than --selftest, because the defect was in
+# what the live path CLOSES: fedora-desktop is in bin/host-refresh.sh's WORKLOADS — the apparatus files
+# `redeploy fedora-desktop` tickets for it and that signal demonstrably works (`redeploy fedora-dev` #255
+# → `host-agent: DONE`) — so an instance exists and the merge is NOT delivered until the host redeploys.
+# Keying the carve-out on the fedora-bootstrap SLUG sorted this genuine "not yet" as "never", closing the
+# ticket the instant CI published: "merged ≠ live", the exact pattern this actuator exists to kill.
+run "$SCRIPT" SCOPE_REPO=fedora-desktop HOST_GREEN=1 PUB=success FILES=bin/x.sh ISSUE_STATE=OPEN ANCESTOR=1
+closed && no "closed a deployed workload's ticket before the host redeploy delivered it" || ok "deployed workload → WAIT, not closed"
+# …and an IMAGE-baked change to it (the class that MOST needs the redeploy) likewise.
+run "$SCRIPT" SCOPE_REPO=fedora-desktop HOST_GREEN=1 PUB=success FILES=Containerfile ISSUE_STATE=OPEN ANCESTOR=1
+closed && no "closed an image-baked workload change with no redeploy read-back" || ok "workload image-baked → WAIT, not closed"
+# The unblock this PR exists for must SURVIVE the fix: a repo the apparatus only DEVELOPS still closes.
+run "$SCRIPT" SCOPE_REPO=e2e-beta HOST_GREEN=1 PUB=success FILES=Containerfile ISSUE_STATE=OPEN ANCESTOR=1
+closed && ok "developed-only repo still closes (NA did not become a blanket wait)" || no "the NA unblock regressed into a permanent wait"
+
+echo "== DRIFT GUARD: reconcile's deploy set == host-refresh's WORKLOADS + CONTROL_REPO =="
+# One fact, enumerated in two files: the repos the apparatus deploys. host-refresh.sh decides WHERE a
+# redeploy/apply ticket is filed; reconcile.sh decides whether a missing read-back is "not yet" or
+# "never". They must name the same repos — a workload added to one and not the other silently restores
+# this PR's defect for that repo. Read out of BOTH files so the pair cannot drift unnoticed.
+rd="$(sed -n "s/^RECONCILE_DEPLOYED_DEFAULT='\(.*\)'.*/\1/p" "$SCRIPT" | head -1)"
+hw="$(sed -n 's/^WORKLOADS="${HOST_REFRESH_WORKLOADS-\(.*\)}".*/\1/p' "$HERE/bin/host-refresh.sh" | head -1)"
+hc="$(sed -n 's/^CONTROL_REPO="${HOST_REFRESH_CONTROL_REPO-\(.*\)}".*/\1/p' "$HERE/bin/host-refresh.sh" | head -1)"
+srt(){ printf '%s\n' $1 | sort | tr '\n' ' '; }
+if [ -z "$rd" ] || [ -z "$hw" ] || [ -z "$hc" ]; then
+  no "drift guard VACUOUS (read reconcile=[$rd] workloads=[$hw] control=[$hc])"
+elif [ "$(srt "$rd")" = "$(srt "$hw $hc")" ]; then
+  ok "deploy sets agree ($(srt "$rd"))"
+else
+  no "deploy sets DRIFTED: reconcile=[$(srt "$rd")] host-refresh=[$(srt "$hw $hc")]"
+fi
+
+echo "== MUTATION: fedora-desktop dropped from the deploy set → the workload closes again =="
+# The pre-fix defect exactly: a deployed workload missing from the set reads NA and closes on CI alone.
+MUTD="$ROOT/reconcile-nodesktop.sh"
+sed "s/^RECONCILE_DEPLOYED_DEFAULT=.*/RECONCILE_DEPLOYED_DEFAULT='fedora-dev fedora-bootstrap'/" "$SCRIPT" > "$MUTD"
+if ! grep -qF "RECONCILE_DEPLOYED_DEFAULT='fedora-dev fedora-bootstrap'" "$MUTD"; then
+  no "deploy-set mutation VACUOUS (sed did not change the copy)"
+else
+  run "$MUTD" SCOPE_REPO=fedora-desktop HOST_GREEN=1 PUB=success FILES=bin/x.sh ISSUE_STATE=OPEN ANCESTOR=1
+  closed && ok "mutant: workload wrongly closed ⇒ the deployed-workload rows discriminate" || no "mutant did not close (the workload rows would not bite)"
+fi
+
 echo "== MUTATION: blanket proof text restored → the N/A-publish comment wrongly claims 'published' =="
 MUTP="$ROOT/reconcile-blanket.sh"
 # NB no backticks in the injected text: it lands inside double quotes in the mutant, where they would be
