@@ -7,6 +7,12 @@
 # Plus an in-suite MUTATION (restore the old `exit 1` on a merge-command failure → the conflict case
 # wrongly exits 1, which the poller surfaces as the trust-boundary alarm) and a poller drift-guard that
 # the routing distinguishes rc 2 (rebase) from the rc-1 (refused) alarm. No real GitHub/network.
+#
+# ALSO (STEP 5 of #274): the TIER-RETIREMENT rows. decide() must return the SAME verdict for every tier
+# value — the executable form of "the tier gated nothing" — while a RED host or a non-PASS fitness must
+# still REFUSE, so the removal is proven to have loosened nothing. Those rows pass against the pre-removal
+# script BY DESIGN (the change must not alter what may be merged); the rows that BITE are the changed-file
+# call-site COUNTS, which were 3 (auto-merge) and 2 (poller) before the classifier was deleted.
 set -uo pipefail
 unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID SCOPE_SESSION 2>/dev/null || true
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -81,5 +87,32 @@ if [ -z "$rc3" ]; then bad "poller lost the rc-3 merge-failed arm"; else
   case "$rc3" in *'"merge-failed"'*) ok "poller routes auto-merge rc 3 → a 'merge-failed' surface";; *) bad "rc-3 arm no longer surfaces 'merge-failed'";; esac
   case "$rc3" in *'$done'*) bad "rc-3 arm writes the acted marker — parks a GREEN PR on a transient (#156 class; the retry claim would be false)";; *) ok "rc-3 arm does NOT park: no acted-marker write, the promised retry is real";; esac
 fi
+
+echo "== STEP 5 of #274: the TIER is retired — it gated nothing, so removing it decides nothing differently =="
+# The issue's own acceptance is `--decide A GREEN PASS` → MERGE. Asserted here across EVERY tier value
+# (and a garbage one) so the claim is proven, not sampled: no value of the first positional can move the
+# decision. These rows pass against the PRE-removal script too — deliberately. That is the POINT: this
+# change must not alter what may be merged, so the decision rows are the CONTROL, and the two rows that
+# actually bite are the call-site counts below.
+dec(){ bash "$AM" --decide "$1" "$2" "$3" 2>/dev/null; }
+tier_indep=1
+for t in A B C '' Z; do [ "$(dec "$t" GREEN PASS)" = MERGE ] || tier_indep=0; done
+[ "$tier_indep" = 1 ] && ok "every tier value (A/B/C/empty/garbage) + GREEN + PASS ⇒ MERGE — the tier decides nothing" \
+                      || bad "a tier value changed the decision — the tier WAS load-bearing; STOP"
+{ [ "$(dec A RED PASS)" = REFUSE ] && [ "$(dec A GREEN RETURN)" = REFUSE ] && [ "$(dec A NONE NONE)" = REFUSE ]; } \
+  && ok "the two REAL gates still decide: a RED host or a non-PASS fitness still REFUSEs on any tier" \
+  || bad "removing the tier loosened a gate — a RED/RETURN no longer REFUSEs"
+
+# THE ROWS THAT BITE: the call sites are gone, counted at the source. Pre-removal these were 3 and 2
+# (auto-merge: trinity + SKIPPED re-check + tier; poller: SKIPPED re-check + tier), so this section
+# FAILS against the pre-fix scripts — which is what makes it a test rather than a restatement.
+amf="$(grep -c -- '--json files' "$AM")"
+[ "$amf" = 2 ] && ok "auto-merge fetches the changed-file list twice (Trinity guard + the SKIPPED re-check) — the tier fetch is gone" \
+               || bad "auto-merge has $amf changed-file fetches (want 2: Trinity + SKIPPED re-check)"
+plf="$(grep -c -- '--json files' "$POLLER")"
+[ "$plf" = 1 ] && ok "the poller fetches the changed-file list once (only the host=SKIPPED gate-relevance read) — the GREEN-moment tier fetch is gone" \
+               || bad "the poller has $plf changed-file fetches (want 1: the SKIPPED gate-relevance read)"
+if grep -rqF 'tier-classify' "$HERE/bin"; then bad "a tier-classifier reference survives under bin/"; else ok "no tier-classifier reference survives under bin/"; fi
+[ -e "$HERE/bin/tier-classify.sh" ] && bad "bin/tier-classify.sh still exists" || ok "bin/tier-classify.sh is deleted"
 
 echo; echo "merge-conflict-signal: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

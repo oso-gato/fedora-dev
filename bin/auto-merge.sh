@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# auto-merge.sh — the DETERMINISTIC Tier-B/C merger (R7 + 00-GOVERNANCE §6(c) zero-gate).
+# auto-merge.sh — the DETERMINISTIC merger (R7 + 00-GOVERNANCE §6(c) zero-gate).
 #
 # The ONLY thing besides Arthur that merges to main — and it is a DUMB, non-agent script, by design.
-# It holds merge power precisely BECAUSE it has no agency: it merges iff three machine-checkable gates
-# all say yes, and REFUSES (fail-closed) on anything else. An agent (which could be prompt-injected)
-# never holds a merge credential; this script does, and it cannot be talked into merging a Tier-A
-# change — it just reads the gates.
+# It holds merge power precisely BECAUSE it has no agency: it merges iff two machine-checkable gates
+# both say yes, and REFUSES (fail-closed) on anything else. An agent (which could be prompt-injected)
+# never holds a merge credential; this script does, and it cannot be talked into merging anything the
+# two gates have not both cleared — it just reads the gates.
 #
 # THE TWO GATES (both required to merge; ANY missing/ambiguous/UNVERIFIABLE → REFUSE):
 #
@@ -28,20 +28,28 @@
 # merge is --match-head-commit pinned. Same-identity fitness (FITNESS_SAME_IDENTITY=1) is DRY-RUN-ONLY:
 # --commit under it is a hard REFUSE (#96 STEP 1 — arming requires a real, distinct fitness App).
 # Else the gate is UNVERIFIABLE ⇒ REFUSE (fail-closed — a forgeable gate is treated as no gate).
-# Only verified (B|C) AND GREEN AND PASS ⇒ merge. The ratified "Tier B/C auto-merges" — nothing else.
+# Verified GREEN AND verified PASS ⇒ merge — nothing else.
+#
+# CORRECTED 2026-07-29 (STEP 5 of #274). The line above used to read "Only verified (B|C) AND GREEN AND
+# PASS ⇒ merge" — the last surviving statement of a THIRD gate that has not existed since ZERO-GATE.
+# The tier was never read by decide(); it was computed here only to fill the report line, so this
+# script no longer computes it at all and the classifier script is deleted. decide() keeps its
+# (ignored) first parameter precisely so `--decide A GREEN PASS` still prints MERGE — the standing
+# proof that the tier never gated anything.
 #
 # SAFE BY DEFAULT: --dry-run (the default) prints the DECISION and merges nothing. --commit actually
 # merges. So wiring it up changes nothing until explicitly armed.
 #
 # Usage:
 #   auto-merge.sh <repo> <pr>                 # dry-run: print decision
-#   auto-merge.sh --commit <repo> <pr>        # actually merge if all three gates pass
-#   auto-merge.sh --decide <tier> <gate> <fit>  # TEST the pure decision fn (no network)
+#   auto-merge.sh --commit <repo> <pr>        # actually merge if both gates pass
+#   auto-merge.sh --decide <tier> <gate> <fit>  # TEST the pure decision fn (no network; <tier> is
+#                                               # accepted and IGNORED — see decide())
 set -uo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 
 # ---- the PURE decision function (no I/O — testable in isolation) -----------------------------------
-# decide <tier:A|B|C> <livegate:GREEN|RED|NONE> <fitness:PASS|RETURN|ESCALATE|NONE> -> MERGE|HUMAN|REFUSE
+# decide <tier:IGNORED> <livegate:GREEN|RED|NONE> <fitness:PASS|RETURN|ESCALATE|NONE> -> MERGE|REFUSE
 decide(){
   # ZERO-GATE (2026-07-10, Arthur's decision): tier NO LONGER gates the merge. The old
   # `A → HUMAN` click was built on a misrepresented requirement (the real red line is throwaway
@@ -50,9 +58,13 @@ decide(){
   # the host post-deploy health-gate + digest auto-rollback, full git-revertability, and the fitness
   # reviewer's standing "preserve recoverability" requirement (a change that removes rollback or
   # exfiltrates the credential FAILS review). So the merge rests on the two INDEPENDENT gates only:
-  # host live-gate GREEN + independent fitness PASS. `tier` is retained purely for the caller's
-  # report/digest — it is not read here.
-  local tier="$1" gate="$2" fit="$3"
+  # host live-gate GREEN + independent fitness PASS.
+  # `tier` (STEP 5 of #274): the first positional is ACCEPTED AND IGNORED. It is kept — rather than
+  # dropped from the signature — because `--decide A GREEN PASS` printing MERGE is the standing,
+  # executable proof that the tier gates nothing; deleting the parameter would delete the proof along
+  # with the drag. Nothing computes a tier any more (the classifier script is deleted), so no caller
+  # passes one: they pass an empty string, which this function reads exactly as it read "A".
+  local _tier_ignored="$1" gate="$2" fit="$3"
   # GREEN, or SKIPPED-as-neutral. SKIPPED reaches this function ONLY after the caller above has
   # independently confirmed the PR touches nothing the gate validates (unreadable file list ⇒ the
   # caller downgrades to NONE ⇒ REFUSE here). A gate that has nothing to judge is an honest "not
@@ -66,7 +78,7 @@ decide(){
 # ---- --decide: exercise the pure function (used by the test) --------------------------------------
 if [ "${1:-}" = "--decide" ]; then decide "${2:-}" "${3:-}" "${4:-}"; exit 0; fi
 
-# ---- real path: gather the three gates from GitHub, then decide -----------------------------------
+# ---- real path: gather the two gates from GitHub, then decide -----------------------------------
 COMMIT=0; [ "${1:-}" = "--commit" ] && { COMMIT=1; shift; }
 REPO="${1:?usage: auto-merge.sh [--commit] <repo> <pr>}"; PR="${2:?pr required}"
 SLUG="oso-gato/$REPO"
@@ -167,11 +179,7 @@ hdr_verdict(){ # $1=login $2=full-sha-anchor $3=line-anchored verdict-ERE → ne
     | grep -oE "$3" | tail -1
 }
 
-# Gate 1 — TIER from the changed files (fail-closed: no files → treat as A/HUMAN, never auto)
-tier="$(gh pr view "$PR" --repo "$SLUG" --json files -q '.files[].path' 2>/dev/null \
-        | "$HERE/tier-classify.sh" --stdin 2>/dev/null)"; tier="${tier:-A}"
-
-# Gate 2 — HOST LIVE-GATE verdict: newest verdict comment AUTHORED BY THE HOST BOT ONLY. A comment
+# Gate 1 — HOST LIVE-GATE verdict: newest verdict comment AUTHORED BY THE HOST BOT ONLY. A comment
 # from anyone else (incl. the PR author) is ignored. No trust anchor ⇒ gate=NONE ⇒ REFUSE.
 gate="NONE"
 if [ -n "$LG_HOST_LOGIN" ] && [ "$LG_HOST_LOGIN" != "$pr_author" ]; then
@@ -206,7 +214,7 @@ else
   echo "[auto-merge] live-gate trust anchor unset or == PR author — gate unverifiable (fail-closed)"
 fi
 
-# Gate 3 — FITNESS verdict: a comment AUTHORED BY THE FITNESS-REVIEW BOT (NOT a self-appliable label).
+# Gate 2 — FITNESS verdict: a comment AUTHORED BY THE FITNESS-REVIEW BOT (NOT a self-appliable label).
 # `Fitness review: VERDICT PASS|RETURN|ESCALATE`. A self-authored verdict (author == PR author) is
 # invalid. No trust anchor ⇒ fit=NONE ⇒ REFUSE. (This is why the fitness harness POSTS such a comment.)
 fit="NONE"
@@ -217,16 +225,20 @@ else
   echo "[auto-merge] fitness trust anchor unset or == PR author — fitness unverifiable (fail-closed)"
 fi
 
-decision="$(decide "$tier" "$gate" "$fit")"
-echo "[auto-merge] $SLUG#$PR — tier=$tier live-gate=$gate fitness=$fit ⇒ $decision"
+# The empty first argument is the retired tier (STEP 5 of #274) — decide() ignores it, and the report
+# line below drops the field rather than printing a constant `tier=n/a`: a field that can only ever
+# hold one value is noise a reader must learn to skip, and "n/a" would invite the next reader to ask
+# what makes it applicable — re-teaching the concept this change retires.
+decision="$(decide "" "$gate" "$fit")"
+echo "[auto-merge] $SLUG#$PR — live-gate=$gate fitness=$fit ⇒ $decision"
 
 case "$decision" in
   MERGE)
     if [ "$COMMIT" = 1 ]; then
       if gh pr merge "$PR" --repo "$SLUG" --squash --delete-branch --match-head-commit "$head_sha"; then
-        echo "[auto-merge] MERGED $SLUG#$PR (Tier $tier, GREEN, fitness PASS)"
+        echo "[auto-merge] MERGED $SLUG#$PR (host GREEN, fitness PASS)"
       else
-        # ALL THREE GATES PASSED but the merge COMMAND itself failed. This is NOT a gate refusal —
+        # BOTH GATES PASSED but the merge COMMAND itself failed. This is NOT a gate refusal —
         # do not let the caller cry "trust boundary broke" at a benign serialized merge-CONFLICT (which
         # just needs a REBASE onto main). Classify by the PR's mergeability so the exit code is honest:
         #   rc 2 = MERGE_CONFLICT (conflicting / behind main — rebase needed)  ·  rc 3 = other command

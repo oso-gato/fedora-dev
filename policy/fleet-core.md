@@ -221,10 +221,12 @@ finished", host-EXECUTED work you can drive through the ticket bus.
 
 **TIER ROUTING — who merges a PASS** (ZERO-GATE, Arthur's decision #130 2026-07-10, RE-CONFIRMED by
 his adjudication of the 2026-07-11 fitness escalation: control-plane parity ports included — "zero-click,
-fix the law". Authoritative classifier = `bin/tier-classify.sh`, now REPORTING-ONLY):
+fix the law". There is no longer a classifier: STEP 5 of #274 retired `bin/tier-classify.sh`):
 - Merge authority = the `fedora-dev` poller ONLY (`fedora-bootstrap` is propose-only).
-- EVERY tier — control-plane class included — auto-merges on host-GREEN + independent-fitness-PASS via
-  the poller. There is NO Tier-A human click; tier labels the digest/report, it does not route.
+- EVERY change — control-plane class included — auto-merges on host-GREEN + independent-fitness-PASS
+  via the poller. There is NO Tier-A human click, and since STEP 5 of #274 no tier is computed at all:
+  it did not route, and it no longer labels the digest/report either. The A/B/C vocabulary survives
+  only in this section's name and in the historical record of the decision that retired it.
 - **THE ONE EXCEPTION — THE CONFIRMED SPEC (R1).** A PR that modifies `00-OBJECTIVES.md`,
   `00-REQUIREMENTS.md`, `00-BUILDPRINCIPLE.md` or `00-GOVERNANCE.md` is **MAINTAINER-MERGE-ONLY**: the
   loop MUST NOT merge it. Amending the confirmed spec is a NEW maintainer confirmation (R1), never an
