@@ -451,6 +451,32 @@ tick_due(){
 # tick_ran <name> — stamp a tick as having actually run (the clock leg measures from here).
 tick_ran(){ date -u +%s > "$STATE/tick-$1.at" 2>/dev/null || true; }
 
+# unenrolled_action <author> <dev-login> <draft:true|false> <surfaced:0|1> → ENROLL | SURFACE | SKIP (pure)
+# What to do with an UNLABELLED PR the host gate has never seen. The gate discovers work by the
+# `live-validate` label alone, so an unlabelled PR is invisible to it forever.
+#   OURS, ready      → ENROLL  (label it; the existing #278 self-heal)
+#   OURS, draft      → SKIP    (dev-author opens draft → ready → label; a draft is mid-authoring)
+#   NOT ours, unseen → SURFACE (say so, ONCE)
+#   NOT ours, seen   → SKIP    (already said it; never nag)
+# NOT-OURS IS NOT ENROLLED, DELIBERATELY. Enrolment ends in an AUTONOMOUS MERGE — nothing downstream of
+# the label checks the author (DEV_LOGIN appears exactly twice in this file and nowhere in auto-merge.sh
+# or fitness-review.sh). So enrolling a maintainer's PR would merge his work for him, on his behalf,
+# without being asked. That is not this loop's call to make. But SILENCE is not the alternative: the
+# maintainer has three PRs open (fedora-desktop#97 and #100 since 2026-07-03, noir-strix-halo-fcos#1
+# since 2026-07-11) which this sweep evaluated 106,536 times and skipped every single time, with no
+# comment, no log line, and no surface. The comment two lines below the old `continue` said "quiet is
+# precisely the defect" — and then shipped the quiet path for the one person the loop exists to serve.
+unenrolled_action(){
+  local author="${1:-}" dev="${2:-}" draft="${3:-}" surfaced="${4:-0}" a
+  a="${author#app/}"; a="${a%\[bot\]}"
+  [ -n "$a" ] || { echo SKIP; return; }                 # unreadable author ⇒ never act on a guess
+  if [ "$a" = "$dev" ]; then
+    [ "$draft" = false ] && echo ENROLL || echo SKIP
+    return
+  fi
+  [ "$surfaced" = 1 ] && echo SKIP || echo SURFACE
+}
+
 refresh_due(){
   local sweeps="${1:-0}" every="${2:-0}" elapsed="${3:--1}" max="${4:-0}"
   case "$sweeps$every$elapsed$max" in *[!0-9-]*) echo WAIT; return;; esac
@@ -716,6 +742,22 @@ if [ "${1:-}" = "--selftest" ]; then
   rd "sweep leg disabled (0)"        99 0  60   900 WAIT
   rd "both disabled → never"         99 0  99999 0  WAIT
   rd "garbage input → wait"          x  30 60   900 WAIT
+  # unenrolled_action — what happens to a PR the host gate has never seen. The maintainer's three open
+  # PRs were swept past 106,536 times in total silence because the only rule here was "not mine ⇒ continue".
+  ua(){ local got; got="$(unenrolled_action "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — unenrolled_action($2,$3,$4,$5)=$got want $6"; fail=1; }; }
+  ua "ours + ready → enroll"        oso-gato-nox-claudebox oso-gato-nox-claudebox false 0 ENROLL
+  ua "gh app/ prefix normalised"    app/oso-gato-nox-claudebox oso-gato-nox-claudebox false 0 ENROLL
+  ua "gh [bot] suffix normalised"   'oso-gato-nox-claudebox[bot]' oso-gato-nox-claudebox false 0 ENROLL
+  ua "ours + draft → skip"          oso-gato-nox-claudebox oso-gato-nox-claudebox true 0 SKIP
+  # THE MEASURED CASE: a maintainer PR, unlabelled, never spoken about.
+  ua "maintainer PR → SURFACE"      oso-gato oso-gato-nox-claudebox false 0 SURFACE
+  ua "…but only once"               oso-gato oso-gato-nox-claudebox false 1 SKIP
+  ua "maintainer draft → surface"   oso-gato oso-gato-nox-claudebox true 0 SURFACE
+  ua "third party → surface"        some-contributor oso-gato-nox-claudebox false 0 SURFACE
+  # NEVER auto-enrol a PR we did not write: enrolment ends in an autonomous merge and nothing downstream
+  # of the label checks the author, so this row is the guard against merging someone else's work.
+  ua "maintainer is NEVER enrolled" oso-gato oso-gato-nox-claudebox false 0 SURFACE
+  ua "unreadable author → skip"     '' oso-gato-nox-claudebox false 0 SKIP
   # tick_verdict — the ACTUATOR ticks. Their counters are module-level, so a self-refresh relaunch resets
   # them; with #300's 15-min reload and a ~60s sweep, a reload beat every 30-sweep tick and the
   # reconciler / host-refresh / ship actuator could never fire while main was advancing.
@@ -1838,10 +1880,32 @@ sweep_repo(){
             # reason): gh renders an App author as `app/<login>`, and some paths append `[bot]`. Every PR
             # this self-heal exists for is App-authored, so a raw `=` against DEV_LOGIN would match NONE
             # of them — the feature would ship green, dead, and silent, which is the #278 defect itself.
-            local pauthor="${author#app/}"; pauthor="${pauthor%\[bot\]}"
-            [ "$pauthor" = "$DEV_LOGIN" ] || continue
-            [ "$draft" = false ] || continue
-            enroll_pr "$pr" "$ref" "$sha" || true
+            # REPO-QUALIFIED marker: $STATE is shared across a 13-repo sweep, so a bare `<pr>` collides
+            # (fedora-desktop#100 and any other repo's #100 are the same file). The older markers around
+            # it have that bug; this one does not inherit it.
+            local seenm="$STATE/unenrolled-seen-${POLLER_REPO}-${pr}.done" seen=0
+            [ -e "$seenm" ] && seen=1
+            case "$(unenrolled_action "$author" "$DEV_LOGIN" "$draft" "$seen")" in
+              ENROLL) enroll_pr "$pr" "$ref" "$sha" || true ;;
+              SURFACE)
+                # Say it ONCE, where he will actually see it — not in a log he does not read. Marker is
+                # written even if the comment fails: a surface that cannot post must not become a retry
+                # loop that comments N times when the API recovers.
+                gh pr comment "$pr" --repo "$SLUG" --body "**This PR is not enrolled in the autonomous loop, and nothing has been looking at it.**
+
+The host live-gate discovers work by the \`live-validate\` label alone, and this PR does not carry it. The loop auto-labels only the PRs it authored itself, so yours has been swept past on every pass since it was opened — no gate, no review, no comment. That silence was the bug, not a decision about your change.
+
+**It is deliberately not auto-enrolled.** Enrolment ends in an autonomous merge — nothing downstream of the label checks who wrote the PR — so enrolling this would merge your work for you without being asked. That is your call, not the loop's.
+
+**To hand it to the loop:** add the \`live-validate\` label. It will then be built and probed on the host, independently reviewed, and merged if both gates pass — the same path the loop's own changes take.
+
+**To keep it yours:** do nothing. This is the only comment that will be posted about it." >/dev/null 2>&1 \
+                  && log "$SLUG#$pr: not loop-authored and unenrolled — SURFACED once (add \`live-validate\` to hand it to the loop)" \
+                  || log "$SLUG#$pr: not loop-authored and unenrolled — surface comment FAILED to post (marker written; will not retry)"
+                : > "$seenm"
+                ;;
+              *) : ;;   # ours-but-draft (mid-authoring), already surfaced, or an unreadable author
+            esac
             ;;
         esac
         ;;
