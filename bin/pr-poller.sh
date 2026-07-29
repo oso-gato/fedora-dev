@@ -412,6 +412,45 @@ infra_down_note(){ # <pr> <sha>
 # review or a fixer runs synchronously inside it — so a sweep-count is not a clock. UNREADABLE/negative
 # elapsed (a clock the caller could not read, passed as -1) falls back to the sweep leg alone rather than
 # firing: a refresh is an EXIT-and-relaunch, so a bad clock must never turn it into a restart loop.
+# tick_verdict <ticks> <every> <elapsed-s> <interval-s> → DUE | WAIT (pure).
+# The actuator ticks (reconcile / host-refresh / ship) counted SWEEPS ONLY, and their counters are
+# module-level — so a self-refresh RELAUNCH reset every one of them to zero. Since #300 made the refresh
+# fire on a 15-minute clock, and a sweep measures ~60s (30 sweeps ≈ 30 min), a reload beat every tick:
+# while `main` was advancing, the reconciler, the host-refresh and the ship actuator could NEVER FIRE AT
+# ALL. Measured 2026-07-29: relaunches at 11:07:05 and 11:22:34 (15m29s apart), 18 sweeps at 59.7s each.
+# The fix for staleness had created starvation — and starved them precisely when the loop was busiest
+# merging, i.e. exactly when there was most to reconcile.
+# So a tick is due on EITHER leg: N sweeps in THIS process, or the wall-clock interval since it last
+# actually ran — the latter read from a durable stamp that SURVIVES the relaunch. Unreadable/absent
+# stamp or clock ⇒ fall back to the sweep leg alone (never fire on missing evidence; an actuator that
+# fires on a bad clock is worse than one that waits).
+tick_verdict(){
+  local ticks="${1:-0}" every="${2:-0}" elapsed="${3:--1}" interval="${4:-0}"
+  case "$ticks$every$elapsed$interval" in *[!0-9-]*) echo WAIT; return;; esac
+  [ "$every" -gt 0 ] 2>/dev/null || { echo WAIT; return; }
+  [ "$ticks" -ge "$every" ] && { echo DUE; return; }
+  [ "$interval" -gt 0 ] 2>/dev/null && [ "$elapsed" -ge 0 ] 2>/dev/null && [ "$elapsed" -ge "$interval" ] \
+    && { echo DUE; return; }
+  echo WAIT
+}
+
+# tick_due <name> <ticks> <every> → rc 0 when the tick should run. Wraps tick_verdict with the durable
+# stamp ($STATE/tick-<name>.at) that makes the wall-clock leg survive a supervised relaunch.
+tick_due(){
+  local name="$1" ticks="$2" every="$3" f now last el
+  f="$STATE/tick-$name.at"
+  now="$(date -u +%s 2>/dev/null)"; case "$now" in ''|*[!0-9]*) now="";; esac
+  last="$(cat "$f" 2>/dev/null)"; case "$last" in ''|*[!0-9]*) last="";; esac
+  # First sight of this tick: stamp NOW so the clock leg measures from here, not from the epoch (which
+  # would make every tick due immediately on a fresh box and stampede the actuators at boot).
+  [ -z "$last" ] && [ -n "$now" ] && { printf '%s\n' "$now" > "$f" 2>/dev/null || true; last="$now"; }
+  if [ -n "$now" ] && [ -n "$last" ]; then el=$(( now - last )); else el=-1; fi
+  [ "$(tick_verdict "$ticks" "$every" "$el" "$(( every * POLL_INTERVAL ))")" = DUE ]
+}
+
+# tick_ran <name> — stamp a tick as having actually run (the clock leg measures from here).
+tick_ran(){ date -u +%s > "$STATE/tick-$1.at" 2>/dev/null || true; }
+
 refresh_due(){
   local sweeps="${1:-0}" every="${2:-0}" elapsed="${3:--1}" max="${4:-0}"
   case "$sweeps$every$elapsed$max" in *[!0-9-]*) echo WAIT; return;; esac
@@ -677,6 +716,23 @@ if [ "${1:-}" = "--selftest" ]; then
   rd "sweep leg disabled (0)"        99 0  60   900 WAIT
   rd "both disabled → never"         99 0  99999 0  WAIT
   rd "garbage input → wait"          x  30 60   900 WAIT
+  # tick_verdict — the ACTUATOR ticks. Their counters are module-level, so a self-refresh relaunch resets
+  # them; with #300's 15-min reload and a ~60s sweep, a reload beat every 30-sweep tick and the
+  # reconciler / host-refresh / ship actuator could never fire while main was advancing.
+  tv(){ local got; got="$(tick_verdict "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — tick_verdict($2,$3,$4,$5)=$got want $6"; fail=1; }; }
+  tv "under both legs → wait"        5  30 60   900 WAIT
+  tv "sweep leg fires"               30 30 0    900 DUE
+  # THE MEASURED STARVATION (2026-07-29): relaunches 15m29s apart, 18 sweeps at 59.7s. The counter was
+  # reset long before 30, but 1075s of wall-clock had passed since the tick last actually RAN.
+  tv "reset counter, clock fires"    18 30 1075 900 DUE
+  tv "clock leg exactly at interval" 1  30 900  900 DUE
+  tv "clock leg one short"           1  30 899  900 WAIT
+  # Fail direction: no durable stamp and no clock ⇒ sweep leg alone. An actuator that fires on missing
+  # evidence is worse than one that waits — it acts on a cadence nothing established.
+  tv "unreadable clock → sweep only" 5  30 -1   900 WAIT
+  tv "unreadable clock, sweep due"   30 30 -1   900 DUE
+  tv "disabled tick never fires"     99 0  99999 900 WAIT
+  tv "garbage → wait"                x  30 60   900 WAIT
   # #173 — the lock-liveness adjudication. ONLY a positively-confirmed live, same-generation holder
   # defers a start; every doubt resolves toward STARTING (a silently dead poller is unrecoverable).
   lk(){ local got; got="$(lock_verdict "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — lock_verdict('$2','$3','$4','$5')=$got want $6"; fail=1; }; }
@@ -1473,8 +1529,8 @@ retire_superseded(){
 host_refresh_tick(){
   [ "${HOST_REFRESH_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
   HOST_REFRESH_TICKS=$((HOST_REFRESH_TICKS+1))
-  [ "$HOST_REFRESH_TICKS" -ge "$HOST_REFRESH_EVERY" ] || return 0
-  HOST_REFRESH_TICKS=0
+  tick_due host-refresh "$HOST_REFRESH_TICKS" "$HOST_REFRESH_EVERY" || return 0
+  HOST_REFRESH_TICKS=0; tick_ran host-refresh
   if [ "${POLLER_HALTED:-0}" = 1 ]; then
     log "host-refresh: R9 HALT — scan skipped this tick (no ticket filed, no comment posted; resumes when the halt clears)"
     return 0
@@ -1491,8 +1547,8 @@ host_refresh_tick(){
 reconcile_tick(){
   [ "${RECONCILE_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
   RECONCILE_TICKS=$((RECONCILE_TICKS+1))
-  [ "$RECONCILE_TICKS" -ge "$RECONCILE_EVERY" ] || return 0
-  RECONCILE_TICKS=0
+  tick_due reconcile "$RECONCILE_TICKS" "$RECONCILE_EVERY" || return 0
+  RECONCILE_TICKS=0; tick_ran reconcile
   if [ "${POLLER_HALTED:-0}" = 1 ]; then
     log "reconcile: R9 HALT — scan skipped this tick (no issue closed; resumes when the halt clears)"
     return 0
@@ -1512,8 +1568,8 @@ reconcile_tick(){
 ship_actuator_tick(){
   [ "${SHIP_ACTUATOR_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
   SHIP_ACTUATOR_TICKS=$((SHIP_ACTUATOR_TICKS+1))
-  [ "$SHIP_ACTUATOR_TICKS" -ge "$SHIP_ACTUATOR_EVERY" ] || return 0
-  SHIP_ACTUATOR_TICKS=0
+  tick_due ship "$SHIP_ACTUATOR_TICKS" "$SHIP_ACTUATOR_EVERY" || return 0
+  SHIP_ACTUATOR_TICKS=0; tick_ran ship
   if [ "${POLLER_HALTED:-0}" = 1 ]; then
     log "ship-actuator: R9 HALT — skipped this tick (no gate run, no ship announced; resumes when the halt clears)"
     return 0
