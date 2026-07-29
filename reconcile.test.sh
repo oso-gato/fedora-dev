@@ -52,7 +52,14 @@ case "$sub" in
     esac ;;
   # issue_facts: state \t prior-close \t labels. The ANCHOR moved from the PR to the ISSUE, so the
   # prior-close flag is now a property of the issue being closed, not of the PR that closed it.
-  "issue view") printf '%s\t%s\t%s\n' "${ISSUE_STATE:-OPEN}" "${ANCHOR:-0}" "${ISSUE_LABELS-backlog}";;
+  # issue_facts passes the PR via `--arg pr N`, and `prior` is scoped to THAT PR. $ANCHOR_PR names the
+  # PR an existing anchor was written by; the anchor answers 1 only for that PR, so a LATER PR sees 0.
+  "issue view")
+    _p=1
+    if [ -n "${ANCHOR_PR:-}" ]; then
+      case "$*" in *"--arg pr $ANCHOR_PR"*) _p=1;; *) _p=0;; esac
+    else _p="${ANCHOR:-0}"; fi
+    printf '%s\t%s\t%s\n' "${ISSUE_STATE:-OPEN}" "$_p" "${ISSUE_LABELS-backlog}";;
   # `-` (not `:-`): an explicitly EMPTY PUB is "no run for this commit", which is what publish_applicable_p
   # then has to disambiguate. `:-` would fold that scenario back into a successful run.
   "run list")   echo "${PUB-success}";;
@@ -254,6 +261,17 @@ echo "== the per-ref anchor: an ISSUE already stamped is skipped, not re-closed 
 run "$SCRIPT" REFS='400 401' HOST_GREEN=1 PUB=success FILES=bin/x.sh ANCESTOR=1 ANCHOR=1
 { [ "$(ncloses)" = 0 ]; } && ok "prior per-issue anchor ⇒ no re-close (reopened issues stay open)" \
   || no "re-closed an anchored issue: $(tr '\n' '|' <"$CLOSED")"
+
+echo "== A REOPENED TICKET IS CLOSABLE AGAIN BY A LATER PR (the anchor is scoped to its own PR) =="
+# `prior` used to mean "ANY reconcile close-comment exists", so an issue a human reopened could never be
+# closed by anything ever again — and an open backlog ticket is drivable work, so one reopen froze the
+# objective permanently. The anchor now names the PR that wrote it.
+run "$SCRIPT" REFS='400' HOST_GREEN=1 PUB=success FILES=bin/x.sh ANCESTOR=1 ANCHOR_PR=999
+{ closed 400; } && ok "an anchor from a DIFFERENT PR does not block this one" \
+  || no "later-PR close" "closes=$(ncloses) — a reopened ticket stays stuck"
+run "$SCRIPT" REFS='400' HOST_GREEN=1 PUB=success FILES=bin/x.sh ANCESTOR=1 ANCHOR_PR=500
+{ [ "$(ncloses)" = 0 ]; } && ok "this PR's OWN anchor still dedups (no double close)" \
+  || no "self-dedup" "re-closed on its own anchor: $(tr '\n' '|' <"$CLOSED")"
 
 echo "== MUTATION RUN IN-SUITE: restore the first-match-only parser ⇒ only ref 1 closes =="
 MUT1="$ROOT/reconcile-mut1.sh"

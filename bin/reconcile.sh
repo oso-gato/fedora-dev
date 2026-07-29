@@ -414,10 +414,19 @@ host_green_p(){
 # lives on the ISSUE — the object the decision is about — not on the PR, which cannot say which of N refs
 # it attests to. Still no local state (the header's invariant): every input stays GitHub-derived. Labels
 # come LAST so a comma inside a label name can only ever corrupt the field that already tolerates commas.
+# issue_facts <slug> <issue#> <pr#>
+# `prior` is scoped to THIS PR: 1 iff a `reconcile → closed:` comment on the issue names PR #<pr>.
+# NOT "any prior close-comment exists". An issue that is OPEN and carries an anchor is one a human
+# REOPENED — and refusing on ANY anchor meant that ticket could never be closed again by anything,
+# including a LATER PR that genuinely delivers it. Since an open backlog ticket is drivable work, one
+# reopen froze the whole objective permanently. Scoped this way the two cases separate cleanly:
+#   * same PR re-scanned          → prior=1 → skip (the dedup this exists for)
+#   * reopened, no new work       → prior=1 → skip (the reopen is respected, not overridden)
+#   * a NEW PR delivers it        → prior=0 → closable again on that PR's own proof
 issue_facts(){
   gh issue view "$2" --repo "$1" --json state,labels,comments \
-    -q '[.state,
-         (if ([.comments[]?|select(.body|contains("reconcile → closed:"))]|length) > 0 then "1" else "0" end),
+    -q --arg pr "$3" '[.state,
+         (if ([.comments[]?|select(.body|contains("reconcile → closed:") and contains("PR #\($pr) merged"))]|length) > 0 then "1" else "0" end),
          ([.labels[]?.name]|join(","))] | @tsv' 2>/dev/null
 }
 
@@ -481,7 +490,7 @@ scan_repo(){ # <repo bare name>
     # CLOSED, and ref_gate independently answers SKIP:already-CLOSED for those.
     todo=""
     for ref in $refs; do
-      IFS=$'\t' read -r st prior labels <<<"$(issue_facts "$slug" "$ref")"
+      IFS=$'\t' read -r st prior labels <<<"$(issue_facts "$slug" "$ref" "$pr")"
       gate="$(ref_gate "$st" "${prior:-0}" "$labels")"
       case "$gate" in
         TAKE) todo="$todo $ref";;

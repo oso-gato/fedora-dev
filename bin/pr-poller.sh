@@ -1208,7 +1208,10 @@ surface(){ # <pr> <sha> <kind> <message>
 SOR_ROUTE=""
 surface_or_repair(){
   local pr="$1" ref="$2" sha="$3" kind="$4" reason="$5"
-  local budget="$STATE/repair-${pr}-${kind}.n" att=0
+  # REPO-QUALIFIED. $STATE is ONE directory shared across a 13-repo sweep, so a bare `<pr>` makes
+  # fedora-desktop#100 and any other repo's #100 the SAME FILE — one repo's budget, fix-signature,
+  # enrolment or rebase counter silently answering for another's. Every marker below carries the repo.
+  local budget="$STATE/repair-${POLLER_REPO}-${pr}-${kind}.n" att=0
   [ -f "$budget" ] && att="$(cat "$budget" 2>/dev/null || echo 0)"
   case "$att" in ''|*[!0-9]*) att=0 ;; esac
   local route; route="$(anomaly_route "$kind" "$att" "$POLLER_REPAIR_MAX")"
@@ -1278,7 +1281,7 @@ surface_or_repair(){
 # correctly, because the missing capability is a credential fact no code change repairs.
 enroll_pr(){ # <pr> <ref> <sha> — rc 0 = enrolled (or already handled); rc 1 = could not
   local pr="$1" ref="$2" sha="$3"
-  local mark="$STATE/enrolled-${pr}.done" budget="$STATE/enroll-${pr}.n" n=0
+  local mark="$STATE/enrolled-${POLLER_REPO}-${pr}.done" budget="$STATE/enroll-${POLLER_REPO}-${pr}.n" n=0
   [ -f "$mark" ] && return 0
   if gh pr edit "$pr" --repo "$SLUG" --add-label "$ENROLL_LABEL" >/dev/null 2>&1 \
      || { gh label create "$ENROLL_LABEL" --repo "$SLUG" --color 1d76db \
@@ -1365,10 +1368,10 @@ run_fixer(){ # <pr> <headref> <sha> <cause:HOST|FITNESS> <reason>
   # Signature spans BOTH cause and reason: a host RED and a fitness RETURN on the same head are
   # DIFFERENT failures and must not collide onto one no-progress signature.
   local sig; sig="$(printf '%s%s' "$cause" "$reason" | tr -cd '[:alnum:]' | tail -c 40)"
-  local sigfile="$STATE/fixsig-${pr}.last" prev=""; [ -f "$sigfile" ] && prev="$(cat "$sigfile")"
+  local sigfile="$STATE/fixsig-${POLLER_REPO}-${pr}.last" prev=""; [ -f "$sigfile" ] && prev="$(cat "$sigfile")"
   # PROGRESS-BASED STOP (not a count cap): if we already ran a fixer for THIS exact failure signature
   # and the head has NOT advanced past what we fixed, we are not making progress → surface, don't churn.
-  local lastfixed="$STATE/fixed-${pr}.sha"; local lf=""; [ -f "$lastfixed" ] && lf="$(cat "$lastfixed")"
+  local lastfixed="$STATE/fixed-${POLLER_REPO}-${pr}.sha"; local lf=""; [ -f "$lastfixed" ] && lf="$(cat "$lastfixed")"
   if [ "$sig" = "$prev" ] && [ "$sha" = "$lf" ]; then
     surface "$pr" "$sha" "blocked" "the same failure persists after a fix attempt (no progress) — a human decision is needed. Failing gate: ${cause}. Detail: ${reason:0:400}"
     return 0
@@ -2048,7 +2051,7 @@ The host live-gate discovers work by the \`live-validate\` label alone, and this
         LG_HOST_LOGIN="$LG_HOST_LOGIN" FITNESS_LOGIN="$FITNESS_LOGIN" "$HERE/auto-merge.sh" $flag "$POLLER_REPO" "$pr" 2>&1 | tee -a "$LOG"
         local amrc=${PIPESTATUS[0]}
         case "$amrc" in
-          0) : > "$done"; rm -f "$STATE/rebase-${pr}.n" ;;   # merged → clear the auto-rebase counter
+          0) : > "$done"; rm -f "$STATE/rebase-${POLLER_REPO}-${pr}.n" ;;   # merged → clear the auto-rebase counter
           4) # TRINITY / MAINTAINER-MERGE hold (R1): auto-merge refuses to autonomously merge a
              # confirmed-spec change and has assigned + labelled it for the maintainer. Park QUIETLY —
              # this is an EXPECTED, correct hold, NOT the trust-boundary 'refused' alarm (the `*)` arm).
@@ -2059,7 +2062,7 @@ The host live-gate discovers work by the \`live-validate\` label alone, and this
               # unlike the fixer): CLEAN behind → succeeds, minting a NEW head that re-gates (PROGRESS,
               # not parked); a genuine CONFLICT → fails → surface + park (a human resolves). Bounded by
               # rebase_due so a head that keeps falling behind can't churn forever.
-              local rn="$STATE/rebase-${pr}.n" rc_n=0; [ -f "$rn" ] && read -r rc_n < "$rn"
+              local rn="$STATE/rebase-${POLLER_REPO}-${pr}.n" rc_n=0; [ -f "$rn" ] && read -r rc_n < "$rn"
               case "$rc_n" in ''|*[!0-9]*) rc_n=0;; esac
               if [ "$(rebase_due "$rc_n" "$POLLER_REBASE_MAX")" = TRY ] \
                  && gh pr update-branch "$pr" --repo "$POLLER_REPO" >/dev/null 2>&1; then

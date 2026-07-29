@@ -98,7 +98,18 @@ one_cycle(){
     [ -n "$repo" ] || continue
     n=$((n+1))
     log "authoring pass → $repo"
-    "$DEV_LOOP" "$repo" </dev/null 3<&- || log "dev-loop pass for $repo failed (continuing to the next repo/cycle)"
+    # CAPTURE WHAT IT DECIDED, not merely that it ran. The child's stdout/stderr were inherited from
+    # this service, and since the supervisor entered via `distrobox enter` (rather than the poller's
+    # `setsid … >>LOG 2>&1`) they went nowhere. MEASURED 2026-07-29: service.log lines 4291-29496 —
+    # 25,206 lines over 10 days — are ONLY `authoring pass → <repo>` heartbeats. Not one `skipped`,
+    # `authored`, or `BLOCKED`. The authoring half passed over the maintainer's open tickets every ~5.5
+    # minutes for ten days and NOBODY, human or machine, could see what it concluded about any of them.
+    # A loop that cannot say what it decided cannot be debugged, and its silence reads as inactivity.
+    if "$DEV_LOOP" "$repo" </dev/null 3<&- >>"$LOG" 2>&1; then
+      log "authoring pass → $repo: done"
+    else
+      log "dev-loop pass for $repo failed (continuing to the next repo/cycle)"
+    fi
   done 3<<EOF
 $(scoped_repos)
 EOF
