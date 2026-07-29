@@ -1477,8 +1477,16 @@ ship_actuator_tick(){
     log "ship-actuator: R9 HALT — skipped this tick (no gate run, no ship announced; resumes when the halt clears)"
     return 0
   fi
-  "$SHIP_ACTUATOR" "$POLLER_REPO" 2>&1 | tee -a "$LOG" >&2 \
-    || log "ship-actuator: tick failed (continuing — the objective simply stays open for the next tick)"
+  # EVERY scoped repo gets a tick — not just whichever one $POLLER_REPO happens to be holding. The sweep
+  # loop above reassigns POLLER_REPO per repo and leaves it holding the LAST repo swept, so the actuator
+  # only ever considered that one arbitrary repo. e2e-beta received its ticks purely because it sorted
+  # last; a repo ordering change would have silently stopped its objective from ever being shipped, and
+  # no other repo's objective was ever looked at at all.
+  for _sr in $POLLER_REPOS; do
+    "$REPO_SCOPE" check "$_sr" 2>/dev/null || continue     # R16: a tick is an action
+    "$SHIP_ACTUATOR" "$_sr" 2>&1 | tee -a "$LOG" >&2 \
+      || log "ship-actuator: $_sr tick failed (continuing — that objective stays open for the next tick)"
+  done
   return 0
 }
 
