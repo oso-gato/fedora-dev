@@ -11,7 +11,7 @@
 #
 # CORRECTED 2026-07-29 (STEP 4 of #274). This header used to claim a THIRD gate: "TIER = B or C ...
 # Tier A → HUMAN (never auto)". **That was false and had been for weeks.** The merge decision
-# (merge_decision, below) reads only `gate` and `fit`; it never reads the tier at all, and the
+# (`decide()`, below) reads only `gate` and `fit`; it never reads the tier at all, and the
 # ZERO-GATE decision deliberately removed tier routing — every tier auto-merges on two greens.
 # Anyone auditing this merge boundary from its header would have concluded a human gate existed
 # where none does. The BEHAVIOUR is correct and intended; the CLAIM was not, so the claim is deleted.
@@ -72,12 +72,15 @@ REPO="${1:?usage: auto-merge.sh [--commit] <repo> <pr>}"; PR="${2:?pr required}"
 SLUG="oso-gato/$REPO"
 
 # R16 OPERATING SCOPE (#167): the merge boundary's executor acts ONLY on the maintainer-confirmed
-# repo set (bin/repo-scope.sh → policy/scope.conf). Out of scope ⇒ REFUSE before any gate is even
+# repo set. CORRECTED 2026-07-29 (STEP 4 of #274): this used to name `policy/scope.conf` as the
+# authority. That file does not exist — it was deleted in the 2026-07-21 R16 rebuild; the authority
+# is the App INSTALLATION, which `bin/repo-scope.sh` enumerates via `gh api /installation/repositories`.
+# Out of scope ⇒ REFUSE before any gate is even
 # read — a merge is the apparatus's most consequential action, and the incident PR (#165) reached
 # exactly this executor. Any non-zero rc from the reader (127 included) is a REFUSE (fail-closed).
 REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
 if ! "$REPO_SCOPE" check "$REPO"; then
-  echo "[auto-merge] R16 REFUSE: repo '$REPO' is outside the maintainer-confirmed operating scope (policy/scope.conf) — no merge (fail-closed)"
+  echo "[auto-merge] R16 REFUSE: repo '$REPO' is outside the maintainer-confirmed operating scope (the App installation, per bin/repo-scope.sh) — no merge (fail-closed)"
   exit 1
 fi
 

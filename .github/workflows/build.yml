@@ -33,9 +33,15 @@ jobs:
   # it -- so this comment named a backstop that not only does not exist but is actively
   # forbidden. The real controls on `main` are: the server-side `require-PR` ruleset,
   # the `Bash(gh pr merge:*)` deny in managed-settings, and the headless poller's two
-  # INDEPENDENT gates (host live-gate + fitness, distinct App identities). `main` is intentionally NOT
-  # branch-protected for this single-operator fleet — the click already gates every
-  # merge. Guardrail changes are kept standalone and flagged in the merge TLDR.
+  # INDEPENDENT gates (host live-gate + fitness, distinct App identities).
+  #
+  # `main` IS server-protected: repository ruleset 18222949 enforces `pull_request` (nothing
+  # direct-pushes `main`; required approvals = 0 — a human APPROVAL is deliberately NOT required,
+  # because the poller's two App gates are the merge safety), plus `non_fast_forward` and
+  # `deletion`. There is NO human click anywhere in the merge path — it was removed on 2026-07-11
+  # (the P0 unshackle). The previous claim here ("intentionally NOT branch-protected … the click
+  # already gates every merge") was false on BOTH counts; it is deleted for the same reason as the
+  # `gate-push.sh` claim above. Guardrail changes are kept standalone and flagged in the merge TLDR.
   # ==========================================================================
   build:
     runs-on: ubuntu-latest
