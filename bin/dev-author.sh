@@ -73,10 +73,41 @@ extract_sentinel(){
     | sed -E 's/^AUTHOR_(DONE|BLOCKED): */\1 /'
 }
 
-# should_author <issue-state> <has-open-pr:0|1> <marker-exists:0|1> <has-backlog-label:0|1>
+# should_author <issue-state> <has-open-pr:0|1> <prior-attempt-live:0|1> <has-backlog-label:0|1>
 #   → prints ACT | SKIP:<why>. Fail-closed: only a genuinely-open, BACKLOG-labelled, not-yet-authored,
 #   no-existing-PR issue is actioned. The backlog-label gate is what makes the author pick up ONLY the
 #   planner's actionable feature tickets (R2) — never an arbitrary open issue.
+#   `marked` is NOT "a marker file exists" — it is "a prior attempt is still LIVE", per attempt_state.
+#
+# attempt_state <marker:0|1> <recorded-pr> <recorded-pr-state> <has-open-pr:0|1> → NONE | LIVE | SPENT
+#   NONE  — never attempted.
+#   LIVE  — attempted, and something from it survives (PR open, or merged) ⇒ do not author again.
+#   SPENT — attempted, and NOTHING survives ⇒ the attempt failed; the ticket is actionable again.
+#
+# WHY THIS EXISTS: the marker was written once and removed by nothing — `grep -rn 'dev-author' bin/*.sh`
+# finds no clearing path anywhere in the tree. It records "a PR was authored for this issue", which is
+# the right guard WHILE that PR lives. But when a PR fails its gates and is closed unmerged, the marker
+# outlives it and `should_author` answers SKIP:already-authored FOREVER. The ticket is then delivered by
+# nothing and re-authorable by nothing, and the only recovery is losing the disk.
+# MEASURED 2026-07-29: e2e-beta #2 and #3 are exactly this — their PRs (#9, #10) sat host-RED for two
+# days, were closed unmerged, and both markers still exist. Neither ticket could ever be attempted again.
+# FAIL-CLOSED TOWARD NOT DUPLICATING: an unreadable recorded state answers LIVE, never SPENT. Authoring
+# twice for one ticket is a worse failure than waiting for the next sweep, so a read we could not make
+# must never be the thing that authorises a second attempt.
+attempt_state(){
+  local marked="${1:-0}" pr="${2:-}" prstate="${3:-}" haspr="${4:-0}"
+  [ "$marked" = 1 ] || { printf 'NONE'; return; }
+  case "$prstate" in
+    MERGED|OPEN) printf 'LIVE'; return;;          # landed, or still in flight
+    CLOSED)      printf 'SPENT'; return;;         # closed WITHOUT merging — the attempt failed
+  esac
+  # No state (legacy marker: written before the PR number was recorded, or the PR is unreadable).
+  # A recorded PR we cannot read ⇒ LIVE. No recorded PR at all ⇒ decide from live GitHub state: if
+  # nothing is open for this issue, nothing survived the attempt, so it is spent.
+  [ -n "$pr" ] && { printf 'LIVE'; return; }
+  [ "$haspr" = 1 ] && printf 'LIVE' || printf 'SPENT'
+}
+
 should_author(){
   local st="$1" haspr="$2" marked="$3" backlog="$4"
   [ "$st" = OPEN ]    || { printf 'SKIP:issue-not-open(%s)' "$st"; return; }
@@ -109,6 +140,23 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "not backlog-labelled → SKIP" "$(should_author OPEN 0 0 0)" "SKIP:not-backlog-labelled"
   ck "already authored → SKIP"    "$(should_author OPEN 0 1 1)" "SKIP:already-authored"
   ck "existing PR → SKIP"         "$(should_author OPEN 1 0 1)" "SKIP:open-pr-exists"
+  echo "== attempt_state — a FAILED attempt must not retire the ticket forever =="
+  # The marker had no clearing path anywhere in bin/. e2e-beta #2 and #3 were retired permanently this
+  # way: their PRs (#9, #10) were closed unmerged and the markers outlived them.
+  ck "never attempted → NONE"      "$(attempt_state 0 '' '' 0)" "NONE"
+  ck "PR still open → LIVE"        "$(attempt_state 1 9 OPEN 1)" "LIVE"
+  ck "PR merged → LIVE"            "$(attempt_state 1 9 MERGED 0)" "LIVE"
+  # THE MEASURED CASE: e2e-beta#2's PR #9 was CLOSED unmerged. The ticket must become actionable again.
+  ck "PR closed unmerged → SPENT"  "$(attempt_state 1 9 CLOSED 0)" "SPENT"
+  # Legacy markers carry no PR number (written empty before this change).
+  ck "legacy, nothing open → SPENT" "$(attempt_state 1 '' '' 0)" "SPENT"
+  ck "legacy, a PR is open → LIVE"  "$(attempt_state 1 '' '' 1)" "LIVE"
+  # FAIL-CLOSED TOWARD NOT DUPLICATING: a recorded PR we cannot read is never grounds for a 2nd attempt.
+  ck "recorded PR unreadable → LIVE" "$(attempt_state 1 9 '' 0)" "LIVE"
+  ck "unknown state → LIVE"          "$(attempt_state 1 9 SOMETHING 0)" "LIVE"
+  echo "== the two compose: SPENT clears the marker, so should_author sees an unmarked ticket =="
+  ck "spent ⇒ authorable again"    "$(should_author OPEN 0 0 1)" "ACT"
+  ck "live ⇒ still skipped"        "$(should_author OPEN 0 1 1)" "SKIP:already-authored"
   echo; echo "dev-author selftest: $p passed, $f failed"
   [ "$f" -eq 0 ]; exit
 fi
@@ -164,7 +212,22 @@ discussion="$(gh issue view "$ISSUE" --repo "$SLUG" --json comments -q '[.commen
 disc_section=""; [ -n "$discussion" ] && disc_section=$'\nDISCUSSION on the issue (comments — INCLUDING any maintainer guidance since a prior attempt; a REPLY is\nwhy this issue was re-offered, so INCORPORATE it rather than repeating a prior approach):\n'"$discussion"$'\n'
 haspr=0
 if gh pr list --repo "$SLUG" --state open --search "$ISSUE in:body" --json number -q '.[].number' 2>/dev/null | grep -q .; then haspr=1; fi
-marked=0; [ -f "$marker" ] && marked=1
+# The marker is only a reason to skip while the attempt it records SURVIVES. It now carries the PR
+# number it was written for; read that PR's state and let attempt_state decide. A SPENT attempt (its PR
+# closed unmerged, or nothing of it left at all) clears the marker so the ticket is actionable again —
+# without this a single failed attempt retired a ticket permanently.
+marked=0; _mpr=""; _mprstate=""
+if [ -f "$marker" ]; then
+  marked=1
+  _mpr="$(tr -dc '0-9' < "$marker" 2>/dev/null)"
+  [ -n "$_mpr" ] && _mprstate="$(gh pr view "$_mpr" --repo "$SLUG" --json state -q .state 2>/dev/null)"
+fi
+_att="$(attempt_state "$marked" "$_mpr" "$_mprstate" "$haspr")"
+if [ "$_att" = SPENT ]; then
+  log "$SLUG#$ISSUE: a prior attempt${_mpr:+ (PR #$_mpr)} left nothing — clearing the spent marker so this ticket can be authored again"
+  rm -f "$marker" 2>/dev/null || true
+  marked=0
+fi
 decision="$(should_author "${state:-UNKNOWN}" "$haspr" "$marked" "${hasbacklog:-0}")"
 case "$decision" in
   ACT) : ;;
@@ -400,6 +463,8 @@ else
 fi
 gh issue comment "$ISSUE" --repo "$SLUG" --body "$ship_body" >/dev/null 2>&1 || log "WARN: could not post shipped comment on #$ISSUE"
 
-: > "$marker"   # idempotent replay guard — this issue is now authored
+# Record WHICH PR this attempt produced. An empty marker cannot be invalidated when that PR dies, which
+# is what retired e2e-beta #2 and #3 permanently.
+printf '%s\n' "${pr_num:-}" > "$marker"   # idempotent replay guard — this issue is now authored
 log "AUTHORED $SLUG#$ISSUE → $pr_url (labelled $AUTHOR_LABEL; the pipeline takes it from here)"
 printf '%s\n' "$pr_url"
