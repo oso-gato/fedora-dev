@@ -161,8 +161,8 @@ case "${1:-}" in
     exit 0 ;;
 
   audit)
-    # DRIFT GUARD: a label literal used in bin/ that this registry does not declare. Mirrors the
-    # doc-dry-audit discipline — the vocabulary has ONE home, and a script inventing its own is caught.
+    # DRIFT GUARD: a label literal used in bin/ that this registry does not declare.
+    # The vocabulary has ONE home, and a script inventing its own is caught here.
     HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
     found="$(grep -rhE -- '--add-label|--label ' "$HERE"/*.sh 2>/dev/null | grep -vE '^[[:space:]]*#' \
              | grep -oE -- '--add-label ([a-zA-Z][a-zA-Z0-9_-]*)|--label "?([a-z][a-z0-9-]{2,30})"?' \
