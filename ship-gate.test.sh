@@ -21,7 +21,11 @@ ck(){ [ "$2" = 1 ] && { pass=$((pass+1)); printf '  ok   %s\n' "$1"; } || { fail
 SHA=0123456789abcdef0123456789abcdef01234567
 MANIFEST_F="$ROOT/manifest.txt"
 printf '00-OBJECTIVES.md\n00-REQUIREMENTS.md\n00-BUILDPRINCIPLE.md\n00-GOVERNANCE.md\nContainerfile\n' > "$MANIFEST_F"
-: > "$ROOT/empty.txt"
+: > "$ROOT/empty.txt"                      # an UNREADABLE tree — no product at all
+# A repo that ships no Trinity docs still HAS files. This is e2e-beta's real shape, and it is what
+# the "no Trinity docs" rows must use: an EMPTY manifest means "no product", a different condition.
+printf '%s\n' .live-gate Containerfile README.md run.sh spin-up.sh e2e-beta.container \
+  bin/status-server bin/status-probe > "$ROOT/no-trinity.txt"
 
 # --- stub gh (the bus): tree → manifest; contents → base64 blob; comments → $GH_COMMENTS_F; POST record.
 # The two `issue list` shapes are distinguished by the fields asked for: `state,url` is the shipped-feature
@@ -113,7 +117,7 @@ echo "== FAIL-CLOSED: an EMPTY confirmed spec REFUSES the review (a gate that ca
 # handed four empty headings and asked to grade conformance against nothing — it could not RETURN for a
 # spec violation, so it would rubber-stamp anything.
 mkreviewer 'SHIP_VERDICT: PASS' 0
-run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/empty.txt"
+run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/no-trinity.txt"
 # Assert the REASON, not just the rc: the pre-fix gate also exited 1 here, but for the unrelated missing
 # -clone precondition. A test that passes against the pre-fix code proves nothing.
 ck "empty spec refuses (rc 1)"       "$([ "$RC" = 1 ] && echo 1)" "rc=$RC — reviewed against an empty spec"
@@ -125,7 +129,7 @@ echo "== a repo with NO Trinity docs sources its spec from the objective issue +
 # This is the e2e-beta shape: the confirmed spec lives on the bus, not in the tree.
 printf '===== OBJECTIVE ISSUE #1: a minimal status-page image =====\nserve 200 on /\n' > "$ROOT/objective.txt"
 mkreviewer 'SHIP_VERDICT: PASS' 0
-run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/empty.txt" \
+run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/no-trinity.txt" \
     SHIPTEST_OBJECTIVE="$ROOT/objective.txt"
 ck "objective-issue spec is accepted" "$([ "$RC" = 0 ] && echo 1)" "rc=$RC"
 ck "the reviewer ran against it"      "$([ -f "$ROOT/reviewer.ran" ] && echo 1)" "reviewer never ran"
@@ -137,7 +141,7 @@ echo "== the gate does NOT fold its own past ship ANNOUNCEMENTS into the confirm
 { printf '===== OBJECTIVE ISSUE #9: SHIPPED: e2e-alpha objective @ aaaaaaa =====\nan earlier ship notice\n'
   printf '===== OBJECTIVE ISSUE #1: a minimal status-page image =====\nserve 200 on /\n'; } > "$ROOT/obj+ann.txt"
 mkreviewer 'SHIP_VERDICT: PASS' 0
-run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/empty.txt" \
+run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/no-trinity.txt" \
     SHIPTEST_OBJECTIVE="$ROOT/obj+ann.txt"
 ck "the real objective still reaches the reviewer" "$(grep -q 'serve 200 on /' "$ROOT/prompt.txt" && echo 1)" "the objective was dropped"
 ck "a past ship announcement does NOT"             "$(grep -q 'an earlier ship notice' "$ROOT/prompt.txt" || echo 1)" "the gate graded the product against its own announcement"
@@ -173,7 +177,7 @@ runmut(){ rm -f "$ROOT/reviewer.ran" "$ROOT/prompt.txt"
 mkreviewer 'SHIP_VERDICT: PASS' 0
 # M1 — drop the self-exclusion filter: the announcement returns to the spec.
 if mutate '/awk .\/\^===== OBJECTIVE ISSUE #\//s/ *| *awk [^)]*//' 'drop the announcement filter'; then
-  runmut SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/empty.txt" \
+  runmut SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/no-trinity.txt" \
          SHIPTEST_OBJECTIVE="$ROOT/obj+ann.txt"
   ck "M1: the announcement is folded back into the spec" \
      "$(grep -q 'an earlier ship notice' "$ROOT/prompt.txt" && echo 1)" "the defect did not reappear — the row may be vacuous"
@@ -189,6 +193,18 @@ if mutate 's/grep -qxF/grep -qF/' 'substring path match'; then
   ck "M3: docs/prerun.sh.md conjures a run.sh section" \
      "$(grep -q '^===== run.sh =====' "$ROOT/prompt.txt" && echo 1)" "the defect did not reappear — the row may be vacuous"
 fi
+
+echo "== FAIL-CLOSED on the PRODUCT, not just the spec: an unreadable tree must REFUSE, never PASS =="
+# The spec side already refused an empty spec. The PRODUCT side did not — and the tree read is
+# `2>/dev/null`, so a failed or rate-limited call yields an EMPTY manifest SILENTLY. The reviewer was
+# then handed a real spec with no product and asked whether the product conforms; it cannot RETURN for a
+# defect in code it was never shown, so it PASSes. Half the gate could rubber-stamp.
+mkreviewer 'SHIP_VERDICT: PASS' 0
+run SHIPGATE_LOGIN=oso-gato-fitness-claudebox SHIPTEST_MANIFEST="$ROOT/empty.txt" SHIPTEST_OBJECTIVE="$ROOT/objective.txt"
+ck "unreadable product refuses (rc 1)" "$([ "$RC" = 1 ] && echo 1)" "rc=$RC — reviewed a product it could not see"
+ck "…and refuses FOR THAT REASON"      "$(printf '%s' "$OUT" | grep -qi 'cannot read the built product' && echo 1)" "died for another reason: $(printf '%s' "$OUT" | tail -1)"
+ck "the model was NOT run"             "$([ ! -f "$ROOT/reviewer.ran" ] && echo 1)" "the model judged an empty product"
+ck "no verdict composed"               "$([ -z "$(line1)" ] && echo 1)" "leaked [$(line1)]"
 
 echo
 echo "ship-gate: $pass passed, $fail failed"
