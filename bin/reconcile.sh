@@ -85,6 +85,51 @@ backlog_ref(){
   printf '%s\n' "$1" | grep -oiE '^Backlog-ticket:[[:space:]]*#[0-9]+' | head -1 | grep -oE '[0-9]+'
 }
 
+# backlog_refs <pr-body> → EVERY ticket the body declares, one per line, in order, deduped.
+# A superseding PR routinely delivers several tickets: e2e-beta#15 shipped the work of #2, #3 AND #6
+# after #9/#10 were closed unmerged — but `backlog_ref`'s `head -1` reads only the first, so #2 and #3
+# were delivered and PERMANENTLY unclaimable. Nothing could ever close them, so `drivable` could never
+# reach 0 and the objective could never ship.
+# GRAMMAR (deliberately strict — a loose match here closes the WRONG issue): a line that STARTS with the
+# trailer, singular or plural, then #N optionally repeated, separated by a comma and/or spaces. The match
+# STOPS at the first thing that is not another #N, so trailing prose cannot drag an unrelated number in:
+#   "Backlog-ticket: #6 and also #99"  → 6      (prose stops it)
+#   "Backlog-ticket: #6 (supersedes #99)" → 6   (paren stops it)
+#   "Backlog-ticket: #6#2"             → 6      (glued is not a list)
+# #0 and leading zeros are refused (no such issue). Every previously-inert form stays inert: indented,
+# quoted, mid-prose, colon-less, and #-less all still yield nothing.
+backlog_refs(){
+  printf '%s\n' "$1" \
+  | grep -oiE '^Backlog-tickets?:[[:space:]]*#[1-9][0-9]*(([[:space:]]*,[[:space:]]*|[[:space:]]+)#[1-9][0-9]*)*' \
+  | grep -oE '#[1-9][0-9]*' \
+  | { seen=''; while IFS= read -r n; do n="${n#\#}"
+        case " $seen " in *" $n "*) continue;; esac      # a repeat is one ticket, not two closes
+        seen="$seen $n"; printf '%s\n' "$n"
+      done; }
+}
+
+# ref_gate <issue-state> <prior-close:0|1> <labels-csv> → TAKE | SKIP:<why> (pure).
+# PER-REF admission. The old whole-PR anchor cannot express "ref 1 done, ref 2 outstanding", so with N
+# refs a single success would strand the rest forever. Each ref is now admitted on its OWN evidence.
+#   * The `backlog` label is REQUIRED. It is the guard $BACKLOG_LABEL always documented but never
+#     enforced, and it matters far more once N refs are in play: issues and PRs share one number space,
+#     and `gh issue view <pr#>` happily resolves a PR and reports state OPEN — so a stray number in a
+#     trailer could otherwise close a PULL REQUEST. A PR carries `live-validate`, never `backlog`.
+#   * A prior close-comment on an issue that is OPEN again means a human REOPENED it. Never re-close.
+#   * An unreadable read yields SKIP — never a close on absent evidence.
+ref_gate(){
+  local state="$1" prior="${2:-0}" labels="${3:-}"
+  [ -n "$state" ] || { echo "SKIP:unreadable"; return; }
+  case "$state" in
+    OPEN) : ;;
+    MERGED) echo "SKIP:already-MERGED"; return;;            # a PR number, not an issue
+    *) echo "SKIP:already-$state"; return;;
+  esac
+  case ",$labels," in *",$BACKLOG_LABEL,"*) : ;; *) echo "SKIP:not-a-backlog-issue"; return;; esac
+  [ "$prior" = 1 ] && { echo "SKIP:reopened-or-half-closed"; return; }
+  echo TAKE
+}
+
 # close_decision <merged:0|1> <host_green:0|1> <publish:SUCCESS|PENDING|FAILED|NONE|NA> <live:LIVE|PENDING|NA>
 #   → CLOSE | WAIT:<why> | SKIP:<why>. Fail-closed: closes ONLY when EVERY APPLICABLE link holds.
 #
@@ -202,6 +247,44 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "case-insensitive"   "$(backlog_ref 'backlog-ticket:  #42')" "42"
   ck "quoted is inert"    "$(backlog_ref '> Backlog-ticket: #99')" ""
   ck "no trailer → empty" "$(backlog_ref 'Closes #5')" ""
+  echo "== backlog_refs — the SINGLE-ref grammar is unchanged (the four rows above, re-proved) =="
+  ck "trailer → #"        "$(backlog_refs $'Autonomously authored.\nBacklog-ticket: #207\n')" "207"
+  ck "case-insensitive"   "$(backlog_refs 'backlog-ticket:  #42')" "42"
+  ck "quoted is inert"    "$(backlog_refs '> Backlog-ticket: #99')" ""
+  ck "no trailer → empty" "$(backlog_refs 'Closes #5')" ""
+  echo "== backlog_refs — MULTI: a PR that delivers N tickets must be able to claim all N =="
+  # e2e-beta#15 shipped #2, #3 AND #6 (after #9/#10 were closed unmerged) but declared only #6, so #2
+  # and #3 were delivered and permanently unclaimable — drivable could never reach 0.
+  ck "two trailer lines"    "$(backlog_refs $'x\nBacklog-ticket: #6\nBacklog-ticket: #2\ny')" "$(printf '6\n2')"
+  ck "the real #15 shape"   "$(backlog_refs $'Backlog-ticket: #6\nBacklog-ticket: #2\nBacklog-ticket: #3')" "$(printf '6\n2\n3')"
+  ck "comma list"           "$(backlog_refs 'Backlog-ticket: #6, #2, #3')" "$(printf '6\n2\n3')"
+  ck "comma, no space"      "$(backlog_refs 'Backlog-ticket: #6,#2')" "$(printf '6\n2')"
+  ck "space-separated"      "$(backlog_refs 'Backlog-ticket: #6 #2')" "$(printf '6\n2')"
+  ck "plural spelling"      "$(backlog_refs 'Backlog-tickets: #6, #2')" "$(printf '6\n2')"
+  ck "repeat collapses"     "$(backlog_refs $'Backlog-ticket: #6\nBacklog-ticket: #6')" "6"
+  echo "== backlog_refs — what MUST stay inert (each could otherwise close the WRONG issue) =="
+  ck "prose after → stops"  "$(backlog_refs 'Backlog-ticket: #6 and also #99')" "6"
+  ck "paren after → stops"  "$(backlog_refs 'Backlog-ticket: #6 (supersedes #99)')" "6"
+  ck "glued #6#2 → stops"   "$(backlog_refs 'Backlog-ticket: #6#2')" "6"
+  ck "mid-prose inert"      "$(backlog_refs 'See Backlog-ticket: #99')" ""
+  ck "indented inert"       "$(backlog_refs '  Backlog-ticket: #99')" ""
+  ck "no # inert"           "$(backlog_refs 'Backlog-ticket: 99')" ""
+  ck "no colon inert"       "$(backlog_refs 'Backlog-ticket #6')" ""
+  ck "#0 inert"             "$(backlog_refs 'Backlog-ticket: #0')" ""
+  ck "leading zero inert"   "$(backlog_refs 'Backlog-ticket: #007')" ""
+  echo "== ref_gate — PER-REF admission (ref 2 must never be stranded by ref 1) =="
+  ck "open backlog issue → TAKE"   "$(ref_gate OPEN 0 'backlog')" "TAKE"
+  ck "extra labels → TAKE"         "$(ref_gate OPEN 0 'backlog,feature')" "TAKE"
+  ck "already CLOSED → no-op"      "$(ref_gate CLOSED 0 'backlog')" "SKIP:already-CLOSED"
+  ck "legacy PR-anchor case"       "$(ref_gate CLOSED 1 'backlog')" "SKIP:already-CLOSED"
+  # Issues and PRs share ONE number space and `gh issue view <pr#>` resolves a PR as state OPEN. The
+  # backlog label is what stops a stray trailer number from closing a PULL REQUEST.
+  ck "a MERGED PR number → no-op"  "$(ref_gate MERGED 0 '')" "SKIP:already-MERGED"
+  ck "an OPEN PR is NOT an issue"  "$(ref_gate OPEN 0 'live-validate')" "SKIP:not-a-backlog-issue"
+  ck "unlabelled issue → no"       "$(ref_gate OPEN 0 '')" "SKIP:not-a-backlog-issue"
+  ck "label substring is not it"   "$(ref_gate OPEN 0 'backlogged')" "SKIP:not-a-backlog-issue"
+  ck "reopened → human decides"    "$(ref_gate OPEN 1 'backlog')" "SKIP:reopened-or-half-closed"
+  ck "unreadable → never close"    "$(ref_gate '' 0 'backlog')" "SKIP:unreadable"
   echo "== change_class (IMAGE iff any image-baked path; reads the path list on STDIN, as the scan pipes it) =="
   ck "bin only → CLONE"      "$(printf '%s\n' bin/x.sh policy/CLAUDE.md | change_class)" "CLONE"
   ck "Containerfile → IMAGE" "$(printf '%s\n' bin/x.sh Containerfile | change_class)" "IMAGE"
@@ -301,6 +384,18 @@ host_green_p(){
     2>/dev/null | grep -qvE '^(0|)$'
 }
 
+# issue_facts <slug> <issue#> → "<state>\t<prior-close:0|1>\t<labels-csv>"; EMPTY when unreadable (the
+# gate then SKIPs). ONE call carries all three ref_gate inputs. `prior` IS the per-ref dedup anchor and it
+# lives on the ISSUE — the object the decision is about — not on the PR, which cannot say which of N refs
+# it attests to. Still no local state (the header's invariant): every input stays GitHub-derived. Labels
+# come LAST so a comma inside a label name can only ever corrupt the field that already tolerates commas.
+issue_facts(){
+  gh issue view "$2" --repo "$1" --json state,labels,comments \
+    -q '[.state,
+         (if ([.comments[]?|select(.body|contains("reconcile → closed:"))]|length) > 0 then "1" else "0" end),
+         ([.labels[]?.name]|join(","))] | @tsv' 2>/dev/null
+}
+
 # publish_state <slug> <merge-oid> → SUCCESS | PENDING | FAILED | NONE (the merge commit's build.yml run).
 publish_state(){
   local st
@@ -338,17 +433,29 @@ scan_repo(){ # <repo bare name>
                       --json number,mergeCommit,mergedAt,body -q '.[] | "\(.number)\t\(.mergeCommit.oid)\t\(.mergedAt)\t\(.body|gsub("\n";"\\n"))"' 2>/dev/null)" \
     || { log "$slug: merged-PR list failed — skipping this scan"; return 0; }
   [ -n "$rows" ] || return 0
-  local pr oid mergedAt bodyenc body ref issue_state class pub live comments
+  local pr oid mergedAt bodyenc body refs reflist ref todo st prior labels gate class pub live
   while IFS=$'\t' read -r pr oid mergedAt bodyenc; do
     [ -n "$pr" ] || continue
     body="$(printf '%b' "$bodyenc")"
-    ref="$(backlog_ref "$body")"; [ -n "$ref" ] || continue      # only PRs that claim a backlog ticket
-    too_old "$mergedAt" && { log "$slug#$pr → #$ref: merge outside the catch-up window — leaving to a human"; continue; }
-    # dedup anchor (no local state): a prior 'reconcile → closed:' comment on the PR means done.
-    comments="$(gh pr view "$pr" --repo "$slug" --json comments -q '.comments[].body' 2>/dev/null)"
-    printf '%s' "$comments" | grep -qF 'reconcile → closed:' && { log "$slug#$pr → #$ref: already reconciled (anchor present)"; continue; }
-    issue_state="$(gh issue view "$ref" --repo "$slug" --json state -q .state 2>/dev/null)"
-    [ "$issue_state" = OPEN ] || { log "$slug#$pr → #$ref: issue already $issue_state (nothing to close)"; continue; }
+    refs="$(backlog_refs "$body")"; [ -n "$refs" ] || continue   # only PRs that claim a backlog ticket
+    # shellcheck disable=SC2086
+    reflist="$(printf '#%s ' $refs)"
+    too_old "$mergedAt" && { log "$slug#$pr → $reflist: merge outside the catch-up window — leaving to a human"; continue; }
+    # PER-REF ADMISSION, each from its OWN evidence. The dedup anchor MOVED from the PR to the ISSUE:
+    # a PR-level "reconcile → closed:" comment cannot say WHICH of N refs it attests to, so under the old
+    # check a PR whose first ref closed would skip its remaining refs forever. Backward compatible by
+    # construction — every PR that ever received the legacy PR-level anchor has refs that are already
+    # CLOSED, and ref_gate independently answers SKIP:already-CLOSED for those.
+    todo=""
+    for ref in $refs; do
+      IFS=$'\t' read -r st prior labels <<<"$(issue_facts "$slug" "$ref")"
+      gate="$(ref_gate "$st" "${prior:-0}" "$labels")"
+      case "$gate" in
+        TAKE) todo="$todo $ref";;
+        *)    log "$slug#$pr → #$ref: ${gate#SKIP:} — no action on this ref";;
+      esac
+    done
+    [ -n "$todo" ] || continue      # every ref settled — none of the proof calls below are worth making
     class="$(gh pr view "$pr" --repo "$slug" --json files -q '.files[].path' 2>/dev/null | change_class)"
     pub="$(publish_state "$slug" "$oid")"
     # No run found: is one still coming, or does this commit ship no image at all? Only ask when there is
@@ -363,16 +470,24 @@ scan_repo(){ # <repo bare name>
         local proof tag
         proof="$(proof_summary "$pub" "$live" "$class")"   # each link's REAL state — an N/A says so
         tag="$(proof_tag "$pub" "$live" "$class")"
-        gh issue close "$ref" --repo "$slug" \
-          --comment "**reconcile → closed:** proof-gated closure of #$ref — authored PR #$pr merged (\`${oid:0:7}\`), $proof. $slug#$pr"$'\n\n<sub>bin/reconcile.sh (task #19) — closed on OBSERVED proof, not on merge. Each link above reports its own state; an N/A link was not taken and says why. This comment is the wiped-state dedup anchor.</sub>' \
-          >/dev/null 2>&1 \
-          && log "$slug#$pr → CLOSED #$ref (proof: $tag)" \
-          || log "$slug#$pr → #$ref: close FAILED (will retry next scan)"
-        # stamp the PR too, so the dedup anchor exists even if the issue-close comment is unreadable later.
-        gh pr comment "$pr" --repo "$slug" --body "**reconcile → closed:** #$ref closed on observed proof — merged \`${oid:0:7}\`, $proof." >/dev/null 2>&1 || true
+        # ONE verdict, N closes. Every proof input (merge, host GREEN, CI, read-back) is a property of the
+        # CHANGE, not of any one ticket, so refs on a single PR share one chain and cannot disagree about
+        # it. Each close is INDEPENDENT: a failure on one ref is logged and the loop continues, so it can
+        # never swallow its siblings, and the next scan retries exactly the ones still open (their anchor
+        # was never written — the anchor is the close-comment on the ISSUE).
+        for ref in $todo; do
+          gh issue close "$ref" --repo "$slug" \
+            --comment "**reconcile → closed:** proof-gated closure of #$ref — authored PR #$pr merged (\`${oid:0:7}\`), $proof. $slug#$pr"$'\n\n<sub>bin/reconcile.sh (task #19) — closed on OBSERVED proof, not on merge. Each link above reports its own state; an N/A link was not taken and says why. This comment is the per-ref dedup anchor.</sub>' \
+            >/dev/null 2>&1 \
+            && log "$slug#$pr → CLOSED #$ref (proof: $tag)" \
+            || log "$slug#$pr → #$ref: close FAILED (will retry next scan)"
+        done
+        # Stamp the PR once, naming every ref closed — a human-readable record, no longer the dedup anchor.
+        # shellcheck disable=SC2086
+        gh pr comment "$pr" --repo "$slug" --body "**reconcile → closed:** $(printf '#%s ' $todo)closed on observed proof — merged \`${oid:0:7}\`, $proof." >/dev/null 2>&1 || true
         ;;
-      WAIT:*) log "$slug#$pr → #$ref: ${verdict#WAIT:} — not closing yet (re-scan)";;
-      SKIP:*) log "$slug#$pr → #$ref: ${verdict#SKIP:} — not a proof-gated close";;
+      WAIT:*) log "$slug#$pr → $reflist: ${verdict#WAIT:} — not closing yet (re-scan)";;
+      SKIP:*) log "$slug#$pr → $reflist: ${verdict#SKIP:} — not a proof-gated close";;
     esac
   done <<<"$rows"
 }
