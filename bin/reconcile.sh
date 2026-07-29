@@ -30,9 +30,12 @@
 #                      this link is N/A on it rather than a wait for an event that is never coming.
 #
 # NO LOCAL STATE (the host-refresh precedent): every decision input is GitHub- or clone-derived, and the
-# dedup anchor is a `reconcile → closed:` comment posted on the PR (a wiped box re-derives + never
-# double-closes; an already-CLOSED #N is a no-op). Idempotent + fail-safe: any fetch/close failure logs
-# and degrades to the status quo — nothing here can stop a loop, and nothing closes an issue without proof.
+# dedup anchor is a `reconcile → closed:` comment posted on the ISSUE (a wiped box re-derives + never
+# double-closes; an already-CLOSED #N is a no-op). It is PER-REF and lives on the issue because a
+# PR-level mark cannot say WHICH of N declared tickets it attests to. The close is issued BEFORE the
+# comment, as two separate calls, so an anchor can only ever exist on an issue that really closed.
+# Idempotent + fail-safe: any fetch/close failure logs and degrades to the status quo — nothing here can
+# stop a loop, and nothing closes an issue without proof.
 #
 #   reconcile.sh --once       one scan across the scoped repos, then exit
 #   reconcile.sh --selftest   exercise the pure core (no gh / git / network)
@@ -98,8 +101,22 @@ backlog_ref(){
 #   "Backlog-ticket: #6#2"             → 6      (glued is not a list)
 # #0 and leading zeros are refused (no such issue). Every previously-inert form stays inert: indented,
 # quoted, mid-prose, colon-less, and #-less all still yield nothing.
+# strip_noncode <text> — remove ``` fenced blocks and <!-- HTML comments --> before trailer parsing.
+# A trailer is a DECLARATION; text that merely SHOWS one is not. A PR body that documents the trailer
+# form (```\nBacklog-ticket: #99\n```) puts a line-initial match in the body, and the parser cannot tell
+# it from a real declaration — MEASURED: such a body yields `400 99`, so #99, never declared by anyone,
+# would be closed as delivered. Line-start anchoring is not enough once bodies discuss their own format.
+strip_noncode(){
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*```/ { fence = !fence; next }        # drop the fence lines and everything between
+    fence { next }
+    { gsub(/<!--.*-->/, "") }                          # single-line HTML comments
+    /<!--/ { htm = 1 } htm { if (/-->/) htm = 0; next } # multi-line HTML comments
+    { print }'
+}
+
 backlog_refs(){
-  printf '%s\n' "$1" \
+  strip_noncode "$1" \
   | grep -oiE '^Backlog-tickets?:[[:space:]]*#[1-9][0-9]*(([[:space:]]*,[[:space:]]*|[[:space:]]+)#[1-9][0-9]*)*' \
   | grep -oE '#[1-9][0-9]*' \
   | { seen=''; while IFS= read -r n; do n="${n#\#}"
@@ -272,6 +289,14 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "no colon inert"       "$(backlog_refs 'Backlog-ticket #6')" ""
   ck "#0 inert"             "$(backlog_refs 'Backlog-ticket: #0')" ""
   ck "leading zero inert"   "$(backlog_refs 'Backlog-ticket: #007')" ""
+  echo "== backlog_refs — a trailer SHOWN is not a trailer DECLARED (adversarial review, 2026-07-29) =="
+  # A PR body that documents the trailer form puts a line-initial match in the body. MEASURED before the
+  # fix: this exact body yielded `400 99`, so #99 — declared by nobody — would have been CLOSED.
+  ck "fenced block is inert"  "$(backlog_refs $'Autonomously authored.\n\nBacklog-ticket: #400\n\nRecognised form:\n\n```\nBacklog-ticket: #99\n```\n')" "400"
+  ck "indented fence too"     "$(backlog_refs $'Backlog-ticket: #400\n  ```\n  Backlog-ticket: #99\n  ```\n')" "400"
+  ck "html comment is inert"  "$(backlog_refs $'Backlog-ticket: #400\n<!-- Backlog-ticket: #99 -->\n')" "400"
+  ck "multiline html comment" "$(backlog_refs $'Backlog-ticket: #400\n<!--\nBacklog-ticket: #99\n-->\n')" "400"
+  ck "real trailers survive"  "$(backlog_refs $'```\nBacklog-ticket: #99\n```\nBacklog-ticket: #6\nBacklog-ticket: #2\n')" "$(printf '6\n2')"
   echo "== ref_gate — PER-REF admission (ref 2 must never be stranded by ref 1) =="
   ck "open backlog issue → TAKE"   "$(ref_gate OPEN 0 'backlog')" "TAKE"
   ck "extra labels → TAKE"         "$(ref_gate OPEN 0 'backlog,feature')" "TAKE"
@@ -433,11 +458,19 @@ scan_repo(){ # <repo bare name>
                       --json number,mergeCommit,mergedAt,body -q '.[] | "\(.number)\t\(.mergeCommit.oid)\t\(.mergedAt)\t\(.body|gsub("\n";"\\n"))"' 2>/dev/null)" \
     || { log "$slug: merged-PR list failed — skipping this scan"; return 0; }
   [ -n "$rows" ] || return 0
-  local pr oid mergedAt bodyenc body refs reflist ref todo st prior labels gate class pub live
+  local pr oid mergedAt bodyenc body refs reflist ref todo closed_now st prior labels gate class pub live
   while IFS=$'\t' read -r pr oid mergedAt bodyenc; do
     [ -n "$pr" ] || continue
     body="$(printf '%b' "$bodyenc")"
     refs="$(backlog_refs "$body")"; [ -n "$refs" ] || continue   # only PRs that claim a backlog ticket
+    # A malformed element TRUNCATES the rest of a list — "#6, #007, #2" yields 6 alone, because the match
+    # stops at the first non-#N and #007 is refused. That strictness is right (it stops prose dragging in
+    # an unrelated number), but silently dropping a declared ticket is the strand this feature exists to
+    # end. Count the #N-shaped tokens on trailer lines and say so when the parse kept fewer.
+    _decl="$(strip_noncode "$body" | grep -ciE '^Backlog-tickets?:.*#[0-9]' 2>/dev/null || echo 0)"
+    _seen="$(strip_noncode "$body" | grep -oiE '^Backlog-tickets?:.*' 2>/dev/null | grep -oE '#[0-9]+' | wc -l)"
+    _got="$(printf '%s\n' "$refs" | grep -c . )"
+    [ "${_seen:-0}" -gt "${_got:-0}" ] 2>/dev/null && log "$slug#$pr: body shows $_seen #N token(s) on $_decl trailer line(s) but only $_got parsed — a malformed element truncates the rest; check the trailer"
     # shellcheck disable=SC2086
     reflist="$(printf '#%s ' $refs)"
     too_old "$mergedAt" && { log "$slug#$pr → $reflist: merge outside the catch-up window — leaving to a human"; continue; }
@@ -475,19 +508,38 @@ scan_repo(){ # <repo bare name>
         # it. Each close is INDEPENDENT: a failure on one ref is logged and the loop continues, so it can
         # never swallow its siblings, and the next scan retries exactly the ones still open (their anchor
         # was never written — the anchor is the close-comment on the ISSUE).
+        # CLOSE FIRST, COMMENT SECOND — two separate calls, never `--comment`.
+        # `gh issue close --comment` posts the comment and THEN closes. If the close fails (500, 403,
+        # secondary rate limit — and this loop now issues N mutations per PR), the issue is left OPEN
+        # CARRYING ITS OWN ANCHOR, so the next scan reads prior=1 on an OPEN issue and answers
+        # SKIP:reopened-or-half-closed. PERMANENTLY. That is the exact strand this feature exists to
+        # remove, recreated by the mechanism meant to remove it, and unrecoverable without a human.
+        # Ordering it this way is safe whichever way `gh` sequences internally: a failed close writes
+        # nothing, so the ref simply retries; a failed COMMENT leaves the issue CLOSED, which the state
+        # check already treats as a no-op. The anchor can now only exist on an issue that really closed.
+        closed_now=""
         for ref in $todo; do
-          gh issue close "$ref" --repo "$slug" \
-            --comment "**reconcile → closed:** proof-gated closure of #$ref — authored PR #$pr merged (\`${oid:0:7}\`), $proof. $slug#$pr"$'\n\n<sub>bin/reconcile.sh (task #19) — closed on OBSERVED proof, not on merge. Each link above reports its own state; an N/A link was not taken and says why. This comment is the per-ref dedup anchor.</sub>' \
-            >/dev/null 2>&1 \
-            && log "$slug#$pr → CLOSED #$ref (proof: $tag)" \
-            || log "$slug#$pr → #$ref: close FAILED (will retry next scan)"
+          if gh issue close "$ref" --repo "$slug" >/dev/null 2>&1; then
+            closed_now="$closed_now $ref"
+            log "$slug#$pr → CLOSED #$ref (proof: $tag)"
+            gh issue comment "$ref" --repo "$slug" \
+              --body "**reconcile → closed:** proof-gated closure of #$ref — authored PR #$pr merged (\`${oid:0:7}\`), $proof. $slug#$pr"$'\n\n<sub>bin/reconcile.sh (task #19) — closed on OBSERVED proof, not on merge. Each link above reports its own state; an N/A link was not taken and says why. This comment is the per-ref dedup anchor.</sub>' \
+              >/dev/null 2>&1 || log "$slug#$pr → #$ref: CLOSED, but the proof comment did not post (the issue is closed; the state check makes this a no-op)"
+          else
+            log "$slug#$pr → #$ref: close FAILED (will retry next scan — no anchor written)"
+          fi
         done
-        # Stamp the PR once, naming every ref closed — a human-readable record, no longer the dedup anchor.
+        # Stamp the PR with the refs that ACTUALLY closed, never the ones merely attempted. Posting the
+        # full list unconditionally would assert closures that did not happen, on the PR's own record.
         # shellcheck disable=SC2086
-        gh pr comment "$pr" --repo "$slug" --body "**reconcile → closed:** $(printf '#%s ' $todo)closed on observed proof — merged \`${oid:0:7}\`, $proof." >/dev/null 2>&1 || true
+        [ -n "$closed_now" ] && gh pr comment "$pr" --repo "$slug" --body "**reconcile → closed:** $(printf '#%s ' $closed_now)closed on observed proof — merged \`${oid:0:7}\`, $proof." >/dev/null 2>&1 || true
         ;;
-      WAIT:*) log "$slug#$pr → $reflist: ${verdict#WAIT:} — not closing yet (re-scan)";;
-      SKIP:*) log "$slug#$pr → $reflist: ${verdict#SKIP:} — not a proof-gated close";;
+      # $todo, not $reflist: a ref the gate already settled (already-CLOSED, not-a-backlog-issue)
+      # is NOT waiting on this proof chain, and listing it here asserts a state it is not in.
+      # shellcheck disable=SC2086
+      WAIT:*) log "$slug#$pr → $(printf '#%s ' $todo): ${verdict#WAIT:} — not closing yet (re-scan)";;
+      # shellcheck disable=SC2086
+      SKIP:*) log "$slug#$pr → $(printf '#%s ' $todo): ${verdict#SKIP:} — not a proof-gated close";;
     esac
   done <<<"$rows"
 }
