@@ -95,17 +95,32 @@ close_decision(){
 #   CLONE class on THIS repo (fedora-dev): LIVE iff the merge sha is an ancestor of the DEPLOYED clone HEAD
 #   (the running box self-refreshed onto code that includes it). IMAGE class here: PENDING — the host
 #   redeploy is a real pending event, so waiting for it is waiting for something that actually arrives.
+#   THE CONTROL REPO (fedora-bootstrap): PENDING, never NA — the apparatus RUNS it, and a real delivery
+#   signal for it already exists on the bus (the host App's `**host-agent: DONE|FAILED**` on the apply
+#   ticket). Not yet wired here, so it waits. See the block above live_readback for why calling it NA
+#   would have closed a ticket whose feature has failed 27 times out of 27.
 #   ANY OTHER REPO: NA. The one read-back this slice can take is a git ancestor check against a deployed
-#   checkout, and $DEV_CLONE is the only one the dev box can read — so for every other repo there is no
-#   read-back to take FROM HERE, ever. (That is a statement about this box's vantage, not about whether the
-#   apparatus runs the thing: fedora-bootstrap IS the host it runs on, and is still NA here because the dev
-#   box holds no readable deployed checkout of it.) A link that can NEVER be satisfied must not be reported
-#   as "not yet". What proves such a change delivered is the link that IS taken on it: the host live-gate,
-#   which builds the candidate on a real host and probes it. See close_decision for the full chain.
+#   checkout, and $DEV_CLONE is the only one the dev box can read — and for a repo the apparatus merely
+#   DEVELOPS there is no deployed instance of it anywhere in the apparatus to read back from. A link that
+#   can NEVER be satisfied must not be reported as "not yet". What proves such a change delivered is the
+#   link that IS taken on it: the host live-gate, which builds the candidate on a real host and probes it.
+#   NA is therefore about the ABSENCE OF ANY INSTANCE, not about this box's convenience — which is exactly
+#   why the control repo, an instance that demonstrably exists, must not be folded into it.
 # Lives with the decision functions, not the I/O helpers: the routing above is pure (and is what broke),
 # and the one git probe is reached only for this repo's own clone, behind an existence guard.
 live_readback(){
   local slug="$1" class="$2" oid="$3"
+  # THE CONTROL REPO IS NOT "NO READ-BACK AVAILABLE" — it is "read-back NOT WIRED HERE YET", which is a
+  # PENDING, not an NA. fedora-bootstrap IS the host the apparatus runs on, and a real delivery signal
+  # already exists for it: the host App posts `**host-agent: DONE|FAILED**` on the apply ticket a merge
+  # files, which bin/host-refresh.sh ticket_outcome() already reads. Calling that NA would close its
+  # tickets on merged+host-GREEN alone — and MEASURED 2026-07-29 that is not delivery there: every one of
+  # the 27 apply-bootstrap tickets (#239…#317) reads FAILED, none DONE, so #187's issue #133 would be
+  # closed as shipped while its feature has never once run on the host. Today only the 48h age window
+  # stops that, and the window protects nothing for the NEXT such merge. PENDING is the honest answer
+  # until the outcome read is wired (follow-up); it costs only that these tickets keep waiting, which is
+  # what they should do while the thing they track does not work.
+  [ "$slug" = "$ORG/fedora-bootstrap" ] && { echo PENDING; return; }
   [ "$slug" = "$ORG/fedora-dev" ] || { echo NA; return; }
   [ "$class" = CLONE ] || { echo PENDING; return; }
   [ -d "$DEV_CLONE/.git" ] || { echo PENDING; return; }
@@ -180,7 +195,15 @@ if [ "${1:-}" = "--selftest" ]; then
   echo "== live_readback — a link that can never be taken is NA, never a forever-PENDING =="
   ck "other repo → NA"        "$(live_readback oso-gato/e2e-beta CLONE deadbeef)" "NA"
   ck "other repo, IMAGE → NA" "$(live_readback oso-gato/e2e-beta IMAGE deadbeef)" "NA"
-  ck "host repo → NA"         "$(live_readback oso-gato/fedora-bootstrap CLONE deadbeef)" "NA"
+  # THE CONTROL REPO IS NOT NA. Measured 2026-07-29: all 27 apply-bootstrap tickets read FAILED, none
+  # DONE — so merged+host-GREEN is demonstrably NOT delivery there, and an NA here would have closed
+  # fedora-bootstrap#187's issue #133 as shipped. Only the 48h age window stood in the way, and it
+  # protects nothing for the next such merge.
+  ck "control repo → PENDING, not NA"  "$(live_readback oso-gato/fedora-bootstrap CLONE deadbeef)" "PENDING"
+  ck "control repo, IMAGE → PENDING"   "$(live_readback oso-gato/fedora-bootstrap IMAGE deadbeef)" "PENDING"
+  ck "…so the control repo cannot close" "$(close_decision 1 1 NA "$(live_readback oso-gato/fedora-bootstrap CLONE deadbeef)")" "WAIT:not-live-yet"
+  # …while the repos that genuinely have no instance still do close (the unblock this PR exists for).
+  ck "developed repo still closes"     "$(close_decision 1 1 NA "$(live_readback oso-gato/e2e-beta CLONE deadbeef)")" "CLOSE"
   # On fedora-dev itself the read-back IS takeable, so it stays mandatory — an image-baked change there is
   # live only once the host redeploys, which is a real event that actually arrives.
   ck "own repo, IMAGE → PENDING" "$(DEV_CLONE=/nonexistent live_readback oso-gato/fedora-dev IMAGE deadbeef)" "PENDING"
