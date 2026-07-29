@@ -18,6 +18,18 @@
 # Run after touching the assemble stamp or its verify:
 #   bash assemble-stamp.test.sh   -> exit 0 = all rows pass
 set -uo pipefail
+
+# CAPABILITY GUARD — exit 77 = SKIP, the contract .github/workflows/tests.yml honours (it prints this
+# reason by name in the log and the step summary). This suite drives the REAL claudebox-assemble.sh,
+# which exits 1 with "must run as core (uid 1000)" before doing anything under any other user — so off
+# a uid-1000 host EVERY row fails for that ONE reason and not one of them is a regression. MEASURED,
+# not assumed: stubbing `id -u` to 1001 in the devbox reproduces CI run 30417457651's exact PASS=11
+# FAIL=17 signature. Note the runner HAS podman; a container engine was never what this needed.
+if [ "$(id -u)" != 1000 ]; then
+    printf 'SKIP: needs uid 1000 — claudebox-assemble.sh refuses any other user; this host is uid %s\n' "$(id -u)"
+    exit 77
+fi
+
 REPO="$(cd "$(dirname "$0")" && pwd)"
 pass=0; fail=0
 ck() { if [ "$2" = "$3" ]; then echo "PASS: $1 ($2)"; pass=$((pass+1)); else echo "FAIL: $1 (got=$2 want=$3)"; fail=$((fail+1)); fi; }

@@ -28,6 +28,14 @@ ROOT="$(mktemp -d)"
 export GH_CALLS="$ROOT/gh.calls"
 export GH_SEARCH_RESULT=""
 export DEADMAN_REPO="oso-gato/fedora-bootstrap"
+# DO NOT WRITE THE PRODUCTION EVIDENCE FILE. Every row here runs the REAL script, and $DEADMAN_LOG
+# defaults to ~/.local/state/apparatus-deadman/deadman.log — the box's own durable watchdog log (#273).
+# Left unset, a suite run interleaves hundreds of fixture ANOMALY/RESPOND/CLEARED lines into the very
+# record an operator reads to judge what the watchdog really did: measuring the #291 window meant first
+# subtracting test noise from production signal (fixture issue #4242, /tmp/tmp.*/state.* paths). Use the
+# script's documented disable hatch — the NON-COLON `${DEADMAN_LOG-…}` means an EXPORTED EMPTY value
+# really disables the file (a `:-` would substitute the default back); stderr still carries every line.
+export DEADMAN_LOG=""
 
 pass=0; fail=0
 ok(){ pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
@@ -56,6 +64,9 @@ echo "$*" >> "$GH_CALLS"
 case "${1:-}" in
   api)   [ -n "${GH_SEARCH_RESULT:-}" ] && [ -f "$GH_SEARCH_RESULT" ] && cat "$GH_SEARCH_RESULT"; exit 0;;
   issue) case "${2:-}" in create) echo "https://github.com/${DEADMAN_REPO:-x/y}/issues/4242";; esac; exit 0;;
+  # `pr list` feeds the WORK-PROGRESS fingerprint. Serves rows ONLY when a row asks for them ($FAKE_PRS),
+  # so every other row keeps an EMPTY fingerprint and the work axis stays quiet there.
+  pr)    case "${2:-}" in list) [ -n "${FAKE_PRS:-}" ] && [ -f "$FAKE_PRS" ] && cat "$FAKE_PRS";; esac; exit 0;;
 esac
 exit 0
 EOF
@@ -162,6 +173,77 @@ n2="$(grep -c . "$SIGF" 2>/dev/null || echo 0)"
   && ok "ONE SIGTERM to the genuine poller pid; decoy alive + never signalled; re-detect ESCALATES with NO second signal" \
   || bad "frozen-sigterm" "n1=$n1 got1=$got1 trap=$TRAP_PID n2=$n2 decoy_alive=$decoy_alive decoy_sig=$decoy_signalled out=[$OUT]"
 stop_procs
+
+echo "== WORK_STALLED — the alarm fires and the LIVE poller is NOT signalled (#291) =="
+# THE LOAD-BEARING ROW. This axis is the ONLY one that ever took a production action, and the action was a
+# SIGTERM at the poller. Measured 2026-07-28: it restarted the poller in 30s and the identical stall ran 82
+# minutes longer — so the remedy is gone and the alarm stays. `respond_plan` is pure and cannot see whether
+# a signal LEAVES the process; only a real poller with a real TERM trap can, which is what this drives.
+# Everything else is pinned healthy (clone current, log fresh, poller alive, no fitness env) so WORK_STALLED
+# is the sole anomaly and any signal observed can only have come from it.
+mk_stall(){   # $1 = state dir → seed a fingerprint IDENTICAL to what the stub will report, aged past the bound
+  printf '%s' "$(cat "$FAKE_PRS")" > "$1/work.fp"
+  touch -d "@$(( $(date +%s) - 4000 ))" "$1/work.fp"
+}
+export FAKE_PRS="$ROOT/fake.prs"
+# `<repo>#<n> <sha> <verdict-count> <labels>` — the exact shape work_fingerprint emits. No parked label,
+# so work_drivable keeps it and the axis is allowed to judge it.
+echo 'e2e-beta#7 abc123def456 0 live-validate' > "$FAKE_PRS"
+S="$ROOT/ws"; new_origin_and_clone "$S"                    # current + clean ⇒ no git anomaly
+LOG="$ROOT/ws.log"; freshlog "$LOG"                        # fresh ⇒ no POLLER_FROZEN
+SIGF="$ROOT/wsig.$RANDOM"; : > "$SIGF"
+ST="$(freshstate)"; mk_stall "$ST"; : > "$GH_CALLS"
+start_trap "$SIGF"                                         # a REAL, live, self-match-confirmable poller
+dmr DEADMAN_CLONE="$S" DEADMAN_STATE="$ST" DEADMAN_EXPECT_POLLER=1 DEADMAN_POLLER_LOG="$LOG" \
+    DEADMAN_SWEEP_MAX=300 DEADMAN_POLLER_NAME="$POLLER_NAME" DEADMAN_WORK_REPOS=e2e-beta \
+    DEADMAN_WORK_STALL_MAX=60 DEADMAN_FITNESS_ENV="$ROOT/no-such-fitness-env"
+sleep 0.4
+# NO `|| echo 0`: `grep -c` on an EMPTY file prints 0 and EXITS 1, so the fallback appends a SECOND line
+# and the count reads "0\n0" — which is never `= 0`. The zero case is exactly what this row asserts.
+ws_sigs="$(grep -c . "$SIGF" 2>/dev/null)"; ws_sigs="${ws_sigs:-0}"
+ws_alive=0; kill -0 "$TRAP_PID" 2>/dev/null && ws_alive=1
+{ echo "$OUT" | grep -q 'WORK_STALLED' && [ "$RC" != 0 ] \
+  && [ "$ws_sigs" = 0 ] && [ "$ws_alive" = 1 ] \
+  && ! echo "$OUT" | grep -q 'sent ONE SIGTERM' \
+  && echo "$OUT" | grep -q 'no auto-recovery is attempted BY DESIGN' \
+  && grep -q '^issue create' "$GH_CALLS"; } \
+  && ok "WORK_STALLED alarms + surfaces, sends ZERO signals, poller left alive (detection kept, kill dropped)" \
+  || bad "workstalled-no-kill" "rc=$RC sigs=$ws_sigs alive=$ws_alive out=[$OUT]"
+stop_procs
+
+echo "== MUTATION-CHECK — restore the SIGTERM arm ⇒ the SAME fixture kills the live poller =="
+# Non-vacuity is the whole point: without this, the row above would also pass against a script where the
+# work axis simply never fires. Restoring the pre-#291 arm must make the identical fixture signal.
+CPW="$ROOT/mut-workstalled.sh"
+# RANGE-SCOPED to the WORK_STALLED branch: `      printf SURFACE ;;` also ends the `*)` default arm, and a
+# blanket substitution would mutate MERGED_NOT_LIVE/CANNOT_VERIFY too — a mutant broken in several places
+# proves nothing about this one. The marker is a UNIQUE token, NOT the restored code: `printf SIGTERM; fi ;;`
+# already occurs verbatim in the POLLER_FROZEN branch (which #291 deliberately KEEPS), so grepping for it
+# would report every run vacuous — as it did on the first cut of this row.
+sed '/^    WORK_STALLED)/,/^      printf SURFACE ;;$/ s/^      printf SURFACE ;;$/      if [ "$have_target" != 1 ]; then printf SURFACE; elif [ "$acted" = 1 ]; then printf ESCALATE; else printf SIGTERM; fi ;;   # MUT291/' "$SCRIPT" > "$CPW"
+chmod +x "$CPW"
+if grep -qF 'MUT291' "$CPW" && ! grep -qF 'MUT291' "$SCRIPT"; then
+  Sw="$ROOT/wsm"; new_origin_and_clone "$Sw"
+  LOGm="$ROOT/wsm.log"; freshlog "$LOGm"
+  SIGFm="$ROOT/wsigm.$RANDOM"; : > "$SIGFm"
+  STm="$(freshstate)"; mk_stall "$STm"
+  start_trap "$SIGFm"
+  timeout 60 env DEADMAN_RESPOND=1 DEADMAN_REPO="$DEADMAN_REPO" DEADMAN_TITLE="APPARATUS LIVENESS DEADMAN" \
+    DEADMAN_GIT_TIMEOUT=15 DEADMAN_GH_TIMEOUT=15 \
+    DEADMAN_CLONE="$Sw" DEADMAN_STATE="$STm" DEADMAN_EXPECT_POLLER=1 DEADMAN_POLLER_LOG="$LOGm" \
+    DEADMAN_SWEEP_MAX=300 DEADMAN_POLLER_NAME="$POLLER_NAME" DEADMAN_WORK_REPOS=e2e-beta \
+    DEADMAN_WORK_STALL_MAX=60 DEADMAN_FITNESS_ENV="$ROOT/no-such-fitness-env" \
+    bash "$CPW" --check >/dev/null 2>&1
+  sleep 0.4
+  mut_sigs="$(grep -c . "$SIGFm" 2>/dev/null)"; mut_sigs="${mut_sigs:-0}"   # same idiom trap as above
+  mut_hit=0; grep -qx "$TRAP_PID" "$SIGFm" 2>/dev/null && mut_hit=1
+  stop_procs
+  { [ "$mut_sigs" -ge 1 ] && [ "$mut_hit" = 1 ]; } \
+    && ok "pre-#291 arm restored ⇒ the same stall SIGTERMs the live poller (this row is non-vacuous)" \
+    || bad "mutation-workstalled" "mut_sigs=$mut_sigs mut_hit=$mut_hit (the fixture must reach the responder)"
+else
+  bad "mutation-workstalled" "the sed did not change the copy — vacuous"
+fi
 
 echo "== IDEMPOTENCY across occurrences — an occurrence that ENDS then re-occurs is acted on AFRESH =="
 S="$ROOT/re"; new_origin_and_clone "$S"; advance_origin "$S"

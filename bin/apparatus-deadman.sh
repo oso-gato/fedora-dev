@@ -33,6 +33,11 @@
 #     supervision itself); still down next check ⇒ SURFACE.
 #   * MERGED_NOT_LIVE (clean clone) — self-refresh (the single writer) owns the pull; the responder must
 #     NOT pull ⇒ SURFACE as unexplained.
+#   * WORK_STALLED — SURFACE, never a kill (#291). It fires while the poller is ALIVE AND SWEEPING, so the
+#     only process it could signal is the one it just proved is working, and the stall is nearly always
+#     OUTSIDE it (a head awaiting the HOST live-gate, a maintainer-held PR, review infra down) where no
+#     dev-side restart can help. MEASURED: the single SIGTERM this arm ever sent (2026-07-28 23:15:17)
+#     restarted the poller in 30s and the identical stall ran 82 minutes longer. Detection kept, kill dropped.
 # IDEMPOTENT + ESCALATING: the responder acts AT MOST ONCE per distinct anomaly occurrence (a $STATE
 # marker keyed to the anomaly token, cleared when that anomaly is no longer present / the loop is
 # healthy). Finding the SAME anomaly STILL present after it already acted is NOT a re-act — it ESCALATES
@@ -276,18 +281,42 @@ respond_plan(){
       # never launch supervision here: hold ONE grace window, then surface if still down.
       [ "$acted" = 1 ] && printf SURFACE || printf WAIT ;;
     WORK_STALLED)
-      # A poller that is ALIVE and SWEEPING but has moved no work is FUNCTIONALLY frozen, so it gets the
-      # SAME bounded remedy as POLLER_FROZEN. Proven necessary 2026-07-28: the loop evaluated ZERO PRs
-      # for 40 minutes while `gh` failed inside the poller's environment and succeeded identically from
-      # an interactive shell. POLLER_FROZEN could not fire (the log was advancing — with failures), and
-      # POLLER_DOWN could not fire (the process was alive), so no axis and no responder could see it.
-      # TERM is the right remedy precisely BECAUSE the fault was environmental: the supervisor relaunches
-      # with a freshly-built environment, and work resumes from GitHub (idempotent — nothing is lost).
-      # Bounded exactly like POLLER_FROZEN: signal ONCE per occurrence, then escalate to the human rather
-      # than churn a restart loop. No confirmed poller pid ⇒ SURFACE (never signal a stranger).
-      if   [ "$have_target" != 1 ]; then printf SURFACE
-      elif [ "$acted" = 1 ];        then printf ESCALATE
-      else                               printf SIGTERM; fi ;;
+      # DETECT, NEVER KILL — the axis keeps its alarm and LOSES its remedy (#291, measured 2026-07-29).
+      #
+      # This branch used to SIGTERM the poller, on the theory that "alive but moving no work" is
+      # FUNCTIONALLY frozen and deserves POLLER_FROZEN's remedy. The first production episode measured
+      # end-to-end says otherwise. Window 2026-07-28T22:29→2026-07-29T01:45 (95 checks, the only
+      # uncontaminated one in deadman.log): WORK_STALLED was the ONLY anomaly that fired; the responder
+      # took exactly ONE action — SIGTERM at 23:15:17; poller-service relaunched the poller 30s later
+      # (23:15:47); and THE STALL PERSISTED 82 MORE MINUTES — 39 consecutive ESCALATEs — clearing at
+      # 00:39:52 only when the work fingerprint moved on its own. The kill changed nothing.
+      #
+      # It cannot work, and the reason is structural, not a tuning problem. This axis fires on the
+      # AGGREGATE open-work fingerprint across every scoped repo, while its premise is that the poller is
+      # ALIVE AND SWEEPING — so the one component it kills is the one component it has just proven is
+      # working. The measured stall was PRs sitting at `host=NONE`: waiting on the HOST live-gate, on
+      # another box. No dev-side restart can make the host gate verdict. Same for a PR held for the
+      # maintainer, or one waiting on review infra. Killing the sweeper because something ELSE is not
+      # producing work is a category error, and it is not free: a TERM aborts whatever synchronous
+      # fitness review or fixer run was in flight (the cost #270 had to add the busy-bound to contain).
+      #
+      # POLLER_FROZEN keeps its SIGTERM, and the distinction is exactly this: there the process itself is
+      # wedged (log not advancing, no working child), which is the one condition a restart does fix.
+      #
+      # THE RATIONALE THIS RETIRES, and why it no longer holds. The old branch justified the kill with one
+      # case: a poller sweeping while `gh` failed inside ITS environment but worked from a shell, where a
+      # relaunch rebuilds the environment. That case is now owned STRUCTURALLY and better — it was the
+      # torn-down-rootfs outage, and `box-generation.sh`'s dependency probe makes a service whose required
+      # binaries no longer resolve EXIT on its own (positive proof, no watcher needed, no aggregate clock,
+      # no 45-minute wait). And where `gh` is present but merely failing (auth, network, rate limit), a
+      # restart never fixed it either. So the one scenario the SIGTERM was argued for is covered elsewhere;
+      # what remained here was a kill aimed at a healthy process on an aggregate signal.
+      #
+      # The per-PR remedy already exists and is better aimed: `pr-poller.sh`'s own `stall_verdict` (R18)
+      # surfaces the stuck head NAMING the likely cause, and R39/#278 routes it to bounded self-repair.
+      # This watcher's job here is to be the independent voice that says the WHOLE loop stopped moving —
+      # which it did correctly. Surfacing is the whole contribution; the kill was drag.
+      printf SURFACE ;;
     *)  # MERGED_NOT_LIVE (self-refresh owns the pull — the responder must NOT pull), CANNOT_VERIFY, etc.
       printf SURFACE ;;
   esac
@@ -490,12 +519,17 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "substring must NOT match (apparatus-blocked vs blocked)" "$(work_drivable 'apparatus-blocked' 'blocked' && echo drivable || echo parked)" "drivable"
   ck "substring must NOT match (blocked vs apparatus-blocked)" "$(work_drivable 'blocked' 'apparatus-blocked' && echo drivable || echo parked)" "drivable"
   ck "empty parked set filters NOTHING"      "$(work_drivable 'escalate' '' && echo drivable || echo parked)" "drivable"
-  echo "== WORK_STALLED responder — a poller that moves no work is FUNCTIONALLY frozen =="
+  echo "== WORK_STALLED responder — DETECTS, never KILLS (#291: the one SIGTERM it sent did not clear the stall) =="
   rp(){ local got; got="$(respond_plan "$2" "$3" "$4" "$5")"; ck "$1" "$got" "$6"; }
-  rp "stalled work TERMs the poller once"      WORK_STALLED 0 "" 1 SIGTERM
-  rp "already acted -> escalate, never churn"  WORK_STALLED 1 "" 1 ESCALATE
-  rp "no confirmed pid -> surface, never signal a stranger" WORK_STALLED 0 "" 0 SURFACE
-  rp "parity with POLLER_FROZEN (same remedy)" POLLER_FROZEN 0 "" 1 SIGTERM
+  # A confirmed poller pid is AVAILABLE in the first row — the point is that having a target no longer
+  # implies using it. It surfaces on every combination, so no state can talk it into a kill.
+  rp "a live poller is NOT signalled for stalled work" WORK_STALLED 0 "" 1 SURFACE
+  rp "already acted -> still surface (no ESCALATE arm to reach)" WORK_STALLED 1 "" 1 SURFACE
+  rp "no confirmed pid -> surface"             WORK_STALLED 0 "" 0 SURFACE
+  # NOT parity with POLLER_FROZEN — the deliberate split. There the PROCESS is wedged (log not advancing,
+  # no working child) and a restart is the one thing that fixes it, so it keeps its bounded SIGTERM.
+  rp "POLLER_FROZEN KEEPS its SIGTERM (a wedged process is what a restart fixes)" POLLER_FROZEN 0 "" 1 SIGTERM
+  rp "POLLER_FROZEN still escalates rather than churning"       POLLER_FROZEN 1 "" 1 ESCALATE
 
   # The documented `DEADMAN_LOG=` disable hatch. log() itself sits below the I/O boundary and never runs
   # here, so this exercises the thing that DECIDES the hatch: the REAL assignment line, lifted verbatim
@@ -718,6 +752,7 @@ respond_act(){
         POLLER_FROZEN)        printf '%s|auto-recovery could NOT identify a safe poller pid (self-match-safe detection found none) — surfacing rather than signalling a stranger.' "$token" ;;
         POLLER_DOWN)          printf '%s|auto-recovery DECLINED — the responder does not launch supervision and the grace window has elapsed with the poller still down. Surfacing for a human.' "$token" ;;
         FITNESS_TOKEN_STALE)  printf '%s|auto-recovery not possible in-box — the fitness KEY never enters the box (only the token is ferried) and core cannot re-mint it. HOST fix: re-mount the gh_app_key_fitness podman secret + recreate fedora-dev; then re-run fitness-review --post on the parked host-GREEN PRs.' "$token" ;;
+        WORK_STALLED)         printf '%s|no auto-recovery is attempted BY DESIGN (#291). This axis fires while the poller is ALIVE and SWEEPING, so the only process it could signal is one it has just proven is working; the stall is almost always OUTSIDE the poller (a head waiting on the HOST live-gate, a PR held for the maintainer, review infra down), which no dev-side restart can fix. Measured 2026-07-28: the one SIGTERM this responder ever sent restarted the poller in 30s and the SAME stall ran 82 minutes longer. WHERE TO LOOK: the open PRs in the fingerprint — are they enrolled (`live-validate`), gated (host GREEN/RED), or waiting on a verdict that will never come? The poller surfaces the per-PR case itself (`[stalled]`, with the likely cause + remediation) and routes it to bounded self-repair.' "$token" ;;
         *)                    printf '%s|auto-recovery not applicable; surfacing for a human.' "$token" ;;
       esac
       ;;
