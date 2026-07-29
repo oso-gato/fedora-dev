@@ -87,7 +87,16 @@ jobs:
             # requirement, so the excuse is exactly as wide as the reason for it. Every other non-zero
             # exit is a real failure — including one in a file that happens to mention podman.
             printf '\n\033[1m== %s ==\033[0m\n' "$t"
-            rc=0; timeout 120 bash "$t" 2>&1 | tee "$LOGF" || rc=$?
+            # CAPTURE BY REDIRECT, NEVER `| tee` — the bound must actually bound. `timeout 120 … | tee`
+            # puts the bound on the LEFT of a pipe only: `tee` reads until every holder of the write end
+            # closes it, and a test's leaked descendants inherit that fd. MEASURED, not reasoned:
+            # apparatus-deadman.test.sh PASSES in 31s (rc=0) and leaves `sleep 100000` children alive, so
+            # `tee` blocks FOREVER on a test that SUCCEEDED — the timeout never even applies. Run
+            # 30418639031 did exactly that: 20+ min, `cancelled`, nothing reported, and the later steps
+            # `skipped` (`!cancelled()` is false under cancellation) — where the form it replaced was red
+            # in 2.5 min naming 3 real failures. Redirect + `cat` bounds it and keeps the `^SKIP: ` grep.
+            rc=0; timeout 120 bash "$t" > "$LOGF" 2>&1 || rc=$?
+            cat "$LOGF"
             if [ "$rc" -eq 0 ]; then
               pass=$((pass+1))
             elif [ "$rc" -eq 77 ]; then
@@ -122,7 +131,9 @@ jobs:
           for s in bin/*.sh *.sh; do
             grep -q -- '--selftest' "$s" 2>/dev/null || continue
             printf '\n\033[1m== %s --selftest ==\033[0m\n' "$s"
-            rc=0; timeout 120 bash "$s" --selftest 2>&1 | tee "$LOGF" || rc=$?
+            # Redirect, not `| tee` — same reason as the loop above.
+            rc=0; timeout 120 bash "$s" --selftest > "$LOGF" 2>&1 || rc=$?
+            cat "$LOGF"
             if [ "$rc" -eq 0 ]; then
               pass=$((pass+1))
             elif [ "$rc" -eq 77 ]; then
