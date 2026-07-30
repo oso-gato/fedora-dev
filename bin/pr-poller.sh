@@ -1487,10 +1487,28 @@ FIX_EOF
   # 3) THE HARNESS PUSHES — and only when the model actually committed and did not declare BLOCKED. The
   # refspec is EXPLICIT (HEAD:refs/heads/<ref>): this push can name no destination but the feature ref,
   # least of all main. Then VERIFY AT ORIGIN — the push's exit code is not evidence the fix landed.
-  local head prc=0 remote=""
+  local head prc=0 remote="" perr=""
   head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
   if [ "$bflag" = 0 ] && [ -n "$head" ] && [ "$head" != "$sha" ]; then
-    git -C "$wt" push -q origin "HEAD:refs/heads/$ref" >/dev/null 2>&1 || prc=1
+    # --force-with-lease PINNED TO THE GATED HEAD, and it is a CORRECTNESS fix, not a loosening.
+    #
+    # THE DEFECT (observed live 2026-07-30 on #328): the fixer is told not to push, but NOTHING stops
+    # it from bringing `main` into its worktree — and a fitness RETURN whose finding is "CI is red"
+    # practically REQUIRES it, since the branch cannot be tested against a main it predates. Doing so
+    # rewrites the branch's lineage relative to origin's, so this plain push was rejected
+    # `non-fast-forward` and the fix could NEVER land. The head therefore never moved, fitness
+    # re-read byte-identical code, returned the identical verdict, and the poller re-spawned a
+    # 30-minute model run every ~30 minutes — FOUR times, zero progress, ~2h of model time burned.
+    # The bound that should have caught it keys on the failure REPEATING; this failure was perfectly
+    # repeatable and still ran, because nothing keyed on the head STANDING STILL.
+    #
+    # WHY THE LEASE IS SAFE, and why a bare --force would not be. The lease pins origin/<ref> to
+    # $sha — the exact gated head this worktree was cut from — so the push lands ONLY if nobody else
+    # moved the branch, and is REFUSED (not resolved by clobbering) if anyone did. Combined with the
+    # explicit refspec, which can name no destination but this feature ref, the blast radius is
+    # unchanged: it cannot reach `main`, and it cannot overwrite a concurrent push. A bare --force
+    # WOULD silently discard a racing commit, so it is deliberately not used.
+    perr="$(git -C "$wt" push --force-with-lease="refs/heads/$ref:$sha" origin "HEAD:refs/heads/$ref" 2>&1)" || prc=1
     remote="$(git -C "$wt" ls-remote origin "refs/heads/$ref" 2>/dev/null | awk 'NR==1{print $1}')"
   fi
 
@@ -1504,8 +1522,14 @@ FIX_EOF
       log "FIXER NO-COMMIT $SLUG#$pr @ ${sha:0:7} — the fixer committed nothing (timeout / no progress); nothing pushed"
       surface "$pr" "$sha" "blocked" "the fixer run finished without committing anything (it timed out, or could not make progress) — nothing was pushed and the head is unchanged. Failing gate: ${cause}. A human decision is needed." ;;
     PUSH_FAILED)
-      log "FIXER PUSH FAILED $SLUG#$pr — committed ${head:0:7} but the push to $ref errored; the fix did NOT land"
-      surface "$pr" "$sha" "blocked" "the fixer committed a fix but \`git push\` to \`$ref\` FAILED — the fix did NOT land (check credentials / branch protection). Nothing was merged." ;;
+      # REPORT GIT'S OWN ERROR, never a guess. The previous text asserted "check credentials /
+      # branch protection" for EVERY push failure; the live #328 case was `non-fast-forward` — the
+      # credential and the rulesets were both fine — so the one line a human reads to diagnose the
+      # stall pointed at two things that were not wrong, and the actual cause appeared nowhere in
+      # the log. A harness that guesses a cause it could have PRINTED is lying to its operator.
+      local _pe; _pe="$(printf '%s' "$perr" | tail -4 | tr '\n' ' ' | cut -c1-400)"
+      log "FIXER PUSH FAILED $SLUG#$pr — committed ${head:0:7} but the push to $ref errored; the fix did NOT land: ${_pe:-<no stderr captured>}"
+      surface "$pr" "$sha" "blocked" "the fixer committed a fix but \`git push\` to \`$ref\` FAILED — the fix did NOT land. Git said: \`${_pe:-<no stderr captured>}\`. Nothing was merged." ;;
     NOT_LANDED)
       log "FIXER DID NOT LAND $SLUG#$pr — push reported success but origin/$ref holds ${remote:0:7}, not the fix ${head:0:7}"
       surface "$pr" "$sha" "blocked" "the fixer committed \`${head:0:7}\` and the push reported SUCCESS, but \`origin/$ref\` did not advance to it — the fix did NOT land. A human should check the remote / branch protection." ;;
