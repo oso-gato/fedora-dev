@@ -85,6 +85,20 @@ sweep_orphans(){
     fi
   done
   gc_dnf_cache
+  gc_git_cache
+}
+
+# ---- bound the persistent GIT OBJECT cache (#319) ------------------------------------------------
+# The git object cache is the same KIND of thing as the dnf package cache: one durable INPUT on the home
+# volume, kept across every disposal, therefore something that MUST be bounded. It brings its own caps
+# and its own age-then-size order (see bin/git-object-cache.sh); this hook is only about WHO RUNS IT.
+# It runs HERE, in the sweeper that already fires on every throwaway build and on --sweep-only, rather
+# than behind a new timer — a bound enforced by machinery that already runs cannot silently stop running.
+# FAIL-SOFT: a missing or failing GC logs and returns; garbage-collecting a cache must never fail a build.
+gc_git_cache(){
+  local gc="${FD_GIT_CACHE_GC:-$(dirname "$(readlink -f "$0")")/git-object-cache.sh}"
+  [ -x "$gc" ] || return 0
+  "$gc" gc || echo "sweep: git object cache GC failed (rc=$?) — continuing"
 }
 
 # ---- bound the persistent dnf package cache: AGE-prune (>MAX_AGE_DAYS) FIRST, then SIZE-prune ------
