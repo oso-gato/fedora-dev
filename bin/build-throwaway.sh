@@ -15,6 +15,12 @@
 #     home volume) — that is the churn-balance: discard the candidate, keep the cache.
 #   * SWEEPS orphans first (stale `localhost/disposable/*` images + orphan temp trees),
 #     so a kill-9 that skipped the trap on a previous run doesn't leak on the home volume.
+#   * BOUNDS EVERY ASSET CACHE in the same sweep, via `bin/asset-cache.sh` (#321): the persistent dnf
+#     cache, the podman image/layer STORE (which had NO ceiling here at all before that change — 97% of
+#     76.8 GB was reclaimable, measured) and the sibling git/download caches once they land. Three
+#     bounds each — AGE, SIZE and PROJECT COMPLETION — declared in ONE registry there. That file owns
+#     the whole policy: its header is the authority on the caps, the release rule and the fail
+#     directions, and this wrapper just calls it.
 #
 # PROVENANCE (Build Principle 2): this only ever builds the repo's OWN Containerfile in
 # the caller-provided context — it adds NO repos, NO source-loosening --build-arg, and does
@@ -34,20 +40,20 @@
 #   -t <suffix>          tag suffix (default: git short-sha of context, else random)
 #   -c <srcdir>          copy srcdir → a fresh throwaway tree, build that (reaped on exit)
 #   -k                   keep the disposable image (skip the rmi teardown; temp tree still reaped)
-#   --sweep-only         run the orphan sweeper and exit (no build)
+#   --sweep-only         reap orphans + enforce EVERY cache bound in one pass, then exit (no build)
 #   -h                   this help
 #
 # Env knobs:
 #   FD_DNF_CACHE  persistent dnf cache dir   (default: $HOME/.cache/fd-dnf)
 #   FD_STALE_MIN  orphan age threshold, mins (default: 720 = 12h)
-#   FD_DNF_CACHE_CAP_GB        dnf cache SIZE cap, GB; LRU-prune RPMs over it  (default: 15)
-#   FD_DNF_CACHE_MAX_AGE_DAYS  dnf cache AGE cap, days; prune RPMs older than  (default: 45)
 #   BUILD_ARGS    extra args forwarded verbatim to `podman build` (e.g. --build-arg X=Y)
+#   AC_LIB        the bounded-cache GC library (default: the sibling bin/asset-cache.sh)
+#   Every CACHE knob (dnf/image-store/git/download caps, the completion arm and its seams) lives in
+#   bin/asset-cache.sh's header — the single place the cache policy is declared. Not duplicated here.
 set -uo pipefail
 
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 DNF_CACHE="${FD_DNF_CACHE:-$HOME/.cache/fd-dnf}"
-DNF_CAP_GB="${FD_DNF_CACHE_CAP_GB:-15}"
-DNF_MAX_AGE_DAYS="${FD_DNF_CACHE_MAX_AGE_DAYS:-45}"
 DISPOSABLE_NS="localhost/disposable"
 TMP_PREFIX="fd-throwaway"
 TMP_ROOT="$HOME/.cache"                 # throwaway trees live on the WRITABLE home volume
@@ -57,6 +63,17 @@ FILE=""; NAME=""; SUFFIX=""; COPY_SRC=""; KEEP=0; SWEEP_ONLY=0
 
 die(){ echo "build-throwaway: $*" >&2; exit 2; }
 usage(){ sed -n '2,/^set -uo/p' "$0" | sed 's/^# \{0,1\}//; s/^#//'; exit "${1:-0}"; }
+
+# ---- the bounded-cache GC (#321) ------------------------------------------------------------------
+# A co-located sibling, so its absence means a broken checkout — LOUD, never silent, and never fatal:
+# this wrapper's job is to build, and a missing GC must not stop a build (R39). The stub keeps the
+# sweep's contract (`asset_cache_gc` always exists and always returns 0) so no call site has to care.
+AC_LIB="${AC_LIB:-$HERE/asset-cache.sh}"
+# shellcheck source=/dev/null
+if [ -r "$AC_LIB" ] && . "$AC_LIB" 2>/dev/null; then :; else
+  echo "build-throwaway: WARNING — bounded-cache GC library unreadable ($AC_LIB): NO cache bound is being enforced this run (age, size or completion). Fix the checkout." >&2
+  asset_cache_gc(){ return 0; }
+fi
 
 # ---- orphan sweeper: reap stale disposable images + orphan throwaway trees ------------
 # Age-bounded so a concurrent in-flight build (recent) is never reaped; handles the kill-9
@@ -84,35 +101,12 @@ sweep_orphans(){
       rm -rf "$d" 2>/dev/null && echo "sweep: rm orphan tree $d (${age}m old)"
     fi
   done
-  gc_dnf_cache
-}
-
-# ---- bound the persistent dnf package cache: AGE-prune (>MAX_AGE_DAYS) FIRST, then SIZE-prune ------
-# Same caps as the host throwaway-sweep.sh: the dnf bind cache ($DNF_CACHE → /var/cache/libdnf5) is the
-# ONE thing kept across throwaway disposal, so it must be bounded. Order is deliberate: drop genuinely-
-# stale RPMs by AGE first, THEN — if still over the SIZE cap — LRU-evict the oldest remaining until under
-# cap. Age-then-size keeps the freshest churn RPMs hot. Both caps are overridable env (see header).
-gc_dnf_cache(){
-  [ -d "$DNF_CACHE" ] || return 0
-  local cap_bytes cur_kb running _t sz path
-  # (a) AGE prune: RPMs last modified more than FD_DNF_CACHE_MAX_AGE_DAYS days ago.
-  while IFS= read -r -d '' path; do
-    rm -f "$path" 2>/dev/null && echo "gc: dnf age-prune $(basename "$path") (>${DNF_MAX_AGE_DAYS}d)"
-  done < <(find "$DNF_CACHE" -type f -name '*.rpm' -mtime +"$DNF_MAX_AGE_DAYS" -print0 2>/dev/null)
-  # (b) SIZE prune: if still over the cap, LRU-evict oldest RPMs until the total is <= cap.
-  cap_bytes=$(( DNF_CAP_GB * 1024 * 1024 * 1024 ))
-  cur_kb="$(du -sk "$DNF_CACHE" 2>/dev/null | cut -f1)"; cur_kb="${cur_kb:-0}"
-  if [ $(( cur_kb * 1024 )) -gt "$cap_bytes" ]; then
-    echo "gc: dnf cache $(( cur_kb / 1024 ))M > cap ${DNF_CAP_GB}G — LRU-pruning oldest RPMs"
-    running=0
-    # newest first; once the running total passes the cap, every older RPM is pruned.
-    while IFS=$'\t' read -r _t sz path; do
-      running=$(( running + sz ))
-      if [ "$running" -gt "$cap_bytes" ]; then
-        rm -f "$path" 2>/dev/null && echo "gc: dnf size-prune $(basename "$path")"
-      fi
-    done < <(find "$DNF_CACHE" -type f -name '*.rpm' -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -rn)
-  fi
+  # BOUND EVERY ASSET CACHE (#321). This replaced a dnf-ONLY GC: the same age-then-LRU algorithm now
+  # runs from a registry that also covers the podman image/layer store (previously unbounded here) and
+  # the sibling git/download caches, and each entry additionally carries a PROJECT-COMPLETION bound.
+  # The policy — the caps, the release rule, and why every unreadable signal KEEPS the cache — lives in
+  # bin/asset-cache.sh's header. It always returns 0: this runs inside every build.
+  asset_cache_gc
 }
 
 # ---- teardown: discard THIS run's candidate + temp tree; cache survives ---------------
