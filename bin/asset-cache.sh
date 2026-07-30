@@ -32,10 +32,22 @@
 #
 # A row whose `dir` DOES NOT EXIST IS SKIPPED SILENTLY, never an error — so this ships today bounding
 # what exists today (fd-dnf + the image store) and picks the sibling caches up automatically when they
-# land. That skip is also why the registry can DECLARE the layout the siblings must ship: fd-git and
-# fd-dl are declared `tree`+`repo`, i.e. "immediate subdirectories keyed by repo name"
-# (<cache>/<repo>/…), which is what makes a per-repo completion release addressable at all. If a sibling
-# lands a different layout, its registry ROW is the one place that changes.
+# land. That skip is also why the registry can DECLARE the layout the siblings must ship: fd-git is
+# declared `tree`+`repo`, i.e. "immediate subdirectories keyed by repo name" (<cache>/<repo>/…), which
+# is what makes a per-repo completion release addressable at all. If a sibling lands a different layout,
+# its registry ROW is the one place that changes.
+#
+# THE DOWNLOAD CACHE IS EXACTLY THAT CASE, AND ITS ROW CHANGED TO "NOT A ROW" (#320). This registry
+# declared an fd-dl row speculatively, as `tree`+`repo`, before the sibling existed. What then landed is
+# a FLAT CONTENT-ADDRESSED cache: sha256-named files plus `.part-*` partials, with NO repo keying at all
+# — identical bytes are shared by every repo by construction, so there is no <cache>/<repo>/ subtree to
+# drop and no per-repo release to make. Turning the `tree` kind loose on it would find no immediate
+# subdirectories and silently bound NOTHING (the worst failure mode this file exists to end), and both
+# mechanisms read the SAME FD_DL_CACHE_CAP_GB knob with different defaults, so running both would make
+# one of the two documented caps UNTRUE. bin/fd-fetch.sh --gc therefore keeps that bound — it owns the
+# format, reads LAST-USE time (a cache HIT touches its entry) and reaps stale partials, none of which a
+# generic row can do — and bin/build-throwaway.sh calls it from the SAME sweep as asset_cache_gc, so the
+# cache is still bounded on every throwaway build. ONE owner per cache format; this registry has three.
 #
 # THREE KINDS, because granularity is not a detail — it is correctness:
 #   * file  — prune matching FILES (fd-dnf: `*.rpm` ONLY, so dnf METADATA is never pruned; that is the
@@ -129,7 +141,7 @@
 #   FD_DNF_CACHE / FD_DNF_CACHE_CAP_GB / FD_DNF_CACHE_MAX_AGE_DAYS   pre-existing, unchanged (15G / 45d)
 #   FD_DNF_CACHE_REL_CAP_GB / FD_DNF_CACHE_REL_AGE_DAYS   dnf COLD FLOOR once released      (2G / 7d)
 #   FD_GIT_CACHE / FD_GIT_CACHE_CAP_GB / FD_GIT_CACHE_MAX_AGE_DAYS   sibling git mirrors    (5G / 45d)
-#   FD_DL_CACHE  / FD_DL_CACHE_CAP_GB  / FD_DL_CACHE_MAX_AGE_DAYS    sibling downloads      (5G / 45d)
+#   (the download cache's knobs are bin/fd-fetch.sh's — it owns that format and its bound; not read here)
 #   <ANY>_CAP_MB          overrides its _CAP_GB sibling (fine-grained; what the test suite uses)
 #   FD_IMAGE_STORE        podman store dir, existence-checked only   (default ~/.local/share/containers)
 #   FD_STORE_MAX_AGE_H    reap UNUSED images older than this         (default 1440h = 60d, host parity)
@@ -163,10 +175,6 @@ AC_GIT_CACHE="${FD_GIT_CACHE:-$HOME/.cache/fd-git}"
 AC_GIT_CAP_MB="${FD_GIT_CACHE_CAP_MB:-$(( ${FD_GIT_CACHE_CAP_GB:-5} * 1024 ))}"
 AC_GIT_AGE_H=$(( ${FD_GIT_CACHE_MAX_AGE_DAYS:-45} * 24 ))
 
-AC_DL_CACHE="${FD_DL_CACHE:-$HOME/.cache/fd-dl}"
-AC_DL_CAP_MB="${FD_DL_CACHE_CAP_MB:-$(( ${FD_DL_CACHE_CAP_GB:-5} * 1024 ))}"
-AC_DL_AGE_H=$(( ${FD_DL_CACHE_MAX_AGE_DAYS:-45} * 24 ))
-
 AC_IMAGE_STORE="${FD_IMAGE_STORE:-$HOME/.local/share/containers}"
 AC_STORE_CAP_MB="${FD_STORE_CAP_MB:-$(( ${FD_STORE_CAP_GB:-60} * 1024 ))}"
 AC_STORE_AGE_H="${FD_STORE_MAX_AGE_H:-1440}"
@@ -196,7 +204,6 @@ ac_registry(){
 dnf|file|$AC_DNF_CACHE|$AC_DNF_CAP_MB|$AC_DNF_AGE_H|*.rpm|shared|$AC_DNF_REL_CAP_MB|$AC_DNF_REL_AGE_H
 images|image|$AC_IMAGE_STORE|$AC_STORE_CAP_MB|$AC_STORE_AGE_H|-|shared|$AC_STORE_REL_CAP_MB|$AC_STORE_REL_AGE_H
 git|tree|$AC_GIT_CACHE|$AC_GIT_CAP_MB|$AC_GIT_AGE_H|*|repo|-|-
-dl|tree|$AC_DL_CACHE|$AC_DL_CAP_MB|$AC_DL_AGE_H|*|repo|-|-
 EOF
 }
 
@@ -534,14 +541,17 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   ck "empty list protects nothing"        "$(ac_protected localhost/y:1 && echo yes || echo no)" "no"
   ck "second glob in the list matches"    "$(ac_protected a/b:1 x/y a/b && echo yes || echo no)" "yes"
 
-  echo "== the registry: four declared caches, nine fields each, the two sibling rows per-repo =="
-  ck "registry row count"                 "$(ac_registry | grep -c .)" "4"
+  echo "== the registry: three declared caches, nine fields each, the sibling git row per-repo =="
+  ck "registry row count"                 "$(ac_registry | grep -c .)" "3"
   ck "every row has 9 fields"             "$(ac_registry | awk -F'|' '{print NF}' | sort -u | tr -d '\n')" "9"
   ck "dnf glob is *.rpm only (metadata kept)" "$(ac_registry | awk -F'|' '$1=="dnf"{print $6}')" "*.rpm"
   ck "dnf scope is shared"                "$(ac_registry | awk -F'|' '$1=="dnf"{print $7}')" "shared"
   ck "images scope is shared"             "$(ac_registry | awk -F'|' '$1=="images"{print $7}')" "shared"
   ck "git scope is repo"                  "$(ac_registry | awk -F'|' '$1=="git"{print $7}')" "repo"
-  ck "dl scope is repo"                   "$(ac_registry | awk -F'|' '$1=="dl"{print $7}')" "repo"
+  # The download cache is NOT a row here: bin/fd-fetch.sh owns its content-addressed format and its
+  # bound (see the header). Pinned, because a re-added `tree`+`repo` row would silently bound nothing
+  # on a flat cache AND fight fd-fetch over the same FD_DL_CACHE_CAP_GB knob.
+  ck "no dl row (bin/fd-fetch.sh owns that cache)" "$(ac_registry | awk -F'|' '$1=="dl"{print $1}')" ""
   ck "dnf age cap = 45d in hours"         "$(ac_registry | awk -F'|' '$1=="dnf"{print $5}')" "1080"
   ck "image age cap = host's 1440h"       "$(ac_registry | awk -F'|' '$1=="images"{print $5}')" "1440"
   ck "dnf size cap = 15G in MiB"          "$(ac_registry | awk -F'|' '$1=="dnf"{print $4}')" "15360"

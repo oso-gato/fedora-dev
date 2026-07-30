@@ -8,6 +8,14 @@
 #     /var/cache/libdnf5) AND the podman LAYER cache on the home volume — so a re-build
 #     re-downloads NOTHING and reuses cached layers (the cache is the persistent INPUT;
 #     the candidate image is the disposable OUTPUT);
+#   * binds the PINNED-DOWNLOAD cache ($HOME/.cache/fd-dl → /var/cache/fd-dl, #320) so a repo
+#     whose Containerfile uses the declared fetch contract (`RUN fd-fetch.sh <url> <sha256>
+#     <dest>` — bin/fd-fetch.sh) serves a pinned vendor asset from the home volume instead of
+#     re-downloading it. This is the SECOND durable input, and it exists because `ADD <url>`
+#     re-downloads the whole file even when buildah reports a layer-cache HIT (MEASURED: 10 413
+#     KiB pulled on a "Using cache" rebuild — see bin/fd-fetch.sh's header table). The bind is
+#     INERT for a repo that does not use the contract: it adds nothing to the image and changes
+#     no build semantics (see PROVENANCE below);
 #   * tags the output `localhost/disposable/<name>:val-<sha-or-rand>` — NEVER pushed;
 #   * TEARS DOWN on EXIT (trap): rmi the disposable tag + rm any temp tree WE created,
 #     firing on success / failure / most signals (INT/TERM/HUP). The LAYER cache and the
@@ -15,16 +23,24 @@
 #     home volume) — that is the churn-balance: discard the candidate, keep the cache.
 #   * SWEEPS orphans first (stale `localhost/disposable/*` images + orphan temp trees),
 #     so a kill-9 that skipped the trap on a previous run doesn't leak on the home volume.
-#   * BOUNDS EVERY ASSET CACHE in the same sweep, via `bin/asset-cache.sh` (#321): the persistent dnf
-#     cache, the podman image/layer STORE (which had NO ceiling here at all before that change — 97% of
-#     76.8 GB was reclaimable, measured) and the sibling git/download caches once they land. Three
-#     bounds each — AGE, SIZE and PROJECT COMPLETION — declared in ONE registry there. That file owns
-#     the whole policy: its header is the authority on the caps, the release rule and the fail
-#     directions, and this wrapper just calls it.
+#   * BOUNDS EVERY ASSET CACHE in the same sweep. Most of them via `bin/asset-cache.sh` (#321): the
+#     persistent dnf cache, the podman image/layer STORE (which had NO ceiling here at all before that
+#     change — 97% of 76.8 GB was reclaimable, measured) and the sibling git cache once it lands. Three
+#     bounds each — AGE, SIZE and PROJECT COMPLETION — declared in ONE registry there. The PINNED-
+#     DOWNLOAD cache is bounded in the same sweep by `bin/fd-fetch.sh --gc` (#320) instead, because that
+#     script owns its content-addressed format; see the note at the gc_dl_cache call below. Each file's
+#     header is the authority on its own caps, release rule and fail directions — this wrapper just
+#     calls them and duplicates no policy.
 #
 # PROVENANCE (Build Principle 2): this only ever builds the repo's OWN Containerfile in
 # the caller-provided context — it adds NO repos, NO source-loosening --build-arg, and does
-# NOT edit the Containerfile. It NEVER writes into the context (podman build reads it), so
+# NOT edit the Containerfile. That holds for the #320 download cache too, deliberately: the
+# cache is OPT-IN THROUGH THE DECLARED CONTRACT (a repo's own Containerfile calls fd-fetch.sh),
+# NEVER by this script rewriting a tree at build time — a validation build that silently differs
+# from the build CI runs is not a validation. A repo that keeps `ADD <url>` simply keeps paying
+# the download; nothing here changes what its build does. And the cached bytes are provenance-
+# CHECKED, not trusted: fd-fetch.sh re-verifies the pin's sha256 on every path, cache included.
+# It NEVER writes into the context (podman build reads it), so
 # the IMMUTABLE live tree is untouched; for work that must DIFFER from the live tree pass
 # `-c <srcdir>` and the helper bolts on a SEPARATE TEMPORARY tree on the WRITABLE home
 # volume, builds there, and reaps it on teardown.
@@ -45,15 +61,19 @@
 #
 # Env knobs:
 #   FD_DNF_CACHE  persistent dnf cache dir   (default: $HOME/.cache/fd-dnf)
+#   FD_DL_CACHE   persistent pinned-download cache dir (default: $HOME/.cache/fd-dl)
 #   FD_STALE_MIN  orphan age threshold, mins (default: 720 = 12h)
 #   BUILD_ARGS    extra args forwarded verbatim to `podman build` (e.g. --build-arg X=Y)
 #   AC_LIB        the bounded-cache GC library (default: the sibling bin/asset-cache.sh)
-#   Every CACHE knob (dnf/image-store/git/download caps, the completion arm and its seams) lives in
-#   bin/asset-cache.sh's header — the single place the cache policy is declared. Not duplicated here.
+#   Cache caps are declared by the cache's OWNER, never duplicated here: bin/asset-cache.sh's header
+#   for the dnf/image-store/git bounds + the completion arm and its seams (#321), and bin/fd-fetch.sh's
+#   header for the content-addressed download cache it owns the format of (#320).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 DNF_CACHE="${FD_DNF_CACHE:-$HOME/.cache/fd-dnf}"
+DL_CACHE="${FD_DL_CACHE:-$HOME/.cache/fd-dl}"   # the pinned-download cache; bound at the FIXED
+                                                # /var/cache/fd-dl the fetch contract resolves (#320)
 DISPOSABLE_NS="localhost/disposable"
 TMP_PREFIX="fd-throwaway"
 TMP_ROOT="$HOME/.cache"                 # throwaway trees live on the WRITABLE home volume
@@ -103,11 +123,39 @@ sweep_orphans(){
   done
   # BOUND EVERY ASSET CACHE (#321). This replaced a dnf-ONLY GC: the same age-then-LRU algorithm now
   # runs from a registry that also covers the podman image/layer store (previously unbounded here) and
-  # the sibling git/download caches, and each entry additionally carries a PROJECT-COMPLETION bound.
+  # the sibling git cache, and each entry additionally carries a PROJECT-COMPLETION bound.
   # The policy — the caps, the release rule, and why every unreadable signal KEEPS the cache — lives in
   # bin/asset-cache.sh's header. It always returns 0: this runs inside every build.
   asset_cache_gc
+  # The pinned-download cache is bounded by the script that OWNS ITS FORMAT, from this same sweep.
+  # It is deliberately NOT a registry row: #321 declared one speculatively as `tree`+`repo` (immediate
+  # subdirectories keyed by repo name) BEFORE the sibling existed, and #320 then landed a FLAT
+  # CONTENT-ADDRESSED cache — sha256-named files plus `.part-*` partials, with no repo keying at all
+  # (identical bytes are shared across every repo by construction). A subdirectory-pruner turned loose
+  # on a flat file cache finds no subdirectories and silently bounds NOTHING, and both mechanisms read
+  # the SAME FD_DL_CACHE_CAP_GB knob with different defaults, so running both would make one of the two
+  # documented caps a lie. #321 named this exact case and where it lands: "if a sibling lands a
+  # different layout, its ROW is the one place that changes." One owner per cache format — see the
+  # registry-header note in bin/asset-cache.sh.
+  gc_dl_cache
 }
+
+# ---- bound the persistent PINNED-DOWNLOAD cache (#320) --------------------------------------------
+# The SECOND durable input needs the same treatment as the first, and for the same reason: a cache that
+# nothing bounds eventually eats a limited VPS quota (BP10 storage-safety). The age-then-LRU policy and
+# both caps live in bin/fd-fetch.sh --gc (the script that OWNS the cache format), and are enforced from
+# HERE — the sweeper every throwaway build already runs — so no separate timer or human step is needed.
+# FAIL-SAFE: a missing/failing sibling is logged, never fatal. A build must not die because a GC could
+# not run; the cost of a skipped GC is bounded by the NEXT build's sweep.
+gc_dl_cache(){
+  local fetcher="$HERE/fd-fetch.sh"
+  if [ ! -f "$fetcher" ]; then
+    echo "gc: dl-cache NOT bounded — $fetcher is missing (the fetch contract's owner); caps unenforced" >&2
+    return 0
+  fi
+  FD_DL_CACHE="$DL_CACHE" bash "$fetcher" --gc || echo "gc: dl-cache GC failed (rc=$?) — caps unenforced this sweep" >&2
+}
+
 
 # ---- teardown: discard THIS run's candidate + temp tree; cache survives ---------------
 TAG=""; SELF_TMP=""
@@ -171,16 +219,20 @@ NAME="$(printf '%s' "$NAME" | tr -c 'a-zA-Z0-9._-' - )"
 SUFFIX="$(printf '%s' "$SUFFIX" | tr -c 'a-zA-Z0-9._-' - )"
 TAG="$DISPOSABLE_NS/$NAME:val-$SUFFIX"
 
-mkdir -p "$DNF_CACHE"
+mkdir -p "$DNF_CACHE" "$DL_CACHE"   # the mount's OWNER creates it — fd-fetch.sh never conjures one
 
-echo "build-throwaway: tag=$TAG file=$FILE ctx=$CTX dnf-cache=$DNF_CACHE"
+echo "build-throwaway: tag=$TAG file=$FILE ctx=$CTX dnf-cache=$DNF_CACHE dl-cache=$DL_CACHE"
 echo "build-throwaway: $([ -n "$SELF_TMP" ] && echo 'throwaway COPY tree (live tree untouched)' || echo 'caller context (read-only by podman build)')"
 
-# ---- the build: persistent dnf cache + persistent layer cache, chroot isolation ------
+# ---- the build: persistent dnf + download caches, persistent layer cache, chroot isolation ------
+# BOTH binds are parity-critical against the Tier-2 host build (bin/check-build-parity.sh): a Tier-1
+# build missing a bind the host build has is exactly the #53 bug — a bind-mount-only failure that passes
+# in-box and REDs at the host.
 # shellcheck disable=SC2086
 podman build \
   --isolation=chroot \
   -v "$DNF_CACHE:/var/cache/libdnf5:rw" \
+  -v "$DL_CACHE:/var/cache/fd-dl:rw" \
   ${BUILD_ARGS:-} \
   -t "$TAG" \
   -f "$FILE" \

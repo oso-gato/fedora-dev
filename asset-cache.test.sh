@@ -101,7 +101,7 @@ reset_case(){
 # GC [extra env…] — run the REAL library's one pass against this row's world.
 GC(){
   env HOME="$CASE/home" \
-      FD_DNF_CACHE="$CASE/dnf" FD_GIT_CACHE="$CASE/git" FD_DL_CACHE="$CASE/dl" \
+      FD_DNF_CACHE="$CASE/dnf" FD_GIT_CACHE="$CASE/git" \
       FD_IMAGE_STORE="$CASE/store" AC_STATE="$CASE/state" \
       AC_ORACLE="$FIX/oracle.sh" AC_SCOPE="$FIX/scope.sh" AC_PODMAN="$FIX/podman.sh" \
       ORACLE_DIR="$ORACLE_DIR" SCOPE_LIST="$SCOPE_LIST" PODLOG="$PODLOG" FIXD="$FIX" \
@@ -152,16 +152,22 @@ now_kb="$(du -sk "$CASE/dnf" | cut -f1)"
 
 echo "== a registry entry whose dir DOES NOT EXIST is skipped SILENTLY (never an error) =="
 reset_case a4
-mkfile "$CASE/dnf/x.rpm" "1 day ago"          # only the dnf dir exists; git/dl/store do not
+mkfile "$CASE/dnf/x.rpm" "1 day ago"          # only the dnf dir exists; git/store do not
 out="$(GCLIB FD_DNF_CACHE_MAX_AGE_DAYS=3650 FD_DNF_CACHE_CAP_MB=999999 2>&1)"; rc=$?
-[ "$rc" = 0 ] && ok "rc 0 with three of four caches absent" || no "non-zero rc on absent dirs (rc=$rc)" "$out"
-grep -Eq 'git|dl|images' <<<"$out" && no "an absent cache was mentioned — not a silent skip" "$out" \
+[ "$rc" = 0 ] && ok "rc 0 with two of three caches absent" || no "non-zero rc on absent dirs (rc=$rc)" "$out"
+grep -Eq 'git|images' <<<"$out" && no "an absent cache was mentioned — not a silent skip" "$out" \
   || ok "absent caches produce NO output at all"
 [ ! -s "$PODLOG" ] && ok "the absent image store means podman was never invoked" \
   || no "podman was called for a store dir that does not exist" "$(cat "$PODLOG")"
-# The skip must be a SKIP, not an absence: the registry still declares all four.
-[ "$(GC bash "$LIB" --registry | grep -c .)" = 4 ] \
-  && ok "the registry still DECLARES all four caches (skipped ≠ undeclared)" || no "registry lost an entry"
+# The skip must be a SKIP, not an absence: the registry still declares all three.
+[ "$(GC bash "$LIB" --registry | grep -c .)" = 3 ] \
+  && ok "the registry still DECLARES all three caches (skipped ≠ undeclared)" || no "registry lost an entry"
+# The download cache is bounded by bin/fd-fetch.sh (it owns that content-addressed format), NOT by a
+# row here. A re-added row would silently bound nothing on a flat cache and would fight fd-fetch over
+# the same FD_DL_CACHE_CAP_GB knob, so its ABSENCE is the assertion. fd-fetch.test.sh D1 proves the
+# bound is still enforced from build-throwaway.sh's sweep.
+[ -z "$(GC bash "$LIB" --registry | awk -F'|' '$1=="dl"')" ] \
+  && ok "no dl row — bin/fd-fetch.sh owns the download cache's bound" || no "a dl registry row is back"
 
 echo "===== PART B — the PROJECT-COMPLETION bound (stubbed ship oracle) ====="
 
