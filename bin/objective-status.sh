@@ -48,6 +48,9 @@ set -uo pipefail
 ORG="${ORG:-oso-gato}"
 DEV_LOGIN="${DEV_LOGIN:-oso-gato-nox-claudebox}"
 BACKLOG_LABEL="${BACKLOG_LABEL:-backlog}"
+# The R31 intake label — the maintainer-confirmed objective issue lives under it, and its
+# `## Delivered means` line is what decides whether an acceptance probe is MANDATORY (see classify).
+INTAKE_LABEL="${INTAKE_LABEL:-objective}"
 ESCALATE_LABELS="${ESCALATE_LABELS:-escalate,needs-decision,blocked,awaiting-maintainer}"
 # The standing work plan is discovered BY TITLE PREFIX (fleet-halt.sh's control-issue precedent) — it
 # carries no label of its own. Set PLAN_TITLE='' to switch the fact off entirely.
@@ -79,19 +82,30 @@ pr_drivable(){
   printf 1
 }
 
-# classify <drivable-count> <probe:PASS|FAIL|ABSENT> <ever-backlog:0|1> [shipgate:PASS|PENDING] →
-#   SHIPPED | OPEN | INDETERMINATE.
-#   OPEN         — positive drivable work remains, OR a declared probe FAILs, OR the objective is otherwise
+# classify <drivable-count> <probe:PASS|FAIL|ABSENT> <ever-backlog:0|1> [shipgate:PASS|PENDING]
+#          [probe-required:0|1] → SHIPPED | OPEN | INDETERMINATE.
+#   OPEN         — positive drivable work remains, OR a declared probe FAILs, OR the objective DEMANDED a
+#                  live probe and there is none, OR the objective is otherwise
 #                  would-be-shipped but the R34 SPEC-VS-BUILD ship gate has NOT passed the current aggregate
 #                  (shipgate != PASS). This is the anti-false-stop teeth AND the R34 close-gate.
 #   SHIPPED       — nothing drivable AND the probe does not fail AND ship evidence exists (backlog existed
 #                  or probe PASS) AND an independent R34 ship-gate PASS is bound to THIS aggregate. The
 #                  objective closes ONLY with that independent PASS — the author is never its own sole judge.
 #   INDETERMINATE — the oracle cannot speak (no evidence the objective was ever decomposed and no probe).
+#
+# PROBE-REQUIRED — THE HOLLOW-SHIP FIX (maintainer's complaint, 2026-07-29: "you keep telling me something
+# is merged, but every time I refresh the host it goes nowhere"). ABSENT used to be a free pass in ALL
+# cases: "the emptiness of backlog+PRs is the ship evidence". For a plain-code deliverable that is right —
+# merged IS delivered. For anything that has to RUN, it is how a loop declares victory over software that
+# was never once executed. The objective now says which (`## Delivered means: merged|running`), and when it
+# says `running`, a MISSING probe is MISSING WORK — build the probe, then pass it. An objective cannot be
+# shipped on the absence of its own evidence.
 classify(){
-  local drivable="$1" probe="$2" ever="$3" shipgate="${4:-}"
+  local drivable="$1" probe="$2" ever="$3" shipgate="${4:-}" required="${5:-0}"
   case "$drivable" in ''|*[!0-9]*) echo INDETERMINATE; return;; esac
   [ "$probe" = FAIL ] && { echo OPEN; return; }
+  # the objective said "it must be RUNNING" and nothing proves it runs ⇒ the probe is the remaining work.
+  { [ "$required" = 1 ] && [ "$probe" = ABSENT ]; } && { echo OPEN; return; }
   [ "$drivable" -ge 1 ] && { echo OPEN; return; }
   if [ "$probe" = PASS ] || [ "$ever" = 1 ]; then
     # would-be SHIPPED — R34: close ONLY with an independent ship-gate PASS bound to this aggregate.
@@ -100,6 +114,24 @@ classify(){
   else
     echo INDETERMINATE
   fi
+}
+
+# delivered_kind — stdin: an objective issue body → `running` | `merged` | `` (nothing recognised).
+# Reads the `## Delivered means` section and takes the first word of its value, accepting BOTH shapes the
+# maintainer might see written: the value on the heading line (`## Delivered means: running`) or on the
+# line beneath it. Anything unrecognised prints nothing and the CALLER decides what silence means — this
+# helper never guesses a default, because the two defaults have opposite consequences.
+delivered_kind(){
+  awk '
+    function firstword(s){ gsub(/^[[:space:]]+/,"",s); sub(/[[:space:]].*$/,"",s); gsub(/[^A-Za-z]/,"",s); return tolower(s) }
+    /^##[[:space:]]+[Dd]elivered[[:space:]]+[Mm]eans/ {
+      h=$0; sub(/^[^:]*/,"",h); sub(/^:[[:space:]]*/,"",h)
+      if (h ~ /[^[:space:]]/) { print firstword(h); exit }
+      sec=1; next
+    }
+    /^##[[:space:]]/ { sec=0; next }
+    sec && $0 ~ /[^[:space:]]/ { print firstword($0); exit }
+  '
 }
 
 # plan_unchecked <required-title-prefix>  (stdin: an "@@PLAN <number> <title>" header line followed by
@@ -121,9 +153,12 @@ plan_unchecked(){
 }
 
 # next_action <open-backlog:0|1> <first-backlog#> <first-drivable-pr#> <first-pr-has-live-validate:0|1>
+#             [probe-missing:0|1]
 #   → the ONE-LINE exact next DRIVE action the gate injects into a false-DONE/false-BLOCKED block.
+# probe-missing distinguishes "the probe FAILS" from "the objective demanded a probe and there ISN'T one".
+# Telling an agent to fix a failing probe when none exists sends it hunting for a file it has to WRITE.
 next_action(){
-  local ob="$1" bkl="$2" pr="$3" lv="$4"
+  local ob="$1" bkl="$2" pr="$3" lv="$4" noprobe="${5:-0}"
   if [ "$ob" = 1 ] && [ -n "$bkl" ]; then
     printf 'author + ship backlog issue #%s (implement → push a branch → label it `live-validate` → drive the host verdict to GREEN → the poller merges).' "$bkl"
   elif [ -n "$pr" ]; then
@@ -132,6 +167,8 @@ next_action(){
     else
       printf 'drive PR #%s: label it `live-validate`, then iterate the host round-trip RED→GREEN yourself (host-EXECUTED is not host-OWNED).' "$pr"
     fi
+  elif [ "$noprobe" = 1 ]; then
+    printf 'this objective says it is delivered only when RUNNING, and nothing proves it runs: write the acceptance probe (a side-effect-free command that exits 0 only when the thing actually works), commit it, then make it pass. An absent probe is not a pass.'
   else
     printf 'the acceptance probe fails — the assembled objective does not yet work; fix it before declaring DONE.'
   fi
@@ -160,6 +197,27 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "none + no evidence → INDETERMINATE" "$(classify 0 ABSENT 0)" "INDETERMINATE"
   ck "non-numeric → INDETERMINATE"        "$(classify '' ABSENT 1)" "INDETERMINATE"
   ck "probe FAIL wins over evidence"      "$(classify 0 FAIL 1 PASS)" "OPEN"
+  echo "== THE HOLLOW-SHIP FIX: 'delivered means running' makes an ABSENT probe missing WORK =="
+  # Before this, every row below read SHIPPED. Both objectives the loop ever shipped recorded
+  # PROBE: ABSENT, i.e. the emptiness of the backlog was the only evidence the software ran.
+  ck "running + no probe + ship-gate PASS → OPEN" "$(classify 0 ABSENT 1 PASS 1)" "OPEN"
+  ck "running + probe PASS → SHIPPED"             "$(classify 0 PASS 1 PASS 1)"   "SHIPPED"
+  ck "running + probe FAIL → OPEN"                "$(classify 0 FAIL 1 PASS 1)"   "OPEN"
+  ck "merged: ABSENT probe still ships"           "$(classify 0 ABSENT 1 PASS 0)" "SHIPPED"
+  ck "omitted arg keeps the old behaviour"        "$(classify 0 ABSENT 1 PASS)"   "SHIPPED"
+  ck "running + no probe + drivable → OPEN"       "$(classify 3 ABSENT 1 PASS 1)" "OPEN"
+  echo "== delivered_kind reads BOTH shapes a maintainer might write =="
+  ck "value on the heading line"  "$(printf '## Delivered means: running\n' | delivered_kind)" "running"
+  ck "value on the next line"     "$(printf '## Delivered means\nrunning\n' | delivered_kind)" "running"
+  ck "blank line between"         "$(printf '## Delivered means\n\n  merged\n' | delivered_kind)" "merged"
+  ck "case-insensitive"           "$(printf '## Delivered means: RUNNING\n' | delivered_kind)" "running"
+  ck "trailing prose ignored"     "$(printf '## Delivered means: running — on erebus\n' | delivered_kind)" "running"
+  ck "stops at the next section"  "$(printf '## Delivered means\n\n## Notes\nrunning\n' | delivered_kind)" ""
+  ck "no section → nothing"       "$(printf '## Objective\nbuild a thing\n' | delivered_kind)" ""
+  ck "unrecognised word is not 'running'" "$(printf '## Delivered means: someday\n' | delivered_kind)" "someday"
+  echo "== next_action names the RIGHT missing thing =="
+  ck "absent-and-required → write the probe" \
+     "$(next_action 0 '' '' 0 1 | grep -o 'write the acceptance probe')" "write the acceptance probe"
   echo "== plan_unchecked (the standing work plan — reported, never folded into the verdict) =="
   planfeed(){ printf '%s\n' \
     '@@PLAN 274 STANDING WORK PLAN — enterprise autonomous loop' \
@@ -191,6 +249,7 @@ emit(){ # <status> <reason> [next]
   printf 'OPEN_DEV_PRS: %s\n' "${drivable:-?}"
   printf 'DRIVABLE: %s\n' "${drivable_total:-?}"
   printf 'PROBE: %s\n' "${probe:-ABSENT}"
+  printf 'PROBE_REQUIRED: %s\n' "${probe_required:-0}"
   printf 'SHIP_GATE: %s\n' "${shipgate:-N/A}"
   printf 'OPEN_PLAN_ITEMS: %s\n' "${plan_items:-0}"
   [ -n "${plan_issue:-}" ] && printf 'PLAN_ISSUE: %s\n' "$plan_issue"
@@ -267,6 +326,36 @@ elif [ -n "$probe_path" ]; then
   log "declared acceptance probe '$probe_path' is not executable — treating as ABSENT"
 fi
 
+# FACT 3b — DOES THIS OBJECTIVE REQUIRE A LIVE PROBE? (the hollow-ship fix — see classify.)
+# The maintainer-confirmed objective issue declares `## Delivered means: merged | running`. `running` makes
+# the acceptance probe MANDATORY: absent ⇒ unfinished work, never ship evidence.
+# THE FAIL DIRECTION IS DELIBERATELY ASYMMETRIC, because the two wrong answers cost different things:
+#   * NO objective issue at all ⇒ 0 (not required). Most repos have never been through intake; demanding a
+#     probe that no objective ever asked for would freeze every one of them out of ever shipping — a
+#     fail-closed that stops the loop dead is worse than the hollow ship it prevents.
+#   * an objective issue saying `running` ⇒ 1.
+#   * an objective issue saying `merged` ⇒ 0 (for plain code, merged genuinely IS delivered).
+#   * the issue list UNREADABLE ⇒ 1. It may have demanded a probe; fail toward NOT declaring shipped.
+probe_required=0
+case "$(printf '%s' "${OBJECTIVE_DELIVERED:-}" | tr 'A-Z' 'a-z')" in
+  running) probe_required=1 ;;
+  merged)  probe_required=0 ;;
+  *)
+    if obj_body="$(gh issue list --repo "$SLUG" --label "$INTAKE_LABEL" --state open --limit 5 \
+                    --json body -q '.[].body' 2>/dev/null)"; then
+      if [ -n "$obj_body" ] && [ "$(printf '%s\n' "$obj_body" | delivered_kind)" = running ]; then
+        probe_required=1
+      fi
+    else
+      probe_required=1
+      log "cannot read $SLUG open '$INTAKE_LABEL' issues — assuming the objective demanded a live probe (fail toward NOT shipping)"
+    fi
+    ;;
+esac
+if [ "$probe_required" = 1 ] && [ "$probe" = ABSENT ]; then
+  log "this objective is delivered only when RUNNING, and no acceptance probe exists — that is missing work, not a pass"
+fi
+
 # FACT 4 — the R34 SPEC-VS-BUILD SHIP GATE verdict, bound to the CURRENT shipped aggregate (main tip).
 # Read-only: this oracle never RUNS the gate (bin/ship-gate.sh does) — it only reads the recorded fact.
 # PASS iff an unforgeable SHIPGATE_LOGIN commit-comment on the exact current main sha reads VERDICT PASS
@@ -292,16 +381,23 @@ if [ "$drivable_total" -eq 0 ] && { [ "$probe" = PASS ] || [ "$ever_backlog" = 1
   fi
 fi
 
-verdict="$(classify "$drivable_total" "$probe" "$ever_backlog" "$shipgate")"
+probe_missing=0
+{ [ "$probe_required" = 1 ] && [ "$probe" = ABSENT ]; } && probe_missing=1
+verdict="$(classify "$drivable_total" "$probe" "$ever_backlog" "$shipgate" "$probe_required")"
 case "$verdict" in
   OPEN)
     # would-be-shipped (no drivable work, probe not failing, ship evidence) but the R34 ship gate has
     # not PASSed the current aggregate — the one OPEN case whose ONLY remaining step is the ship gate.
-    if [ "$drivable_total" -eq 0 ] && [ "$probe" != FAIL ] && { [ "$probe" = PASS ] || [ "$ever_backlog" = 1 ]; }; then
+    # A MANDATORY-but-missing probe is excluded: the remaining step there is writing the probe, and
+    # sending the agent to the ship gate would ask an independent reviewer to bless unproven software.
+    if [ "$probe_missing" = 0 ] && [ "$drivable_total" -eq 0 ] && [ "$probe" != FAIL ] && { [ "$probe" = PASS ] || [ "$ever_backlog" = 1 ]; }; then
       next="run the R34 spec-vs-build ship gate — 'bin/ship-gate.sh --post $REPO' — an independent review (objective→requirements→build-principles) must PASS the built product bound to main@${aggregate_sha:0:7} before the objective can close; current ship-gate=$shipgate."
       emit OPEN "all backlog features shipped and probe=$probe, but the R34 SPEC-VS-BUILD ship gate has NOT passed the current aggregate (ship-gate=$shipgate) — the objective is NOT closed (R34)" "$next"
+    elif [ "$probe_missing" = 1 ] && [ "$drivable_total" -eq 0 ]; then
+      next="$(next_action 0 '' '' 0 1)"
+      emit OPEN "no drivable open work, but this objective says '## Delivered means: running' and NO acceptance probe exists — an objective cannot ship on the absence of its own evidence" "$next"
     else
-      next="$(next_action "$( [ "$open_backlog" -ge 1 ] && echo 1 || echo 0 )" "$first_backlog" "$first_pr" "$first_pr_lv")"
+      next="$(next_action "$( [ "$open_backlog" -ge 1 ] && echo 1 || echo 0 )" "$first_backlog" "$first_pr" "$first_pr_lv" "$probe_missing")"
       emit OPEN "drivable open work remains: $open_backlog open $BACKLOG_LABEL issue(s) + $drivable open dev PR(s); probe=$probe — the objective is NOT shipped" "$next"
     fi
     ;;

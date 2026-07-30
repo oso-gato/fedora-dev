@@ -64,11 +64,20 @@ People keep asking finance for invoice data by email. They should be able to get
 
 ## Out of scope
 - Scheduled or emailed exports
+- Ruled out: a nightly email digest — the maintainer wants pull, not push
 
 ## Acceptance
 $ npm test -- invoice-export
+observed: FAILS today (no such test file)
 
 Expected: exits 0.
+
+## Delivered means
+merged
+
+## How
+Work autonomously. Come back only if the export needs a schema change.
+Stop after 2 attempts at the same failure.
 EOF
 
 # file <desc> — run the REAL filer in --file mode against the stub and capture its rc.
