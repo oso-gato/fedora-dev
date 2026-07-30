@@ -1,0 +1,26 @@
+# bandwidth-probe fixture — OS PACKAGES class (fedora-dev#322 / objective #311).
+#
+# Measures whether a second consecutive build re-downloads RPMs. `bin/build-throwaway.sh` binds the
+# PERSISTENT dnf package cache ($HOME/.cache/fd-dnf -> /var/cache/libdnf5), which is the cache under
+# test here.
+#
+# CACHEBUST IS LOAD-BEARING, NOT HYGIENE. The probe passes a UNIQUE value on each of its two builds so
+# this RUN step genuinely re-executes on build 2. Without it podman's LAYER cache serves the step, the
+# build pulls zero bytes, and the class passes while the dnf cache is never consulted at all — a green
+# that measures nothing. Defeating the layer cache is what makes build 2's byte count a statement about
+# the PACKAGE cache. (Measured 2026-07-30 in-box: cold 48,168,228 B / 32 s; with the cache warm and the
+# layer cache defeated 2,492 B / 2 s, dnf itself reporting "Need to download 0 B".)
+#
+# keepcache=1 is likewise required: without it dnf deletes each RPM after installing it and the bound
+# cache never accumulates, so every build re-downloads and the class can never read zero.
+#
+# Principle 1/2: the base is the official Fedora registry image, the version is an ARG (never inlined),
+# and the one package comes from Fedora's own repos (class (a)). `tree` is a small, stable leaf package
+# chosen so the fixture costs little; nothing here is installed into a shipped image.
+ARG FEDORA_VERSION=44
+FROM registry.fedoraproject.org/fedora-minimal:${FEDORA_VERSION}
+
+ARG CACHEBUST=static
+RUN echo "bandwidth-probe ospkg cachebust=${CACHEBUST}" \
+ && dnf5 install -y --setopt=install_weak_deps=False --setopt=keepcache=1 tree \
+ && rpm -q tree

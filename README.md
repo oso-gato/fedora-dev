@@ -203,6 +203,8 @@ Your Claude login + transcripts survive every rebuild (they live in `~/.claude` 
 
 **Build validation:** build → deploy via `run.sh` → confirm `(healthy)` → functional-probe each access path. Final proof = CI green + host-side live-gate. **Changes to fedora-dev itself:** edit the live clone at `~/.local/share/fedora-dev/`, `gh pr create`, and wait for merge — ad-hoc edits vanish on the next rebuild.
 
+**Measuring rather than asserting:** `bash bin/bandwidth-probe.sh` reports the bytes two consecutive builds actually pulled, per asset class (OS packages, base images, git objects, language/vendor downloads), on both boxes. Read its KV block bottom-up: `VERDICT: GREEN|RED` is the answer, `CONTROL: DETECTS|BLIND` says whether the run could see a real download at all (BLIND ⇒ its zeros mean nothing), `HOST:` covers the other box, and each `CLASS_<NAME>: <state> <bytes-build-1> <bytes-build-2>` line carries the measurement — where `SKIPPED` means the class had nothing to measure and, like any non-`ZERO` state, blocks exit 0. `FLOOR:` states the sampled noise threshold, because the counter is box-wide and a threshold nobody can see is a threshold nobody can trust. It reads RED today by design.
+
 Full procedure: [`policy/CLAUDE.md`](policy/CLAUDE.md) — PIPELINE + HOW DO I sections, always in context for the agent.
 
 ### Pinned downloads are cached locally — `ADD <url>` is not used
