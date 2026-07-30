@@ -1,0 +1,18 @@
+# bandwidth-probe fixture — BASE IMAGES class (fedora-dev#322 / objective #311).
+#
+# Measures whether a second consecutive build re-pulls its base image. The cache under test is the
+# local podman layer/blob store, which #311 records as covering this class incidentally ("the podman
+# layer cache surviving the candidate `rmi`") — incidentally, and so with nothing protecting it. This
+# arm is what would notice if that ever stopped being true.
+#
+# NO CACHEBUST HERE, deliberately — unlike the ospkg fixture. `FROM` resolves against the local store
+# directly, so there is no layer-cache confound to defeat: build 2 costing zero bytes IS the property
+# being measured, not an artifact of a step being skipped. Forcing a re-pull (`--pull=always`) would
+# measure podman's manifest-check behaviour instead, which is not the objective's question.
+#
+# The COPY keeps the fixture's only network-touching step the base-image resolution, so the bytes this
+# arm reports are attributable to this class and no other.
+ARG FEDORA_VERSION=44
+FROM registry.fedoraproject.org/fedora-minimal:${FEDORA_VERSION}
+
+COPY marker /bandwidth-probe-baseimg
