@@ -71,11 +71,14 @@ standalone-click rule — the ZERO-GATE decision removed it); the fitness review
 
 **STOPPING THE FLEET (R9)** — the maintainer-thrown SOFT HALT label is **RETIRED (2026-07-30)**. It was
 read by every sweeper before acting, and was retired on its own record: thrown by a maintainer **0 times
-ever**, fired by itself **935 times, all false**, suppressing **338 real actions** — one of them the
-ticket that would have repaired a six-day outage. It duplicated two stronger stops and depended on
-GitHub being readable, so it failed exactly when an outage made it matter. THE STOPS THAT REMAIN, both
-stronger and neither needing the loop's cooperation: **revoke the App key** (works with GitHub
-unreachable; the stop of record) or **stop the containers on the host**. No sweeper reads any soft stop.
+ever**, fired by itself **935 times, all false**, suppressing **498 action-attempts** across five buckets (338
+of them ONE PR at ONE sha re-declined on 338 consecutive polls — not 338 distinct actions, and no
+outage-repair ticket among them). It duplicated a stronger stop and depended on
+GitHub being readable, so it failed exactly when an outage made it matter. THE STOP OF RECORD is **revoking the App key** — it works with GitHub unreachable and needs no
+cooperation from the loop. **Stopping the containers is NOT an equivalent stop** (measured 2026-07-30):
+`fedora-dev.container` is `Restart=always`/`RestartSec=10` and the host watchers `Wants=` a
+`claudebox-up.service` that re-starts the box on a 10s timer, so a `podman stop` is undone in ~30s. A
+real local stop is `systemctl --user stop && disable` across those units. No sweeper reads any soft stop.
 
 ## THE LOOP — dev↔host, two-tier validation
 

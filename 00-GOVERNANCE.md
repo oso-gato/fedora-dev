@@ -217,7 +217,7 @@ the e-stop served his objective, the maintainer's answer was to delete it and re
 | Times a maintainer ever threw it | **0**, all-time |
 | Times it fired by itself | **935**, every one false |
 | Cause split | **574** `gh: command not found` (a broken tool inside the box) · **332** API garbage · **29** dead credential |
-| Real actions it suppressed | **338** — including the ticket that would have repaired a six-day outage |
+| Suppressed action-attempts | **498** across five buckets — **338** fix-attempts (ONE PR at ONE sha, re-declined on 338 consecutive ~26s polls; that PR was later closed UNMERGED; **no outage-repair ticket among them**), 101 authoring-loop launches, 31 host-refresh scans, 19 reconcile, 9 ship-actuator |
 | Cost | ~**870 lines** across both repos, **14 call sites** |
 
 **WHY IT WAS NEVER A SAFETY FEATURE.** It duplicated two stops that are strictly stronger and need no

@@ -520,8 +520,9 @@ fi
 # a host-set OPT-IN flag (the old `DEV_LOOP_ENABLED=1`-default-off) is a deploy-CONFIG the self-refresh
 # CANNOT set (it deploys the image + live-clone, never the host quadlet's env), so a default-off flag would
 # force a manual host arm — contradicting "self-arming = no more manual host actions after bootstrap". To
-# DISABLE, set `DEV_LOOP_ENABLED=0` in the deploy env; R9 fleet HALT is the emergency observe-only stop
-# (no redeploy needed). Runs INSIDE the claudebox because dev-author spawns `claude` to implement each
+# DISABLE, set `DEV_LOOP_ENABLED=0` in the deploy env (a host edit + recreate).
+# THERE IS NO IN-BAND EMERGENCY STOP: the R9 soft HALT was retired 2026-07-30 and `podman stop` is undone in ~30s by `Restart=always` + `claudebox-up.service`.
+# To stop the loop NOW: revoke the App key (the stop of record), or `systemctl --user stop && disable` the watcher units. Runs INSIDE the claudebox because dev-author spawns `claude` to implement each
 # feature; plain-shell (no gate/classifier), so the sanctioned autonomous-authoring path can execute — NOT
 # the interactive agent, gated FROM authoring. Best-effort + self-restarting, OUTSIDE the hard watchdog: an
 # authoring-loop death must never take the container down. bin/dev-loop-service.sh reads the R16 scope

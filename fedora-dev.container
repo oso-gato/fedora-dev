@@ -118,7 +118,7 @@ Environment=POLLER_ARMED=1
 # (self-arms with the apparatus): the box autonomously AUTHORS a live-validate PR for every open
 # `backlog`-labelled issue (bin/dev-loop-service.sh → dev-loop.sh → dev-author.sh), each still gated by the
 # host live-gate + the INDEPENDENT fitness review before the poller can merge it, and stoppable via the R9
-# fleet HALT (no redeploy needed). The entrypoint defaults the gate ON precisely because a host-set flag is
+# the retired R9 soft HALT is GONE (2026-07-30) — there is no in-band emergency stop; revoke the App key, or stop+disable the units. The entrypoint defaults the gate ON precisely because a host-set flag is
 # a deploy-CONFIG the self-refresh cannot set — a default-off flag would need a MANUAL host arm, breaking
 # self-arming. PINNED ON in the spec (below) — belt-and-suspenders with the entrypoint code default
 # (`${DEV_LOOP_ENABLED:-1}`), so a future code-default flip can't silently disarm the authoring loop with

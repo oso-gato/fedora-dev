@@ -118,7 +118,7 @@
 #   dev-loop.sh <repo> [--once]   plan the approved objectives, then drive the backlog for <repo> —
 #                                 ONE full pass, then exit
 #   dev-loop.sh --watch <repo>    supervised loop (flock singleton): one pass every $LOOP_INTERVAL s;
-#                                 the R9 fleet HALT gates every pass (#151)
+
 #   dev-loop.sh --selftest        exercise the pure helpers (no gh / author / network)
 #
 # ENV: ORG (default oso-gato); BACKLOG_LABEL (default backlog); DEV_AUTHOR (default the sibling
@@ -156,7 +156,7 @@ INTAKE_LABEL="${INTAKE_LABEL:-objective}"
 APPROVED_LABEL="${APPROVED_LABEL:-approved}"
 DEV_PLAN="${DEV_PLAN:-$HERE/dev-plan.sh}"
 MAX_PLANS_PER_PASS="${MAX_PLANS_PER_PASS:-2}"
-# the R9 fleet HALT reader (#151) — rc 0 is the ONLY "go"; see the header. Overridable for the mock test.
+
 # the R16 operating-scope reader (#167) — rc 0 is the ONLY "in scope"; see bin/repo-scope.sh.
 REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
 # R16 per-session scope (2026-07-16): inside a REAL agent session narrow to THIS session's objective-BACKED
@@ -627,7 +627,7 @@ if [ "${1:-}" = "--watch" ]; then
   exec 9>"$LOCK"
   flock -n 9 || { log "another dev-loop --watch for $REPO holds the lock; exiting"; exit 0; }
   trap 'log "dev-loop --watch stopping (signal)"; exit 0' TERM INT HUP
-  log "dev-loop --watch up (repo=$REPO interval=${LOOP_INTERVAL}s; R9 fleet HALT read at the top of every pass — #151)"
+  log "dev-loop --watch up (repo=$REPO interval=${LOOP_INTERVAL}s)"
   while :; do
     one_pass "$REPO" || log "pass error (continuing)"
     sleep "$LOOP_INTERVAL"

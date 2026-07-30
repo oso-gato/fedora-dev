@@ -17,7 +17,7 @@
 # autonomous authoring (as from merging); the dumb, gate-checked service is the sanctioned autonomous
 # authoring path. It acts ONLY on the planner's backlog-labelled issues, and every PR it opens still faces
 # the host live-gate + an INDEPENDENT fitness review before the poller can merge it — so an enabled loop is
-# fenced by the SAME two independent gates that fence the merge, PLUS the R9 fleet HALT and R16 scope that
+# fenced by the SAME two independent gates that fence the merge, PLUS the R16 scope gate that
 # dev-loop.sh reads at the top of every pass, PLUS dev-author's bounded per-run timeout and MAX_PER_PASS
 # cap. ARMED BY DEFAULT (2026-07-18) — the entrypoint gate defaults ON, so the loop SELF-ARMS with the
 # apparatus: once the self-refresh deploys the new entrypoint, authoring starts with NO host action. A
@@ -140,7 +140,7 @@ until [ -e "$STATE/.assembled" ]; do sleep 10; done
 log "waiting for the standing GitHub credential…"
 until gh auth status >/dev/null 2>&1 || [ -s "$HOME/.git-credentials" ]; do sleep 10; done
 
-log "up — interval=${LOOP_INTERVAL}s scope-reader=$REPO_SCOPE (R9 fleet HALT + R16 scope gate every pass, inside dev-loop.sh)"
+log "up — interval=${LOOP_INTERVAL}s scope-reader=$REPO_SCOPE (R16 scope gate every pass, inside dev-loop.sh)"
 while :; do
   one_cycle
   sleep "$LOOP_INTERVAL"
