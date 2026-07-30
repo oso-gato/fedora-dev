@@ -23,9 +23,10 @@
 # apparatus: once the self-refresh deploys the new entrypoint, authoring starts with NO host action. A
 # host-set OPT-IN flag would be a deploy-CONFIG the self-refresh CANNOT set (it deploys the image +
 # live-clone, never the host quadlet env), so a default-off flag would force a MANUAL host arm —
-# contradicting "self-arming = no more manual host actions". Set DEV_LOOP_ENABLED=0 to disable; R9 fleet
-# HALT is the emergency stop (no redeploy needed). Same trust level as the already-armed poller — authoring
-# produces PRs the SAME two gates (host live-gate + fitness) decide.
+# contradicting "self-arming = no more manual host actions". Set DEV_LOOP_ENABLED=0 to disable (a host
+# edit + recreate); there is NO in-band emergency stop since the R9 soft HALT was retired 2026-07-30 —
+# revoke the App key (the stop of record), or stop+disable the units. Same trust level as the
+# already-armed poller — authoring produces PRs the SAME two gates (host live-gate + fitness) decide.
 #
 # MULTI-REPO — THIS wrapper's own job. pr-poller.sh iterates the scoped repos INSIDE its own sweep, so
 # poller-service.sh need not; dev-loop.sh is single-repo (one pass over one repo's backlog), so THIS

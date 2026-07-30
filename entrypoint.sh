@@ -526,7 +526,7 @@ fi
 # feature; plain-shell (no gate/classifier), so the sanctioned autonomous-authoring path can execute — NOT
 # the interactive agent, gated FROM authoring. Best-effort + self-restarting, OUTSIDE the hard watchdog: an
 # authoring-loop death must never take the container down. bin/dev-loop-service.sh reads the R16 scope
-# every cycle + dev-loop.sh reads the R9 HALT + R16 scope every pass, and every PR it opens still faces the
+# every cycle + dev-loop.sh reads the R16 scope every pass, and every PR it opens still faces the
 # host live-gate + the INDEPENDENT fitness review before the poller can merge it. (This is the same trust
 # level the already-armed poller runs at — autonomous authoring produces PRs the same two gates decide.)
 if [ "${DEV_LOOP_ENABLED:-1}" != 0 ]; then

@@ -111,14 +111,15 @@
 # question had FAILED to post — silently dropping the feature with no human ever told.)
 #
 # NO SOFT STOP GATES A PASS. The maintainer-thrown HALT label was RETIRED 2026-07-30 (R9) on its own
-# record: 0 maintainer throws ever, 935 false self-fires, 338 real actions suppressed. Stopping the
-# authoring loop is now App-key revocation or stopping the container — both stronger, neither needing
-# this loop's cooperation or a readable GitHub.
+# record: 0 maintainer throws ever, 935 false self-fires, 498 suppressed action-attempts across five
+# buckets. THE STOP OF RECORD is App-key revocation — stronger, and needing neither this loop's
+# cooperation nor a readable GitHub. Stopping the CONTAINER is NOT an equivalent stop (measured):
+# `Restart=always` + a 10s `claudebox-up.service` undo a `podman stop` in ~30s; a real local stop is
+# `systemctl --user stop && disable` across those units.
 #
 #   dev-loop.sh <repo> [--once]   plan the approved objectives, then drive the backlog for <repo> —
 #                                 ONE full pass, then exit
-#   dev-loop.sh --watch <repo>    supervised loop (flock singleton): one pass every $LOOP_INTERVAL s;
-
+#   dev-loop.sh --watch <repo>    supervised loop (flock singleton): one pass every $LOOP_INTERVAL s
 #   dev-loop.sh --selftest        exercise the pure helpers (no gh / author / network)
 #
 # ENV: ORG (default oso-gato); BACKLOG_LABEL (default backlog); DEV_AUTHOR (default the sibling
@@ -156,7 +157,6 @@ INTAKE_LABEL="${INTAKE_LABEL:-objective}"
 APPROVED_LABEL="${APPROVED_LABEL:-approved}"
 DEV_PLAN="${DEV_PLAN:-$HERE/dev-plan.sh}"
 MAX_PLANS_PER_PASS="${MAX_PLANS_PER_PASS:-2}"
-
 # the R16 operating-scope reader (#167) — rc 0 is the ONLY "in scope"; see bin/repo-scope.sh.
 REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
 # R16 per-session scope (2026-07-16): inside a REAL agent session narrow to THIS session's objective-BACKED
@@ -388,8 +388,8 @@ if [ "${1:-}" = "--selftest" ]; then
 fi
 
 # ---- THE PLAN ARM: an APPROVED objective reaches the planner ---------------------------------------
-# Runs at the TOP of every pass, under the SAME R16 scope check and R9 halt read as the authoring arm
-# (it spawns bounded model runs and files issues — it is "new action" in exactly R9's sense). Anything
+# Runs at the TOP of every pass, under the SAME R16 scope check as the authoring arm (it spawns bounded
+# model runs and files issues, so it is gated exactly where the authoring arm is). Anything
 # it files lands as `backlog`, so the arm below picks it up in this very pass, bounded by MAX_PER_PASS.
 # NO LOCAL STATE, like everything else here: discovery is one label query and the park is derived from
 # the objective's own newest comment.
@@ -451,7 +451,7 @@ plan_pass(){ # <repo> <slug>
 one_pass(){ # <repo>
   local repo="$1" slug="$ORG/$1"
   # R16 OPERATING SCOPE (#167) — checked FIRST, every pass (a local file read; the scope can change
-  # through a confirmed merge, so --watch must re-read it like the halt switch): an out-of-scope
+  # through a confirmed merge, so --watch must RE-READ it every pass, never cache it): an out-of-scope
   # repo gets NO enumeration and NO author run — one loud line. rc≠0 (127 included) is never a go.
   if ! "$REPO_SCOPE" check "$repo" 2>/dev/null; then
     log "R16 SCOPE: repo '$repo' is outside the maintainer-confirmed operating scope — pass refused (no enumeration, no author run, nothing filed)"
@@ -459,7 +459,7 @@ one_pass(){ # <repo>
   fi
   # THE STEP UPSTREAM OF THIS BACKLOG (see THE PLAN ARM in the header): an `approved` objective is
   # handed to the planner FIRST, so anything it decomposes is authored by the arm below in this same
-  # pass. It carries the halt state rather than re-reading it — one halt read per pass.
+  # pass. It runs under the scope check just taken — one scope read per pass.
   plan_pass "$repo" "$slug"
   # ONE list call carries the issue number, its NEWEST comment (author + line 1 + createdAt) AND the
   # release budget already spent on it — the park state, its CLOCK and its BUDGET are all DERIVED from
@@ -537,8 +537,6 @@ one_pass(){ # <repo>
       verdict="$(release_verdict "$held" "$used" "$PARK_COOLOFF" "$PARK_MAX_RELEASES")"
       case "$verdict" in
         RELEASE)
-          # R9 HALT: a release POSTS and then SPAWNS, so it is exactly the "new action" a halted pass
-          # must not take. Observe it instead — the release is still due next pass, nothing is lost.
           # THE ANNOUNCEMENT IS THE BUDGET RECORD, so it is posted BEFORE the re-attempt and a failure to
           # post HOLDS. Releasing without a record would leave `used` unchanged and re-attempt on EVERY
           # pass — an unbounded model-run spin (R4), which is the very thing this clock exists to prevent.
@@ -582,9 +580,6 @@ The question above it on this thread is the one that needs an answer. Replying o
           continue ;;
       esac
     fi
-    # R9 HALT (#151): OBSERVE-ONLY — the offer is LOGGED (the operator sees the queue) but no bounded
-    # model run spawns. The check sits ONCE at the top of the pass, not here per issue: HALT stops NEW
-    # passes' work, it does not abort a pass already spawning (in-flight work is never killed).
     log "→ authoring backlog $slug#$n via dev-author"
     # dev-author is fail-closed + idempotent: already-authored / non-backlog / has-PR issues no-op inside
     # it, so the driver need not track that state. Any non-zero exit is logged and the loop CONTINUES —
@@ -616,12 +611,13 @@ The question above it on this thread is the one that needs an answer. Replying o
 
 # ---- ENTRY -----------------------------------------------------------------------------------------
 if [ "${1:-}" = "--watch" ]; then
-  # THE HARD-REFUSAL THAT STOOD HERE IS LIFTED BY #151 ITSELF (its req 9) — and ONLY because the
-  # interlock it stood in for now EXISTS: one_pass() reads the fleet HALT switch at the top of EVERY
-  # pass, before any model run is spawned. A clock that spawns bounded model runs is now stoppable
-  # within one sweep, from a phone, with no restart — which is exactly what R9 demanded and what the
-  # refusal existed to withhold until true. Lifting it WITHOUT the check landing in the same change is
-  # the one thing #151 forbids.
+  # THE HARD-REFUSAL THAT STOOD HERE WAS LIFTED BY #151 (its req 9) — and ONLY because the interlock it
+  # stood in for existed at the time: one_pass() then read the fleet HALT switch at the top of EVERY pass,
+  # so a clock that spawns bounded model runs was stoppable within one sweep, from a phone, with no
+  # restart. THAT INTERLOCK IS NOW GONE (R9 soft HALT retired 2026-07-30) and the lifted refusal remains,
+  # so the condition #151 lifted it under no longer holds. This is SURFACED, NOT DECIDED here: whether to
+  # re-impose the refusal, or to re-authorise the timer mode on the stops that actually remain (App-key
+  # revocation; `systemctl --user stop && disable` on the host), is a maintainer call.
   REPO="${2:?usage: dev-loop.sh --watch <repo>}"
   LOCK="${DEV_LOOP_LOCK:-${XDG_RUNTIME_DIR:-/tmp}/dev-loop-watch-$REPO.lock}"
   exec 9>"$LOCK"
