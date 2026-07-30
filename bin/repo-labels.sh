@@ -114,13 +114,38 @@ label_defaults(){
     | awk -F'|' 'NF==2{n=split($2,a,","); for(i=1;i<=n;i++){gsub(/^[ \t]+|[ \t]+$/,"",a[i]); if(a[i]!="") print $1"|"a[i]}}' \
     | sort -u
 }
+# LABEL_TOKEN_RE — the ONE grammar both label flags are read with, and label_tokens applies it.
+# stdin: shell source. stdout: every label ARGUMENT token, one per line, sorted. It captures the WHOLE
+# argument — surrounding quote, `$`, `{}` and all — and capturing it WHOLE is the entire point.
+#
+# WHY IT IS SHARED AND QUOTE-TOLERANT (fitness finding on 7282a3f). `--add-label` and `--label` used to
+# carry DIFFERENT literal alternatives, and only `--label`'s tolerated a leading quote. The consequences
+# were measured on this tree, not reasoned about:
+#   --add-label "host-$st"    → captured NOTHING. That is verbatim the host bus's real line
+#                               (fedora-bootstrap host-agent-watch.sh:235) and the exact construction
+#                               the audit's own comment claimed to flag — so a parity port of this file
+#                               would have been silent about host-done/host-failed while promising not
+#                               to be. A guard is dangerous BECAUSE it is trusted.
+#   --add-label host-$st      → captured `host-`, truncated at the `$` ⇒ DRIFT on a label nobody uses.
+#   --add-label "a-literal"   → captured NOTHING; a quoted literal was ungraded entirely.
+# One grammar for both flags fixes all three: the token arrives WHOLE, so a dynamically-built name still
+# carries its `$` when the caller grades it and is REPORTED as ungradeable instead of being dropped or
+# mis-graded as drift on a truncated fragment.
+#
+# RESIDUAL, stated rather than implied: the class spans the two shell quotes, `$`, `{}` and the label
+# characters. A construction it cannot span at all — a backtick substitution — is still invisible to this
+# scan; a `$(…)` carrying a space truncates to `"$`, which is `$`-bearing and therefore still reported.
+LABEL_QUOTES="\"'"
+LABEL_TOKEN_RE="--(add-)?label [$LABEL_QUOTES]?[-A-Za-z0-9_\${}$LABEL_QUOTES]+[$LABEL_QUOTES]?"
+label_tokens(){ grep -oE -- "$LABEL_TOKEN_RE" | sed -E 's/^--(add-)?label //' | sort -u; }
 # resolve_token <token> <defaults-block> → the concrete label name(s) the token denotes, one per line.
 # A bare literal resolves to itself. A `$VAR` / `"$VAR"` resolves through the defaults block. A variable
 # with NO declared default resolves to NOTHING and is reported by the caller as UNRESOLVABLE — never
-# silently dropped, which is exactly the failure being fixed here.
+# silently dropped, which is exactly the failure being fixed here. BOTH shell quotes are stripped, so a
+# literal grades identically however it is quoted (`backlog`, `"backlog"`, `'backlog'` are one label).
 resolve_token(){
   local t="${1-}" defs="${2-}"
-  t="${t#\"}"; t="${t%\"}"
+  t="${t#[\"\']}"; t="${t%[\"\']}"
   case "$t" in
     '$'*|'${'*)
       local v="${t#\$}"; v="${v#\{}"; v="${v%\}}"
@@ -195,10 +220,28 @@ LABEL="${HOST_TICKET_LABEL:-host-task}"'
   # the set. Order is not part of the contract — membership is — so the row asserts the SET.
   ck "a multi-value var yields all"    "$(resolve_token '$ESCALATE_LABELS' "$_defs" | sort | tr '\n' ' ')" "blocked escalate needs-decision "
   ck "an UNDECLARED var resolves to nothing" "$(resolve_token '"$MYSTERY_LABEL"' "$_defs")" ""
+  ck "a single-quoted literal is the same label" "$(resolve_token "'backlog'" "$_defs")" "backlog"
+
+  # The GRADING side of a dynamically-built name: it must reach the caller still $-bearing, because that
+  # is what routes it to the ungradeable NOTE instead of the drift line. The CAPTURE side (label_tokens)
+  # is deliberately NOT fixtured here: `audit` scans bin/*.sh, THIS FILE INCLUDED, so a literal
+  # `--add-label <token>` written as a selftest fixture would be read as production label usage and
+  # reported as drift against the real tree. Its rows live in repo-labels.test.sh, driven end-to-end
+  # through the real `audit` verb against a throwaway probe — the wiring test, which is the stronger
+  # coverage anyway (a pure core cannot see whether anything calls it).
+  ck "a dynamic name resolves to a \$-bearing name (⇒ NOTE, never drift)" \
+     "$(resolve_token '"host-$st"' "$_defs")" 'host-$st'
+  ck "…and never to the truncated fragment the old capture produced" \
+     "$(resolve_token '"host-$st"' "$_defs" | grep -cx 'host-')" "0"
 
   echo "== the CONTROL scope keeps a repo's picker small =="
+  # CONTROL_REPO is expanded once at load, so the knob a subshell must set is CONTROL_REPO itself —
+  # setting LABELS_CONTROL_REPO here would be a dead assignment and the row would pass on the default,
+  # i.e. test the right thing for the wrong reason.
   ck "control-only labels are OUT of a tenant's set" \
-     "$(LABELS_CONTROL_REPO=fedora-bootstrap; registry_names fedora-dev | grep -cE '^(host-done|host-failed|rebuild-approval|halt)$')" "0"
+     "$(CONTROL_REPO=fedora-bootstrap; registry_names fedora-dev | grep -cE '^(host-done|host-failed|rebuild-approval|halt)$')" "0"
+  ck "…and the knob is LIVE (a tenant named as the control repo DOES get them)" \
+     "$(CONTROL_REPO=fedora-dev; registry_names fedora-dev | grep -cE '^(host-done|host-failed|rebuild-approval|halt)$')" "4"
   ck "…and IN the control repo's set" \
      "$(registry_names fedora-bootstrap | grep -cE '^(host-done|host-failed|rebuild-approval|halt)$')" "4"
   ck "the unscoped core is in BOTH"    \
@@ -261,9 +304,7 @@ case "${1:-}" in
     HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
     src="$(cat "$HERE"/*.sh 2>/dev/null | grep -vE '^[[:space:]]*#')"
     defs="$(printf '%s\n' "$src" | label_defaults)"
-    toks="$(printf '%s\n' "$src" \
-             | grep -oE -- '--add-label ("?\$\{?[A-Za-z_]+\}?"?|[a-zA-Z][a-zA-Z0-9_-]*)|--label ("?\$\{?[A-Za-z_]+\}?"?|"?[a-z][a-z0-9-]{2,30}"?)' \
-             | sed -E 's/^--(add-)?label //' | sort -u)"
+    toks="$(printf '%s\n' "$src" | label_tokens)"
     drift="" unresolved=""
     while IFS= read -r t; do
       [ -n "$t" ] || continue
@@ -276,8 +317,10 @@ case "${1:-}" in
       fi
       while IFS= read -r n; do
         [ -n "$n" ] || continue
-        # A dynamically-built name (host-$st) cannot be graded statically; its concrete forms are
-        # declared in the registry (host-done/host-failed) and the construction is flagged, not ignored.
+        # A dynamically-built name (`host-$st`) cannot be graded statically. label_tokens captures it
+        # WHOLE, so it reaches here still bearing its `$` and is REPORTED as ungradeable — never
+        # silently dropped, and never mis-graded as drift on the truncated fragment `host-`. Its
+        # concrete forms are declared in the registry (host-done / host-failed).
         case "$n" in *'$'*) unresolved="$unresolved $n"; continue;; esac
         is_registered "$n" || drift="$drift $n"
       done <<EOF

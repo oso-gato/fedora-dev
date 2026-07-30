@@ -178,6 +178,70 @@ run bash "$SCRIPT" audit
   && ok "every label literal used in the real bin/ tree is declared in the registry" \
   || bad "audit-clean" "rc=$RC out=[$OUT] — add the label to REGISTRY or stop using it"
 
+echo "== audit — the label ARGUMENT is CAPTURED, whatever shape it wears (fitness finding on 7282a3f) =="
+# The audit's comment claimed a dynamically-built name was "flagged, not ignored". It was not: the two
+# flags carried DIFFERENT literal alternatives and only `--label`'s tolerated a leading quote, so the
+# host bus's real line — `--add-label "host-$st"`, fedora-bootstrap host-agent-watch.sh:235 — matched
+# NOTHING and the guard was silent about the one construction it named. These rows are end-to-end
+# through the real `audit` verb, because the fixture cannot live in the script's own --selftest: audit
+# scans bin/*.sh INCLUDING ITSELF, so a fixture there would be read as production usage and reported as
+# drift against the real tree (measured while writing this).
+BINDIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
+PROBE="$BINDIR/probe-label-$$.sh"; MUT5="$BINDIR/mut-tokre-$$.sh"
+MUT2="$BINDIR/mut-audit-$$.sh"; MUT3="$BINDIR/mut-audit-old-$$.sh"
+# ONE trap covering the tempdir AND every artifact this suite drops in bin/ — a later `trap … EXIT`
+# REPLACES an earlier one, so each addition must re-state the whole set or something leaks.
+trap 'rm -rf "$ROOT"; rm -f "$PROBE" "$MUT5" "$MUT2" "$MUT3"' EXIT
+
+# Probe A — the host bus's verbatim construction. Expected: REPORTED as ungradeable (a NOTE), rc 0, and
+# NO drift, because the truncated fragment `host-` is not a label anyone uses and naming it would be a
+# false positive on a guard whose whole value is being trusted.
+cat > "$PROBE" <<'PEOF'
+#!/usr/bin/env bash
+gh issue edit "$n" --repo "$r" --add-label "host-$st" >/dev/null 2>&1
+PEOF
+chmod +x "$PROBE"
+run bash "$SCRIPT" audit
+{ [ "$RC" = 0 ] && echo "$OUT" | grep -q 'cannot be graded statically' \
+  && echo "$OUT" | grep -qF 'host-$st' && ! echo "$OUT" | grep -q 'LABEL DRIFT'; } \
+  && ok "a dynamic '--add-label \"host-\$st\"' is REPORTED ungradeable — rc 0, no false drift on 'host-'" \
+  || bad "audit-dynamic-flagged" "rc=$RC out=[$OUT]"
+
+# MUTATION: restore the pre-fix token grammar (the two divergent alternatives) on a COPY. Against the
+# SAME probe the NOTE must VANISH — the construction silently ignored again, which is what makes the row
+# above a measurement of the capture rather than of the reporting plumbing.
+cat > "$ROOT/oldre.txt" <<'REOF'
+LABEL_TOKEN_RE='--add-label ("?\$\{?[A-Za-z_]+\}?"?|[a-zA-Z][a-zA-Z0-9_-]*)|--label ("?\$\{?[A-Za-z_]+\}?"?|"?[a-z][a-z0-9-]{2,30}"?)'
+REOF
+awk -v f="$ROOT/oldre.txt" '/^LABEL_TOKEN_RE=/{while((getline l < f)>0) print l; next} {print}' \
+    "$SCRIPT" > "$MUT5"; chmod +x "$MUT5"
+if cmp -s "$SCRIPT" "$MUT5" || ! grep -q '^LABEL_TOKEN_RE=' "$MUT5" || ! bash -n "$MUT5" 2>/dev/null; then
+  bad "audit-dynamic-mutation-vacuous" "the old grammar was not substituted into a runnable copy"
+else
+  run bash "$MUT5" audit
+  { [ "$RC" = 0 ] && ! echo "$OUT" | grep -qF 'host-$st'; } \
+    && ok "MUTATION BITES: under the OLD grammar the same line is captured by nothing and never mentioned" \
+    || bad "audit-dynamic-mutation" "rc=$RC out=[$OUT] (old grammar should be silent on it)"
+fi
+rm -f "$MUT5"
+
+# Probe B — a QUOTED literal after --add-label, ungraded entirely before (the reviewer's related NOTE).
+# It must now be graded like any other literal: undeclared ⇒ DRIFT, rc 1.
+cat > "$PROBE" <<'PEOF'
+#!/usr/bin/env bash
+gh issue edit 1 --add-label "totally-undeclared" >/dev/null 2>&1
+PEOF
+run bash "$SCRIPT" audit
+{ [ "$RC" = 1 ] && echo "$OUT" | grep -q 'LABEL DRIFT' && echo "$OUT" | grep -q 'totally-undeclared'; } \
+  && ok "a QUOTED literal after --add-label is graded — undeclared ⇒ drift, rc 1 (was ungraded)" \
+  || bad "audit-quoted-literal" "rc=$RC out=[$OUT]"
+rm -f "$PROBE"
+
+run bash "$SCRIPT" audit
+{ [ "$RC" = 0 ] && echo "$OUT" | grep -q 'no label drift'; } \
+  && ok "…and the real tree is clean again once the probe is gone (no residue)" \
+  || bad "audit-probe-residue" "rc=$RC out=[$OUT]"
+
 echo "== prune — DESTRUCTIVE, so dry-run by default and it never touches the registry =="
 # The maintainer's standing instruction is a SMALL controlled set per repo. Before `prune` existed the
 # cleanup was a hand-run loop nothing could repeat — and a destructive verb with no WIRING test is the
@@ -243,9 +307,8 @@ echo "== MUTATION — the audit RESOLVES variable defaults (it used to discard t
 # The old audit ended its pipeline with `grep -vE '^\$'`, so `--label "$APPROVED_LABEL"` was found and
 # then thrown away: six real labels were invisible and it reported "no drift" over the hole. Proof that
 # the fix bites: drop a label declared ONLY via a variable default and require the audit to catch it.
-BINDIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
-MUT2="$BINDIR/mut-audit-$$.sh"; MUT3="$BINDIR/mut-audit-old-$$.sh"
-trap 'rm -f "$MUT2" "$MUT3"' EXIT
+# BINDIR / MUT2 / MUT3 and the cleanup trap are declared once, above — a second `trap … EXIT` here would
+# REPLACE that one and leak both the tempdir and the bin/ probe.
 sed '/^approved|/d' "$SCRIPT" > "$MUT2"; chmod +x "$MUT2"
 if cmp -s "$SCRIPT" "$MUT2"; then bad "audit-resolve-vacuous" "the sed changed nothing"; else
   bash "$MUT2" audit >/dev/null 2>&1; mrc=$?
