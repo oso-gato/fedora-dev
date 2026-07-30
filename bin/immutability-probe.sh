@@ -62,14 +62,28 @@
 #   immutability-probe.sh            both halves (host is STAGED until feat-05) → rc 3
 #   immutability-probe.sh dev        the dev half only → rc 0 on a healthy box
 #   immutability-probe.sh host       the host half only → STAGED, rc 3
+#   immutability-probe.sh --status   the LAST RECORDED measurement — no build, no engine, no network
 #   immutability-probe.sh --selftest the pure verdict fold; no engine, no witness, no build.
 #
 # THE HOST HALF IS STAGED, AND SAYS SO. It prints STAGED and forces a non-zero overall rc until feat-05
 # lands. This is deliberate and honest per R37/ANTI-THEATER: a half that was never measured must never
 # print GREEN, and the objective's "exits 0" is completed by feat-05 — not by this file pretending.
 #
+# THE LAST MEASUREMENT IS READABLE WITHOUT RE-TAKING IT — `--status` (#317). A run costs a real build on
+# both boxes, so no actuator and no human should have to spend one just to learn what the last one said.
+# The poller's immutability tick WRITES the record ($IMMUT_STATE/last, plus a bounded `history`); this
+# reads it back and exits to MATCH it, so `--status` is a cheap, side-effect-free oracle: 0 the last run
+# measured GREEN · 1 it measured RED · 3 anything else, INCLUDING no record at all. An absent record is
+# deliberately NOT rc 0 — "nobody has ever measured this box" must never be reported as a pass, which is
+# the unmeasured-evidence failure objective #310 exists to end.
+#
+# THE WRITER IS THE TICK, NOT THIS FILE, and that split is deliberate: the poller invokes the probe
+# through a seam (a fake probe in its suite must still leave a real record), so the tick owns the write.
+# The KV grammar below is the contract between the two files, and it is pinned END-TO-END by
+# poller-immutability.test.sh (the tick writes, this reads) rather than by two copies of a parser.
+#
 # ENV: IMMUT_PROBE_CTX (build context; default the live spec clone) · IMMUT_PROBE_WITNESS ·
-#      IMMUT_PROBE_BUILD · IMMUT_PROBE_STALE_MIN · IMMUT_PROBE_KILL_WAIT · TMPDIR.
+#      IMMUT_PROBE_BUILD · IMMUT_PROBE_STALE_MIN · IMMUT_PROBE_KILL_WAIT · IMMUT_STATE · TMPDIR.
 #
 # Covered by immutability-probe.test.sh. Control-plane (the immutability boundary's prover).
 set -uo pipefail
@@ -81,6 +95,7 @@ CTX="${IMMUT_PROBE_CTX:-$HOME/.local/share/fedora-dev}"
 STALE_MIN="${IMMUT_PROBE_STALE_MIN:-525600}"          # 1 year — see "blast radius" above
 KILL_WAIT="${IMMUT_PROBE_KILL_WAIT:-180}"             # seconds to wait for the tree to appear
 TMPD="${TMPDIR:-/tmp}"
+STATE="${IMMUT_STATE:-$HOME/.local/state/immutability-probe}"   # written by the poller tick (#317)
 THROWAWAY_ROOT="$HOME/.cache"
 THROWAWAY_PREFIX="fd-throwaway"
 OBJECTIVE="#310"
@@ -142,6 +157,38 @@ residue_count(){ printf '%s\n' "${1:-}" | grep -c '^RESIDUE ' ; }
 
 # residue_trees <diff-output> → the tree-class survivor PATHS (the class the reap arm can age + assert).
 residue_trees(){ printf '%s\n' "${1:-}" | sed -n 's/^RESIDUE tree \(.*\)$/\1/p' ; }
+
+# record_get <key> <record-text> → the value of the `<key>: <value>` field, or empty (#317).
+#
+# THE KEY SIDE IS ANCHORED AND EXACT, and that is load-bearing: the record carries a `line:` field
+# holding the probe's own verdict line, which itself contains `dev=…` and `host=…`. An unanchored match
+# for `host` would read that line instead of the `host:` field and report the wrong box's verdict. The
+# VALUE side is deliberately unconstrained — it holds URLs and whole sentences.
+record_get(){ printf '%s\n' "${2:-}" | sed -n "s/^${1}: \(.*\)\$/\1/p" | head -1 ; }
+
+# age_human <seconds> → a compact age. UNREADABLE INPUT SAYS `unknown` rather than printing a fake `0m`:
+# a status line whose whole job is to say how stale the measurement is must never round "I do not know"
+# down to "just now".
+age_human(){
+  local s="${1:-}"
+  case "$s" in ''|*[!0-9]*) printf 'unknown'; return 0;; esac
+  if   [ "$s" -lt 3600 ];   then printf '%dm' "$(( s / 60 ))"
+  elif [ "$s" -lt 172800 ]; then printf '%dh%dm' "$(( s / 3600 ))" "$(( (s % 3600) / 60 ))"
+  else printf '%dd%dh' "$(( s / 86400 ))" "$(( (s % 86400) / 3600 ))"; fi
+}
+
+# record_age <iso-8601> → age in seconds, or empty when it cannot be read.
+# THE ISO SHAPE IS CHECKED BEFORE `date` EVER SEES THE VALUE: GNU `date -d ''` resolves to MIDNIGHT
+# TODAY and exits 0, conjuring an age of up-to-24h out of an unreadable field (the hazard
+# bin/dev-loop.sh already records). Empty is the honest answer, and age_human prints it as `unknown`.
+record_age(){
+  local at="${1:-}" now stamp
+  case "$at" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;; *) return 0;; esac
+  now="$(date -u +%s 2>/dev/null)" || return 0
+  stamp="$(date -u -d "$at" +%s 2>/dev/null)" || return 0
+  case "$now$stamp" in ''|*[!0-9]*) return 0;; esac
+  printf '%s' "$(( now - stamp ))"
+}
 
 # ---- observation + cycle helpers -------------------------------------------------------------------
 
@@ -328,6 +375,50 @@ report(){
   verdict_rc "$overall"
 }
 
+# ---- --status: the LAST RECORDED measurement, without re-taking it (#317) --------------------------
+# Cheap and side-effect-free: no build, no engine, no network, no gh. The exit code MATCHES the recorded
+# verdict (via the same verdict_rc the live run uses — one mapping, not two), so another actuator can
+# branch on `--status` exactly as it would on a live run, at zero cost.
+status(){
+  local f="$STATE/last" rec verdict rc at dev host ticket line age runs lastgreen
+  rec="$(cat "$f" 2>/dev/null)"
+  if [ -z "$rec" ]; then
+    # NOT rc 0. "Nobody has ever measured this box" is the exact claim objective #310 exists to stop
+    # being mistaken for health.
+    printf 'immutability-probe: NO MEASUREMENT RECORDED\n'
+    printf 'status: no verdict has ever been recorded at %s\n' "$f"
+    printf 'This box has not been measured (or its state was wiped). That is not a pass.\n'
+    printf 'The poller measures on its own cadence (IMMUTABILITY_PROBE_EVERY, ~24h by default);\n'
+    printf 'to measure now: %s all\n' "$0"
+    return 3
+  fi
+  verdict="$(record_get verdict "$rec")"; [ -n "$verdict" ] || verdict=UNKNOWN
+  rc="$(record_get rc "$rec")"; at="$(record_get at "$rec")"
+  dev="$(record_get dev "$rec")"; host="$(record_get host "$rec")"
+  ticket="$(record_get ticket "$rec")"; line="$(record_get line "$rec")"
+  age="$(record_age "$at")"
+
+  printf 'immutability-probe: %s dev=%s host=%s (RECORDED, not re-measured)\n' \
+    "$verdict" "${dev:-?}" "${host:-?}"
+  printf 'status : %s · measured %s ago (%s) · probe rc=%s\n' \
+    "$verdict" "$(age_human "$age")" "${at:-unknown}" "${rc:-?}"
+  [ -n "$line" ] && printf 'verdict: %s\n' "$line"
+  case "$ticket" in ''|-) printf 'host   : no ticket URL recorded for that run\n';;
+                    *)    printf 'host   : measured via %s\n' "$ticket";; esac
+  # PROVENANCE, and the question the history file exists to answer: has this box EVER been GREEN, and
+  # when did it stop being GREEN?
+  if [ -s "$STATE/history" ]; then
+    runs="$(grep -c . "$STATE/history" 2>/dev/null)"
+    lastgreen="$(grep ' GREEN ' "$STATE/history" 2>/dev/null | tail -1 | cut -d' ' -f1)"
+    printf 'history: %s run(s) recorded in %s · last GREEN: %s\n' \
+      "${runs:-0}" "$STATE/history" "${lastgreen:-never}"
+  else
+    printf 'history: none recorded yet (%s)\n' "$STATE/history"
+  fi
+  printf 'record : %s\n' "$f"
+  verdict_rc "$verdict"
+}
+
 # ---- DISPATCH (only when executed directly; sourcing exposes the pure helpers) ----------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then return 0 2>/dev/null || true; fi
 
@@ -368,15 +459,42 @@ selftest(){
   ck "trees yields the path"     "$(residue_trees "$d")" "/home/core/.cache/fd-throwaway.abc"
   ck "count on clean output"     "$(residue_count "")" "0"
 
+  echo "== record_get (--status reads the tick's record; the key side is anchored) =="
+  local r; r="$(printf 'verdict: RED\nrc: 1\nat: 2026-07-30T09:00:00Z\ndev: RED\nhost: STAGED\nticket: https://x/1\nline: immutability-probe: RED dev=RED host=STAGED\n')"
+  ck "verdict"                   "$(record_get verdict "$r")" "RED"
+  ck "rc"                        "$(record_get rc "$r")"      "1"
+  # THE ROW THAT MATTERS: the `line:` value also contains `host=STAGED`. An unanchored match reads the
+  # verdict line instead of the field and reports the wrong box.
+  ck "host reads the FIELD, not the line" "$(record_get host "$r")" "STAGED"
+  ck "dev reads the FIELD, not the line"  "$(record_get dev "$r")"  "RED"
+  ck "a URL value survives whole"         "$(record_get ticket "$r")" "https://x/1"
+  ck "the whole verdict line survives"    "$(record_get line "$r")" "immutability-probe: RED dev=RED host=STAGED"
+  ck "absent key → empty"        "$(record_get nosuch "$r")" ""
+  ck "empty record → empty"      "$(record_get verdict "")"  ""
+
+  echo "== age_human / record_age (an unreadable stamp is never rounded down to 'just now') =="
+  ck "minutes"                   "$(age_human 1800)"   "30m"
+  ck "hours"                     "$(age_human 7200)"   "2h0m"
+  ck "days"                      "$(age_human 180000)" "2d2h"
+  ck "empty → unknown"           "$(age_human '')"     "unknown"
+  ck "garbage → unknown"         "$(age_human 'soon')" "unknown"
+  # GNU `date -d ''` resolves to MIDNIGHT TODAY at rc 0 — an age conjured from nothing. The ISO shape is
+  # checked BEFORE date sees the value, so an unreadable stamp yields empty, which prints as `unknown`.
+  ck "empty stamp → no age"      "$(record_age '')"          ""
+  ck "prose stamp → no age"      "$(record_age 'yesterday')" ""
+  ck "half a stamp → no age"     "$(record_age '2026-07-30')" ""
+  ck "epoch-0 stamp is readable" "$([ -n "$(record_age '1970-01-01T00:00:00Z')" ] && echo yes)" "yes"
+
   echo; printf 'immutability-probe selftest: %s passed, %s failed\n' "$p" "$f"
   [ "$f" -eq 0 ]
 }
 
 case "${1:-all}" in
   --selftest) selftest; exit;;
+  --status) status; exit;;
   dev)  dev_half || exit 2; report dev;;
   host) report host;;
   all)  dev_half || exit 2; report all;;
   -h|--help) sed -n '2,/^set -uo/p' "$0" | sed 's/^# \{0,1\}//; s/^#//'; exit 0;;
-  *) echo "usage: immutability-probe.sh [all | dev | host | --selftest]" >&2; exit 2;;
+  *) echo "usage: immutability-probe.sh [all | dev | host | --status | --selftest]" >&2; exit 2;;
 esac
