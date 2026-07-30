@@ -7,21 +7,26 @@
 # control never run, a host half assumed. So these rows drive the REAL script end to end and assert the
 # verdict AND the machine-readable KV block a consumer would parse.
 #
+# THREE PARTS — named here as the file actually orders them:
+#   PART A  the verdict + KV rows, driven against a world this suite fully controls.
+#   PART B  the in-suite mutations: the same controlled world, one gate neutralized per row.
+#   PART C  the production path, gated on its own three requirements and skipped BY NAME otherwise.
+#
 # WHY A COUNTER SEAM, AND WHAT IT DOES NOT EXCUSE. Every interesting row needs an EXACT byte figure —
 # "this class pulled 50,000 bytes on build 2" — and the real signal is a kernel counter on a box that is
-# never silent. Asserting against it would make the suite a coin toss. So PART A substitutes a file the
+# never silent. Asserting against it would make the suite a coin toss. So PARTS A-B substitute a file the
 # suite owns (`BW_RX_PATH`) and a stub builder that bumps it by a controlled amount: no engine, no
-# network, no flake, and every branch reachable. PART B then runs the probe on its REAL default counter,
+# network, no flake, and every branch reachable. PART C then runs the probe on its REAL default counter,
 # REAL builder and REAL negative control, because a seam that EVERY row overrides would leave the
 # production resolution untested — which is the hazard bin/seam-audit.sh exists to name.
 #
 # WHAT IS DELIBERATELY NOT STUBBED. The subject is the probe's own measurement and fold, so the probe is
-# always the real file. PART A stubs only what it must control (the counter, the builder, the ticket
-# bus); PART B stubs nothing at all.
+# always the real file. PARTS A-B stub only what they must control (the counter, the builder, the ticket
+# bus); PART C stubs nothing at all.
 #
-#   bash bandwidth-probe.test.sh -> exit 0 = all rows pass · 77 = PART B unrunnable here (PART A ran and
-#                                   passed) · 1 = a real failure, never excused as a skip.
-# No GitHub, no model. PART A needs neither network nor an engine; PART B needs both and says so.
+#   bash bandwidth-probe.test.sh -> exit 0 = all rows pass · 77 = PART C unrunnable here (PARTS A-B ran
+#                                   and passed) · 1 = a real failure, never excused as a skip.
+# No GitHub, no model. PARTS A-B need neither network nor an engine; PART C needs both and says so.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
@@ -117,6 +122,15 @@ ckc "the KV block names each class" "$out" "CLASS_OSPKG: ZERO"
 ckc "the control is reported every run" "$out" "CONTROL: DETECTS"
 ckc "the host half is reported"   "$out" "HOST: ZERO"
 ckc "the floor is stated, not hidden" "$out" "FLOOR: "
+
+# THE INSTRUMENT IS NAMED, AND THE NAME DISCRIMINATES. PART C asserts a production run did NOT fall back
+# to this seam. That row can only mean something if the report actually SAYS which counter was read — so
+# these rows prove the field is printed and that it carries the seam whenever the seam is what was used.
+# Without them, PART C's `ckn` would be asserting the absence of a string the probe never emits: a row
+# that cannot fail, in the suite whose whole subject is rows that cannot fail.
+ckc "the report names the counter it read"      "$out" "counter      : "
+ckc "a seam run says so in that very field"     "$out" "[(BW_RX_PATH seam)]"
+ckc "and names the seam file it read"           "$out" "$CASE_TMP/rx"
 GREEN_TMP="$CASE_TMP"
 
 echo "== A. a NON-ZERO build-2 for any class ⇒ RED =="
@@ -301,6 +315,10 @@ out="$(env BW_CLASSES="baseimg" BW_HOST=skip BW_FLOOR_WINDOW=1 BW_FLOOR_SAMPLES=
        timeout 180 bash "$PROBE" dev 2>&1)"; rc=$?
 
 ckc "the real counter was resolved and read"  "$out" "noise floor  :"
+# The pair that makes the production resolution observable: the report must NAME a kernel counter under
+# /sys/class/net (resolved from the default route), and must NOT name the seam. PART A pins that this
+# field really is printed and really does carry the seam when the seam is used, so this row can fail.
+ckc "and the report names that REAL kernel counter" "$out" "/sys/class/net/"
 ckn "it did not fall back to the test seam"   "$out" "BW_RX_PATH seam"
 ckc "the real base-image class was measured"  "$out" "CLASS_BASEIMG: "
 ckc "the REAL negative control fired"         "$out" "CONTROL: DETECTS"

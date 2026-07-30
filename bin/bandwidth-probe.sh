@@ -442,6 +442,13 @@ dev_half(){
 
   log="$(mktemp "$TMPD/bw-probe-build.XXXXXX")" || { warn "mktemp failed"; return 2; }
 
+  # NAME THE INSTRUMENT. Every figure below — the floor, each class's two builds, the control — is a
+  # difference of readings from this ONE counter, so a report that does not say WHICH counter it read is
+  # missing the first of the inputs this probe claims to print. It also makes the seam VISIBLE: a run
+  # that resolved `(BW_RX_PATH seam)` measured a file the caller controls, not the kernel's own figure,
+  # and no reader (or test row) can tell those apart from the byte totals alone.
+  say "$(printf '  counter      : %s [%s]' "$RX_PATH" "$IFACE")"
+
   sample_floor
   say "$(printf '  noise floor  : worst %s of %s idle window(s) of %ss [%s] · slack %s%% · min %s' \
           "$(human "$FLOOR_WORST")" "$FLOOR_SAMPLES" "$FLOOR_WINDOW" "${FLOOR_SAMPLES_RAW:-none}" \
