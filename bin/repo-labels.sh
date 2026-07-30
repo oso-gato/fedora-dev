@@ -56,7 +56,6 @@ host-failed|b60205|APPLY|The host agent could not complete this ticket (bus outc
 objective|5319e7|APPLY|A drafted objective awaiting the maintainer's 'approved' tap (R31 intake)
 approved|0e8a16|READ|The MAINTAINER's confirmation — the one human act that authorises planning (R1)
 rebuild-approval|fbca04|APPLY|A rebuild ticket awaiting the maintainer's 'approved' tap (R17)|PARKED|CONTROL
-halt|b60205|READ|FLEET HALT — freeze every sweeper. Maintainer-only, on the control issue (R9)||CONTROL
 escalate|d93f0b|READ|A genuine maintainer decision — removes the item from the drivable set|PARKED
 needs-decision|d93f0b|READ|Synonym of escalate, honoured by the ship oracle|PARKED
 blocked|d93f0b|READ|Work cannot proceed; not drivable by the loop|PARKED
@@ -239,11 +238,11 @@ LABEL="${HOST_TICKET_LABEL:-host-task}"'
   # setting LABELS_CONTROL_REPO here would be a dead assignment and the row would pass on the default,
   # i.e. test the right thing for the wrong reason.
   ck "control-only labels are OUT of a tenant's set" \
-     "$(CONTROL_REPO=fedora-bootstrap; registry_names fedora-dev | grep -cE '^(host-done|host-failed|rebuild-approval|halt)$')" "0"
+     "$(CONTROL_REPO=fedora-bootstrap; registry_names fedora-dev | grep -cE '^(host-done|host-failed|rebuild-approval)$')" "0"
   ck "…and the knob is LIVE (a tenant named as the control repo DOES get them)" \
-     "$(CONTROL_REPO=fedora-dev; registry_names fedora-dev | grep -cE '^(host-done|host-failed|rebuild-approval|halt)$')" "4"
+     "$(CONTROL_REPO=fedora-dev; registry_names fedora-dev | grep -cE '^(host-done|host-failed|rebuild-approval)$')" "3"
   ck "…and IN the control repo's set" \
-     "$(registry_names fedora-bootstrap | grep -cE '^(host-done|host-failed|rebuild-approval|halt)$')" "4"
+     "$(registry_names fedora-bootstrap | grep -cE '^(host-done|host-failed|rebuild-approval)$')" "3"
   ck "the unscoped core is in BOTH"    \
      "$(registry_names fedora-dev | grep -cE '^(backlog|live-validate|objective|approved)$')" "4"
   ck "no repo requires more than the whole vocabulary" \

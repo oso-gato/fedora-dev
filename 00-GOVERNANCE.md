@@ -204,6 +204,43 @@ consequences*; each entry says what could bite, and why it is accepted for now.
   Outcome then decides: full gVisor / gVisor-for-most + plain-fence-for-grd / drop gVisor + keep the fence.
   **gVisor is therefore NOT yet decided to stay** — the test decides.
 
+### 6(g) — THE FLEET SOFT HALT IS RETIRED (maintainer decision, 2026-07-30)
+
+**DECISION.** The pinned, maintainer-thrown `halt` label — the fleet-wide soft stop every sweeper read
+before acting — is **deleted**, and R9 is rewritten to carry only the hard stop. Asked directly whether
+the e-stop served his objective, the maintainer's answer was to delete it and retire the requirement.
+
+**THE EVIDENCE, measured rather than argued.**
+
+| | |
+|---|---|
+| Times a maintainer ever threw it | **0**, all-time |
+| Times it fired by itself | **935**, every one false |
+| Cause split | **574** `gh: command not found` (a broken tool inside the box) · **332** API garbage · **29** dead credential |
+| Real actions it suppressed | **338** — including the ticket that would have repaired a six-day outage |
+| Cost | ~**870 lines** across both repos, **14 call sites** |
+
+**WHY IT WAS NEVER A SAFETY FEATURE.** It duplicated two stops that are strictly stronger and need no
+code — **App-key revocation** (works when GitHub is unreachable; the stop of record) and **stopping the
+containers** — while itself depending on GitHub being readable, so it failed precisely when an outage
+made it matter. An adversarial audit of the last attempt to repair it (three independent refuters, two
+returning REFUTED) found the fix's own justification contained four false or vacuous claims, and a
+narrow case in which work could merge **while a halt was standing**. A control whose only measured
+effect is to break things is not a safety feature; it is a liability with a reassuring name.
+
+**THE ZERO USES ARE NOT EVIDENCE OF SAFETY.** The `halt` LABEL DID NOT EXIST on either repo until
+2026-07-30T12:55:25Z — created during this session's cleanup. Zero applications is what a switch with no
+handle predicts, and that fact retires the "never needed, therefore safe to weaken" argument in both
+directions. It is recorded here because it was used, wrongly, to justify the preceding change.
+
+**WHAT REMAINS.** R9 keeps revocation as the stop of record. R20 and R27 lose their HALT clauses. No
+sweeper reads any soft stop, so a missing reader can no longer freeze the fleet either — the failure
+mode that produced 935 of the 935.
+
+**PROCESS NOTE.** This retires a confirmed requirement, so it is MAINTAINER-MERGE-ONLY (R1) and the loop
+holds it. That carve-out is the one gate deliberately kept when everything else went zero-gate.
+
+
 ---
 
 *Editing this file or the PROBLEM-SOLVING DOCTRINE is a control-plane change — maintainer-adjudicated via
