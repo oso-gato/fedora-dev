@@ -207,6 +207,23 @@ Your Claude login + transcripts survive every rebuild (they live in `~/.claude` 
 
 Full procedure: [`policy/CLAUDE.md`](policy/CLAUDE.md) — PIPELINE + HOW DO I sections, always in context for the agent.
 
+### Pinned downloads are cached locally — `ADD <url>` is not used
+
+A build that needs a pinned vendor file (a source tarball, a vendor `.repo`) fetches it with
+`bin/fd-fetch.sh <https-url> <sha256> <dest>`, which serves it from a content-addressed cache on the
+home volume (`~/.cache/fd-dl`, bound into every dev-box build at `/var/cache/fd-dl`) and verifies the
+sha256 every time — cache hits included, so a corrupted or tampered entry is discarded rather than
+trusted, and a hash mismatch fails the build having published nothing.
+
+Why not `ADD <url>`: podman/buildah reports a layer-cache **hit** on `ADD <url>` and still downloads the
+whole file anyway (it needs the bytes to compute the cache key, then throws them away). Measured in-box:
+a 10 MiB tarball re-transferred in full on a rebuild that printed `--> Using cache`, versus **zero** asset
+bytes through the cache-aware fetch. The cache is bounded (entries unused for 45 days are pruned, then
+LRU-evicted to 10 GB) by the same sweeper that reaps throwaway builds.
+
+Agent-facing detail — the contract, the measurements and the bounds: [`CLAUDE.md`](CLAUDE.md) Principle 2,
+*Pinned fetches*.
+
 ## Troubleshooting & break-glass
 
 fedora-dev is non-systemd: `entrypoint.sh` (PID 1) supervises sshd, tailscaled, the rootless podman socket, and the rebuild watcher via a `pgrep` watchdog, and exits non-zero (so the Quadlet's `Restart=always` heals it) if any die.

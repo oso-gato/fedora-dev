@@ -87,6 +87,20 @@ case "${FAKE_FIXER:-commit}" in
            echo "fixed the build";;
   blocked) echo "FIXER_BLOCKED: the approach in the PR is wrong; needs a decision";;
   noop)    echo "looked at it, changed nothing";;      # no commit, no sentinel
+  rewrite) # THE LIVE #328 SHAPE: the fixer brought `main` in and REWROTE the branch's own history,
+           # so origin's tip is no longer an ancestor of HEAD and a PLAIN push is rejected
+           # non-fast-forward. Observed cause was `git rebase` (the branch's commits came back with
+           # new shas under identical messages); `commit --amend` reproduces the property the push
+           # actually cares about — HEAD is not a descendant of origin/<ref> — deterministically,
+           # without needing main to move first. NB a plain `git merge` would NOT reproduce it: a
+           # merge commit still has the branch tip as a parent, so it fast-forwards and pushes fine.
+           # ORDER IS LOAD-BEARING: the commit origin ALREADY HAS must be the one rewritten. Amending
+           # a NEW commit on top leaves origin's tip as its parent — still a fast-forward, which
+           # pushes fine and would make this row pass against the very bug it exists to catch (it
+           # did, on the first draft — the in-suite mutation is what exposed it).
+           git commit -q --amend -m "work (replayed onto main)" >/dev/null 2>&1
+           echo fixed >> f; git add -A >/dev/null 2>&1; git commit -qm "fix the boom" >/dev/null 2>&1
+           echo "fixed the build, on a rewritten history";;
 esac
 exit 0
 EOF
@@ -176,6 +190,32 @@ ck "$([ "$(origin_sha feat/x)" != "$SHA" ] && echo 1 || echo 0)" "origin/feat/x 
 ck "$(grep -q "GITPUSH.*HEAD:refs/heads/feat/x" "$FIX_LOG" && echo 1 || echo 0)" "the harness did not push the feature ref explicitly"
 ck "$(git -C "$ORIGIN" rev-parse refs/heads/main >/dev/null 2>&1 && [ "$(origin_sha main)" = "$MAIN_SHA" ] && echo 1 || echo 0)" "origin/main moved — the fixer must NEVER touch main"
 done_case
+
+echo "== REWRITTEN HISTORY LANDS (the live #328 stall: 4 fix rounds, ~2h of model time, head never moved) =="
+DESC="rewritten-history push"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+sweep feat/x "$SHA" FAKE_FIXER=rewrite
+logs 'FIXER LANDED'; notlogs 'FIXER PUSH FAILED'
+ck "$([ "$(origin_sha feat/x)" != "$SHA" ] && echo 1 || echo 0)" "origin/feat/x did NOT advance — a rewritten fix still cannot land"
+ck "$(git -C "$ORIGIN" rev-parse refs/heads/main >/dev/null 2>&1 && [ "$(origin_sha main)" = "$MAIN_SHA" ] && echo 1 || echo 0)" "origin/main moved — a force push must NEVER reach main"
+[ "$OK" = 1 ] && { pass=$((pass+1)); echo "  ok   a rewritten history lands, so the head MOVES and the gates re-read new code"; }
+
+echo "== THE FORCE IS LEASED, PINNED TO THE GATED HEAD — not a bare --force =="
+DESC="lease pinning"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+sweep feat/x "$SHA" FAKE_FIXER=rewrite
+ck "$(grep -q "GITPUSH.*--force-with-lease=refs/heads/feat/x:$SHA" "$FIX_LOG" && echo 1 || echo 0)" "the push did not carry a lease pinned to the gated head ($SHA)"
+ck "$(grep -qE 'GITPUSH.*(--force[^-]|--force$)' "$FIX_LOG" && echo 0 || echo 1)" "a BARE --force was used — it would silently discard a concurrent push"
+ck "$(grep -q "GITPUSH.*HEAD:refs/heads/feat/x" "$FIX_LOG" && echo 1 || echo 0)" "the explicit refspec is gone — the push could name another destination"
+[ "$OK" = 1 ] && { pass=$((pass+1)); echo "  ok   force is leased to the gated head + refspec-scoped (cannot clobber, cannot reach main)"; }
+
+echo "== A FAILED PUSH REPORTS GIT'S OWN ERROR, never a guessed cause =="
+DESC="push error honesty"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+sweep feat/x "$SHA" FAKE_FIXER=commit FAKE_PUSH=fail
+logs 'FIXER PUSH FAILED'
+ck "$(grep -q 'check credentials / branch protection' "$CASE/out.log" "$FIX_LOG" 2>/dev/null && echo 0 || echo 1)" "still asserts 'credentials / branch protection' — the #328 cause was non-fast-forward, and both were fine"
+[ "$OK" = 1 ] && { pass=$((pass+1)); echo "  ok   the failure line no longer guesses a cause it can print"; }
 
 echo "== NOT LANDED: the push LIES (rc 0, origin never moves) → verification against ORIGIN catches it =="
 DESC="a push that reports success but lands nothing is NOT reported as landed"; OK=1

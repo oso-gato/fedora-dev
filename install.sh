@@ -10,9 +10,29 @@ set -euxo pipefail
 DNF="dnf -y --setopt=install_weak_deps=False"
 
 # ---- vendor dnf repos -------------------------------------------------------
-# Tailscale (official Fedora repo)
-curl -fsSL https://pkgs.tailscale.com/stable/fedora/tailscale.repo \
-    -o /etc/yum.repos.d/tailscale.repo
+# Tailscale (official Fedora repo — Principle 2 class (b): the VENDOR's own dnf repo. The file itself
+# carries gpgcheck=1 + repo_gpgcheck=1, so every RPM dnf installs from it stays signature-verified;
+# that provenance class is unchanged by how the .repo file arrives.)
+#
+# FETCHED THROUGH THE PINNED CONTRACT (#320), not a bare curl. bin/fd-fetch.sh serves the file from the
+# build's download cache when one is BOUND (/var/cache/fd-dl — bin/build-throwaway.sh and bin/validate.sh
+# bind it) and fetches it once when one is not (the CI base build, the monthly --no-cache rebuild), and
+# verifies TAILSCALE_REPO_SHA256 on EVERY path. This is the apparatus's own proof-of-use of the contract
+# it ships — and it STRENGTHENS provenance here: the bare `curl -fsSL` it replaces verified the TLS
+# channel and nothing about the bytes.
+#
+# THE PIN IS FAIL-CLOSED, AND THAT IS A DISCLOSED TRADE: if Tailscale edits this .repo upstream the build
+# STOPS here rather than silently ingesting a changed repo definition (a changed baseurl or gpgkey is
+# precisely the change worth failing on). The remedy is Principle 4 then 6 — re-check the file at the
+# live source, then bump `ARG TAILSCALE_REPO_SHA256` in the Containerfile, the single place the pin
+# lives. A monthly base rebuild fails loudly instead of drifting quietly.
+FD_FETCH=/tmp/fd-fetch.sh   # COPY'd next to this script by the Containerfile
+[ -f "$FD_FETCH" ] || { echo "install.sh: $FD_FETCH missing — the Containerfile must COPY bin/fd-fetch.sh beside install.sh" >&2; exit 1; }
+: "${TAILSCALE_REPO_SHA256:?not set — ARG TAILSCALE_REPO_SHA256 in the Containerfile carries the pin (Principle 6)}"
+bash "$FD_FETCH" \
+    https://pkgs.tailscale.com/stable/fedora/tailscale.repo \
+    "$TAILSCALE_REPO_SHA256" \
+    /etc/yum.repos.d/tailscale.repo
 
 # ---- base packages ----------------------------------------------------------
 # Tier breakdown (justified in README.md "Base Packages" table):
