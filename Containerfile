@@ -9,8 +9,16 @@
 ARG FEDORA_VERSION=44
 FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION}
 
+# PINNED VENDOR ASSET (Principle 6 — the pin lives HERE and is bumped here only, after Principle 4's
+# live re-check). install.sh fetches Tailscale's .repo through the cache-aware contract (bin/fd-fetch.sh,
+# #320) and verifies this sha256 on every path — cache hit included. Fail-closed: a changed upstream file
+# stops the build instead of silently redefining the vendor repo. Re-pin with:
+#   curl -fsSL https://pkgs.tailscale.com/stable/fedora/tailscale.repo | sha256sum
+ARG TAILSCALE_REPO_SHA256=87206259fb7032fb4147eabccf4ffdb0b4d850d0519ef4c6991cf8c4d100ac13
+
+COPY bin/fd-fetch.sh /tmp/fd-fetch.sh
 COPY install.sh /tmp/install.sh
-RUN bash /tmp/install.sh && rm /tmp/install.sh
+RUN bash /tmp/install.sh && rm /tmp/install.sh /tmp/fd-fetch.sh
 
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
