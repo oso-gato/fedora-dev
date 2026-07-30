@@ -53,8 +53,15 @@ trap cleanup EXIT
 
 pass=0; fail=0
 ck(){ if [ "$2" = "$3" ]; then echo "  PASS: $1"; pass=$((pass+1)); else echo "  FAIL: $1 (got=[$2] want=[$3])"; fail=$((fail+1)); fi; }
-ckc(){ if printf '%s' "$2" | grep -qF "$3"; then echo "  PASS: $1"; pass=$((pass+1)); else echo "  FAIL: $1 (output did not contain [$3])"; fail=$((fail+1)); fi; }
-ckn(){ if printf '%s' "$2" | grep -qF "$3"; then echo "  FAIL: $1 (output wrongly contained [$3])"; fail=$((fail+1)); else echo "  PASS: $1"; pass=$((pass+1)); fi; }
+# THE HAYSTACK IS NEVER PIPED. `printf … | grep -q` looks equivalent and is not: `grep -q` exits AT the
+# match, so on a haystack big enough to outlive one write() the writer takes SIGPIPE and `set -o pipefail`
+# (line 32) makes the pipeline rc 141 even though the string is PRESENT. The rows below feed the whole
+# 38KB probe through these helpers with the match at ~byte 8k, which is exactly that case: measured 10 of
+# 40 runs rc 141 with GNU grep 3.12, deterministically 0 of 40 as a here-string. That mis-scored a PASS as
+# a FAIL in ckc (an intermittently red gate on EVERY fedora-dev PR, since tests.yml fails the job on any
+# rc != 0) and, worse, a real hit as a silent PASS in ckn. A here-string has no pipe and no writer to kill.
+ckc(){ if grep -qF "$3" <<<"$2"; then echo "  PASS: $1"; pass=$((pass+1)); else echo "  FAIL: $1 (output did not contain [$3])"; fail=$((fail+1)); fi; }
+ckn(){ if grep -qF "$3" <<<"$2"; then echo "  FAIL: $1 (output wrongly contained [$3])"; fail=$((fail+1)); else echo "  PASS: $1"; pass=$((pass+1)); fi; }
 
 # ---- the BUS fakes (host half) ----------------------------------------------------------------------
 # Three seams, each defaulted to production in the probe and driven here by env. NO network anywhere.
