@@ -93,6 +93,21 @@ esac
 exit 0
 EOF
 
+# ---- stub git-object-cache.sh (#319): log the attempt; MISS by default. ----------------------------
+# EVERY row must go through this stub, not the real helper: the real one would compose
+# https://github.com/oso-gato/<repo>.git and genuinely clone it, so leaving it unstubbed would put a
+# multi-megabyte NETWORK FETCH inside a suite whose header promises none. Default FAKE_GITCACHE=miss
+# (rc 1, creates nothing) keeps every pre-existing row on today's `gh repo clone` path unchanged.
+cat > "$BIN/git-object-cache.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'GITCACHE %s\n' "$*" >> "$GH_LOG"
+[ "${FAKE_GITCACHE:-miss}" = hit ] || exit 1
+dest="$3"; mkdir -p "$dest" && git init -q "$dest" || exit 1
+git -C "$dest" config user.email t@t; git -C "$dest" config user.name t
+echo cached > "$dest/f"; git -C "$dest" add -A; git -C "$dest" commit -qm cached >/dev/null 2>&1
+printf '%s\n' "$dest"
+EOF
+
 # ---- stub git push ONLY (real git for everything else) via a wrapper that intercepts 'push'. -------
 cat > "$BIN/git" <<'EOF'
 #!/usr/bin/env bash
@@ -121,6 +136,7 @@ run(){ # <desc> <env-assignments> <expect: PRCREATE|ISSUECOMMENT|NONE> <extra-gr
   # shellcheck disable=SC2086
   ( cd "$caller" && env $envs PATH="$BIN:$PATH" AUTHOR_CLAUDE="claude -p" \
       FRESH_TREE="$BIN/fresh-tree.sh" VALIDATE="$BIN/validate.sh" \
+      GIT_OBJECT_CACHE="$BIN/git-object-cache.sh" \
       bash "$AUTHOR" fedora-dev 42 ) >/dev/null 2>&1 || true
   local ok=1
   [ "$(git -C "$caller" rev-parse HEAD)" = "$caller_head" ] \
@@ -271,6 +287,40 @@ echo "== guard: a non-backlog-labelled issue is never authored =="
 run "non-backlog issue → skip" "FAKE_LABELS=bug FAKE_AUTHOR=done" NONE
 echo "== guard: an issue with an existing open PR is never re-authored =="
 run "existing PR → skip" "FAKE_PRLIST=17 FAKE_AUTHOR=done" NONE
+
+# ---------------------------------------------------------------------------------------------------
+# #319 THE GIT OBJECT CACHE IS WIRED HERE. This provisioning block is the one place the loop paid a
+# repo's ENTIRE history over the wire, and the cache's whole value is that it is TRIED — a helper nothing
+# calls saves nothing, and a pure --selftest cannot see an uncalled call site (the #278 dead-code
+# lesson). So both directions are asserted behaviourally, against the real control flow:
+#   MISS → the cache was attempted AND the full clone still ran (the block's design rule: it only ever
+#          HELPS; a cache that cannot serve must degrade to today's behaviour, never to a new failure).
+#   HIT  → the cache provisioned the clone and the full network clone did NOT run (the saving is real).
+echo "== #319 object cache: tried FIRST; a MISS falls through to the full clone (it only ever HELPS) =="
+run "cache MISS still provisions, via the full clone" "FAKE_AUTHOR=done FAKE_VALIDATE=GREEN" \
+    PRCREATE 'GITCACHE clone oso-gato/fedora-dev'
+if grep -q '^GH repo clone' "$GH_LOG"; then pass=$((pass+1)); printf '  ok   %s\n' "a cache MISS falls through to the full clone"
+else fail=$((fail+1)); printf '  FAIL %s\n' "a cache MISS did NOT fall through to the full clone — the cache introduced a new failure path"; fi
+
+echo "== #319 object cache: a HIT provisions the clone and the full network clone is NOT run =="
+run "cache HIT replaces the full clone" "FAKE_AUTHOR=done FAKE_VALIDATE=GREEN FAKE_GITCACHE=hit" \
+    PRCREATE 'GITCACHE clone oso-gato/fedora-dev' '^GH repo clone'
+
+echo "== MUTATION: un-wire the cache call → the helper is never invoked (the #278 dead-code shape) =="
+# The mutant MUST sit BESIDE the real dev-author.sh so it resolves the same $HERE and finds its sibling
+# repo-scope.sh — else it R16-scope-refuses before ever reaching this block and the row is VACUOUS.
+MUT319="$HERE/bin/.dev-author-mut319-$$.sh"
+sed 's|^  \[ -x "\$GIT_OBJECT_CACHE" \] && {.*|  :|' "$AUTHOR" > "$MUT319"
+if ! grep -q '^  :$' "$MUT319" || grep -q '^  \[ -x "\$GIT_OBJECT_CACHE" \] && {' "$MUT319"; then
+  echo "  FAIL mutation VACUOUS (sed did not change the copy)"; fail=$((fail+1))
+else
+  _S319="$AUTHOR"; AUTHOR="$MUT319"
+  # A HIT is configured, so the ONLY reason the cache can go unused is that nothing calls it.
+  run "mutant: the cache is never asked, even on a HIT (pre-#319 behaviour)" \
+      "FAKE_AUTHOR=done FAKE_VALIDATE=GREEN FAKE_GITCACHE=hit" PRCREATE '^GH repo clone' '^GITCACHE'
+  AUTHOR="$_S319"   # restore — every row below must run against the REAL script
+fi
+rm -f "$MUT319"
 
 # ---------------------------------------------------------------------------------------------------
 # THE `cd` INTO THE WORKTREE IS A FAIL-CLOSED GUARD. dev-author already refuses a fresh-tree that FAILS

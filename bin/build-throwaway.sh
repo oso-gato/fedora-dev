@@ -11,7 +11,7 @@
 #   * binds the PINNED-DOWNLOAD cache ($HOME/.cache/fd-dl → /var/cache/fd-dl, #320) so a repo
 #     whose Containerfile uses the declared fetch contract (`RUN fd-fetch.sh <url> <sha256>
 #     <dest>` — bin/fd-fetch.sh) serves a pinned vendor asset from the home volume instead of
-#     re-downloading it. This is the SECOND durable input, and it exists because `ADD <url>`
+#     re-downloading it. This is one of the durable inputs, and it exists because `ADD <url>`
 #     re-downloads the whole file even when buildah reports a layer-cache HIT (MEASURED: 10 413
 #     KiB pulled on a "Using cache" rebuild — see bin/fd-fetch.sh's header table). The bind is
 #     INERT for a repo that does not use the contract: it adds nothing to the image and changes
@@ -23,14 +23,16 @@
 #     home volume) — that is the churn-balance: discard the candidate, keep the cache.
 #   * SWEEPS orphans first (stale `localhost/disposable/*` images + orphan temp trees),
 #     so a kill-9 that skipped the trap on a previous run doesn't leak on the home volume.
-#   * BOUNDS EVERY ASSET CACHE in the same sweep. Most of them via `bin/asset-cache.sh` (#321): the
-#     persistent dnf cache, the podman image/layer STORE (which had NO ceiling here at all before that
-#     change — 97% of 76.8 GB was reclaimable, measured) and the sibling git cache once it lands. Three
-#     bounds each — AGE, SIZE and PROJECT COMPLETION — declared in ONE registry there. The PINNED-
-#     DOWNLOAD cache is bounded in the same sweep by `bin/fd-fetch.sh --gc` (#320) instead, because that
-#     script owns its content-addressed format; see the note at the gc_dl_cache call below. Each file's
-#     header is the authority on its own caps, release rule and fail directions — this wrapper just
-#     calls them and duplicates no policy.
+#   * BOUNDS EVERY ASSET CACHE in the same sweep, through each cache's OWN owner. Via
+#     `bin/asset-cache.sh` (#321): the persistent dnf cache and the podman image/layer STORE (which had
+#     NO ceiling here at all before that change — 97% of 76.8 GB was reclaimable, measured), with three
+#     bounds each — AGE, SIZE and PROJECT COMPLETION — declared in ONE registry there. The other two
+#     durable inputs are bounded in this SAME sweep by the scripts that own their formats, because a
+#     generic registry row cannot bound either one correctly: the GIT OBJECT cache by
+#     `bin/git-object-cache.sh gc` (#319) and the PINNED-DOWNLOAD cache by `bin/fd-fetch.sh --gc`
+#     (#320); see the notes at their call sites for why each row was withdrawn. Each file's header is
+#     the authority on its own caps, release rule and fail directions — this wrapper just calls them
+#     and duplicates no policy.
 #
 # PROVENANCE (Build Principle 2): this only ever builds the repo's OWN Containerfile in
 # the caller-provided context — it adds NO repos, NO source-loosening --build-arg, and does
@@ -65,9 +67,11 @@
 #   FD_STALE_MIN  orphan age threshold, mins (default: 720 = 12h)
 #   BUILD_ARGS    extra args forwarded verbatim to `podman build` (e.g. --build-arg X=Y)
 #   AC_LIB        the bounded-cache GC library (default: the sibling bin/asset-cache.sh)
+#   FD_GIT_CACHE_GC  the git object cache's GC (default: the sibling bin/git-object-cache.sh)
 #   Cache caps are declared by the cache's OWNER, never duplicated here: bin/asset-cache.sh's header
-#   for the dnf/image-store/git bounds + the completion arm and its seams (#321), and bin/fd-fetch.sh's
-#   header for the content-addressed download cache it owns the format of (#320).
+#   for the dnf/image-store bounds + the completion arm and its seams (#321), bin/git-object-cache.sh's
+#   for the git mirror cache it owns the layout of (#319), and bin/fd-fetch.sh's header for the
+#   content-addressed download cache it owns the format of (#320).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -122,11 +126,25 @@ sweep_orphans(){
     fi
   done
   # BOUND EVERY ASSET CACHE (#321). This replaced a dnf-ONLY GC: the same age-then-LRU algorithm now
-  # runs from a registry that also covers the podman image/layer store (previously unbounded here) and
-  # the sibling git cache, and each entry additionally carries a PROJECT-COMPLETION bound.
+  # runs from a registry that also covers the podman image/layer store (previously unbounded here),
+  # and each entry additionally carries a PROJECT-COMPLETION bound.
   # The policy — the caps, the release rule, and why every unreadable signal KEEPS the cache — lives in
   # bin/asset-cache.sh's header. It always returns 0: this runs inside every build.
   asset_cache_gc
+  # The GIT OBJECT cache is bounded by the script that OWNS ITS FORMAT, from this same sweep — the
+  # SECOND instance of the pattern the download cache below established, and for the same two reasons.
+  # #321 declared an fd-git row speculatively as `tree`+`repo` ("immediate subdirectories keyed by repo
+  # name", <cache>/<repo>/) BEFORE the sibling existed; #319 then landed mirrors under a FLAT
+  # OWNER-QUALIFIED name (<cache>/<owner>-<repo>.git — two owners can share a repo name, so the owner
+  # cannot be dropped). Under that layout the generic row's own headline arm is INERT: the per-repo
+  # completion release asks the oracle about a basename of `oso-gato-fedora-dev.git`, which is not a
+  # repo, so it releases nothing. And both mechanisms read the SAME FD_GIT_CACHE_CAP_GB knob with
+  # different defaults (5 here, 15 there), so running both would silently enforce the tighter one and
+  # make the other documented cap a lie. Its owner also does two things no generic row can: it reaps
+  # stale `.incoming.*` mirror-clones on the orphan clock (a generic age arm would sit on one for 45
+  # days), and its evict() refuses any path that is not a mirror inside the cache. One owner per cache
+  # format — see the registry-header note in bin/asset-cache.sh.
+  gc_git_cache
   # The pinned-download cache is bounded by the script that OWNS ITS FORMAT, from this same sweep.
   # It is deliberately NOT a registry row: #321 declared one speculatively as `tree`+`repo` (immediate
   # subdirectories keyed by repo name) BEFORE the sibling existed, and #320 then landed a FLAT
@@ -140,8 +158,27 @@ sweep_orphans(){
   gc_dl_cache
 }
 
+# ---- bound the persistent GIT OBJECT cache (#319) ------------------------------------------------
+# The git object cache is the same KIND of thing as the dnf package cache: one durable INPUT on the home
+# volume, kept across every disposal, therefore something that MUST be bounded. It brings its own caps
+# and its own age-then-size order (see bin/git-object-cache.sh); this hook is only about WHO RUNS IT.
+# It runs HERE, in the sweeper that already fires on every throwaway build and on --sweep-only, rather
+# than behind a new timer — a bound enforced by machinery that already runs cannot silently stop running.
+# FAIL-SOFT: a missing or failing GC logs and returns; garbage-collecting a cache must never fail a build.
+# It is LOUD about a missing owner, like both sibling caches: since #321's speculative fd-git registry
+# row was withdrawn (see the note at the call site), this hook is the ONLY thing bounding that cache, so
+# a silently-skipped GC would leave it entirely unbounded — the one failure mode worth shouting about.
+gc_git_cache(){
+  local gc="${FD_GIT_CACHE_GC:-$HERE/git-object-cache.sh}"
+  if [ ! -x "$gc" ]; then
+    echo "gc: git-cache NOT bounded — $gc is missing or not executable (the cache's owner); caps unenforced" >&2
+    return 0
+  fi
+  "$gc" gc || echo "sweep: git object cache GC failed (rc=$?) — continuing"
+}
+
 # ---- bound the persistent PINNED-DOWNLOAD cache (#320) --------------------------------------------
-# The SECOND durable input needs the same treatment as the first, and for the same reason: a cache that
+# This durable input needs the same treatment as the others, and for the same reason: a cache that
 # nothing bounds eventually eats a limited VPS quota (BP10 storage-safety). The age-then-LRU policy and
 # both caps live in bin/fd-fetch.sh --gc (the script that OWNS the cache format), and are enforced from
 # HERE — the sweeper every throwaway build already runs — so no separate timer or human step is needed.

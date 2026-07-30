@@ -30,14 +30,36 @@
 # `*_CAP_MB` knob overrides its GB sibling for fine control, and is what asset-cache.test.sh sets so the
 # LRU arm can be proven against megabyte fixtures instead of multi-gigabyte ones.
 #
-# A row whose `dir` DOES NOT EXIST IS SKIPPED SILENTLY, never an error — so this ships today bounding
-# what exists today (fd-dnf + the image store) and picks the sibling caches up automatically when they
-# land. That skip is also why the registry can DECLARE the layout the siblings must ship: fd-git is
-# declared `tree`+`repo`, i.e. "immediate subdirectories keyed by repo name" (<cache>/<repo>/…), which
-# is what makes a per-repo completion release addressable at all. If a sibling lands a different layout,
-# its registry ROW is the one place that changes.
+# A row whose `dir` DOES NOT EXIST IS SKIPPED SILENTLY, never an error — so this ships bounding what
+# exists (fd-dnf + the image store). This registry also DECLARED the layout it expected two sibling
+# caches to ship (both `tree`+`repo`, i.e. "immediate subdirectories keyed by repo name",
+# <cache>/<repo>/…, which is what makes a per-repo completion release addressable at all), with the
+# stated rule: if a sibling lands a different layout, its registry ROW is the one place that changes.
 #
-# THE DOWNLOAD CACHE IS EXACTLY THAT CASE, AND ITS ROW CHANGED TO "NOT A ROW" (#320). This registry
+# BOTH SIBLINGS LANDED DIFFERENT, AND BOTH ROWS CHANGED TO "NOT A ROW". The rule was exercised twice,
+# so it is worth stating what it converged on: a cache's FORMAT OWNER bounds it, and this registry
+# bounds the two caches whose formats it owns. That is not a retreat from "bound every asset cache" —
+# every cache is still bounded, in the same sweep (bin/build-throwaway.sh calls all three) — it is
+# where the granularity has to live. What a generic row loses in each case is concrete: the ability to
+# tell a live entry from a half-written one, and an addressable per-repo unit.
+#
+# THE GIT CACHE (#319). Declared `tree`+`repo` as <cache>/<repo>/; what landed is a FLAT
+# OWNER-QUALIFIED name — <cache>/<owner>-<repo>.git (two owners can share a repo name, so the owner
+# cannot be dropped from the key). The `tree` kind's granularity is right there — each mirror IS an
+# immediate subdirectory, all-or-nothing — but the row's own headline arm is INERT under that naming:
+# ac_release_repo_subtrees asks the oracle about a basename of `oso-gato-fedora-dev.git`, which is not
+# a repo, so it releases nothing and always will. Teaching this generic arm to un-mangle that name
+# would be a second owner for the layout. And both mechanisms read the SAME FD_GIT_CACHE_CAP_GB knob
+# with different defaults (5 here, 15 there), so running both would silently enforce the tighter and
+# make the other documented cap UNTRUE. bin/git-object-cache.sh gc therefore keeps that bound — it
+# owns the layout, reaps stale `.incoming.*` mirror-clones on the orphan clock (a generic 45-day age
+# arm would sit on one), and refuses to evict any path that is not a mirror inside the cache, none of
+# which a generic row can do. FOLLOW-UP, disclosed rather than implied away: the git cache therefore
+# has AGE and SIZE bounds but no COMPLETION release. It never had a working one — the arm was inert
+# under the landed layout — so nothing regressed here; closing that axis means adding a completion
+# release to bin/git-object-cache.sh, which can map its own mirror name back to <owner>/<repo>.
+#
+# THE DOWNLOAD CACHE IS THE SAME CASE (#320). This registry
 # declared an fd-dl row speculatively, as `tree`+`repo`, before the sibling existed. What then landed is
 # a FLAT CONTENT-ADDRESSED cache: sha256-named files plus `.part-*` partials, with NO repo keying at all
 # — identical bytes are shared by every repo by construction, so there is no <cache>/<repo>/ subtree to
@@ -47,21 +69,27 @@
 # one of the two documented caps UNTRUE. bin/fd-fetch.sh --gc therefore keeps that bound — it owns the
 # format, reads LAST-USE time (a cache HIT touches its entry) and reaps stale partials, none of which a
 # generic row can do — and bin/build-throwaway.sh calls it from the SAME sweep as asset_cache_gc, so the
-# cache is still bounded on every throwaway build. ONE owner per cache format; this registry has three.
+# cache is still bounded on every throwaway build. ONE owner per cache format; this registry has two.
 #
-# THREE KINDS, because granularity is not a detail — it is correctness:
+# THE KINDS, because granularity is not a detail — it is correctness:
 #   * file  — prune matching FILES (fd-dnf: `*.rpm` ONLY, so dnf METADATA is never pruned; that is the
 #             pre-existing behaviour and it is preserved, not re-derived).
-#   * tree  — prune immediate SUBDIRECTORIES. A git mirror is the reason this kind exists: file-level
-#             LRU inside a bare repo would delete live objects and CORRUPT the mirror. Whole subtree or
-#             nothing.
 #   * image — the podman image/layer store, which has no files to walk: podman's own dangling reap +
 #             aged-unused reap + an LRU size arm (see ac_gc_images).
+#   * tree  — prune immediate SUBDIRECTORIES: whole subtree or nothing, because file-level LRU inside a
+#             bare git repo would delete live objects and CORRUPT the mirror. STATED PLAINLY: no
+#             registry row uses this kind today. It was built for the two caches above, both of which
+#             their own owners now bound, so `tree` and ac_release_repo_subtrees are reachable only from
+#             a future per-repo row (and from their tests, which drive them directly). It is kept rather
+#             than deleted because it is the correct granularity for the next per-repo cache and is
+#             fully covered; it is called out here rather than left to look wired, since machinery that
+#             reads as live while nothing calls it is exactly the trap #278 recorded.
 #
 # THE RELEASE RULE (a design decision, stated so a reviewer can see it rather than infer it):
-#   * A PER-REPO entry (that repo's git mirror; downloads keyed to its build) is released when THAT
-#     REPO'S objective reads SHIPPED. Release = drop `<dir>/<repo>` — that project's working set, and
-#     nothing else. Every other repo's subtree survives untouched.
+#   * A PER-REPO entry is released when THAT REPO'S objective reads SHIPPED. Release = drop
+#     `<dir>/<repo>` — that project's working set, and nothing else. Every other repo's subtree survives
+#     untouched. (No entry is per-repo today — see the `tree` note above — so this is the rule the next
+#     one inherits, not a description of what currently runs.)
 #   * A SHARED entry (dnf RPMs, base images — warmed by EVERY project) is released only when NO in-scope
 #     repo has drivable work: STATUS=SHIPPED and DRIVABLE=0 for every repo `repo-scope.sh list` reports.
 #     Releasing a shared cache on ONE project's completion would re-download for the projects still
@@ -140,8 +168,9 @@
 # ENV KNOBS (all overridable; defaults chosen to bound without surprising):
 #   FD_DNF_CACHE / FD_DNF_CACHE_CAP_GB / FD_DNF_CACHE_MAX_AGE_DAYS   pre-existing, unchanged (15G / 45d)
 #   FD_DNF_CACHE_REL_CAP_GB / FD_DNF_CACHE_REL_AGE_DAYS   dnf COLD FLOOR once released      (2G / 7d)
-#   FD_GIT_CACHE / FD_GIT_CACHE_CAP_GB / FD_GIT_CACHE_MAX_AGE_DAYS   sibling git mirrors    (5G / 45d)
-#   (the download cache's knobs are bin/fd-fetch.sh's — it owns that format and its bound; not read here)
+#   (the git cache's knobs are bin/git-object-cache.sh's, and the download cache's are bin/fd-fetch.sh's
+#    — each owns its own format and bound; NEITHER set is read here, deliberately: two readers of one
+#    knob with two defaults is how a documented cap becomes untrue. See the withdrawn-row notes above.)
 #   <ANY>_CAP_MB          overrides its _CAP_GB sibling (fine-grained; what the test suite uses)
 #   FD_IMAGE_STORE        podman store dir, existence-checked only   (default ~/.local/share/containers)
 #   FD_STORE_MAX_AGE_H    reap UNUSED images older than this         (default 1440h = 60d, host parity)
@@ -171,10 +200,6 @@ AC_DNF_AGE_H=$(( ${FD_DNF_CACHE_MAX_AGE_DAYS:-45} * 24 ))
 AC_DNF_REL_CAP_MB="${FD_DNF_CACHE_REL_CAP_MB:-$(( ${FD_DNF_CACHE_REL_CAP_GB:-2} * 1024 ))}"
 AC_DNF_REL_AGE_H=$(( ${FD_DNF_CACHE_REL_AGE_DAYS:-7} * 24 ))
 
-AC_GIT_CACHE="${FD_GIT_CACHE:-$HOME/.cache/fd-git}"
-AC_GIT_CAP_MB="${FD_GIT_CACHE_CAP_MB:-$(( ${FD_GIT_CACHE_CAP_GB:-5} * 1024 ))}"
-AC_GIT_AGE_H=$(( ${FD_GIT_CACHE_MAX_AGE_DAYS:-45} * 24 ))
-
 AC_IMAGE_STORE="${FD_IMAGE_STORE:-$HOME/.local/share/containers}"
 AC_STORE_CAP_MB="${FD_STORE_CAP_MB:-$(( ${FD_STORE_CAP_GB:-60} * 1024 ))}"
 AC_STORE_AGE_H="${FD_STORE_MAX_AGE_H:-1440}"
@@ -203,7 +228,6 @@ ac_registry(){
   cat <<EOF
 dnf|file|$AC_DNF_CACHE|$AC_DNF_CAP_MB|$AC_DNF_AGE_H|*.rpm|shared|$AC_DNF_REL_CAP_MB|$AC_DNF_REL_AGE_H
 images|image|$AC_IMAGE_STORE|$AC_STORE_CAP_MB|$AC_STORE_AGE_H|-|shared|$AC_STORE_REL_CAP_MB|$AC_STORE_REL_AGE_H
-git|tree|$AC_GIT_CACHE|$AC_GIT_CAP_MB|$AC_GIT_AGE_H|*|repo|-|-
 EOF
 }
 
@@ -541,17 +565,19 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   ck "empty list protects nothing"        "$(ac_protected localhost/y:1 && echo yes || echo no)" "no"
   ck "second glob in the list matches"    "$(ac_protected a/b:1 x/y a/b && echo yes || echo no)" "yes"
 
-  echo "== the registry: three declared caches, nine fields each, the sibling git row per-repo =="
-  ck "registry row count"                 "$(ac_registry | grep -c .)" "3"
+  echo "== the registry: the two caches this file owns, nine fields each =="
+  ck "registry row count"                 "$(ac_registry | grep -c .)" "2"
   ck "every row has 9 fields"             "$(ac_registry | awk -F'|' '{print NF}' | sort -u | tr -d '\n')" "9"
   ck "dnf glob is *.rpm only (metadata kept)" "$(ac_registry | awk -F'|' '$1=="dnf"{print $6}')" "*.rpm"
   ck "dnf scope is shared"                "$(ac_registry | awk -F'|' '$1=="dnf"{print $7}')" "shared"
   ck "images scope is shared"             "$(ac_registry | awk -F'|' '$1=="images"{print $7}')" "shared"
-  ck "git scope is repo"                  "$(ac_registry | awk -F'|' '$1=="git"{print $7}')" "repo"
-  # The download cache is NOT a row here: bin/fd-fetch.sh owns its content-addressed format and its
-  # bound (see the header). Pinned, because a re-added `tree`+`repo` row would silently bound nothing
-  # on a flat cache AND fight fd-fetch over the same FD_DL_CACHE_CAP_GB knob.
+  # NEITHER sibling cache is a row here: each is bounded by the script that owns its format, from the
+  # same sweep (bin/build-throwaway.sh calls all three). Both absences are PINNED, because re-adding
+  # either `tree`+`repo` row would bound nothing it should while fighting that owner over the SAME
+  # *_CAP_GB knob with a different default — which silently makes one documented cap untrue.
   ck "no dl row (bin/fd-fetch.sh owns that cache)" "$(ac_registry | awk -F'|' '$1=="dl"{print $1}')" ""
+  ck "no git row (bin/git-object-cache.sh owns that cache)" "$(ac_registry | awk -F'|' '$1=="git"{print $1}')" ""
+  ck "no knob of the git cache is read here"  "$(set | grep -c '^AC_GIT_')" "0"
   ck "dnf age cap = 45d in hours"         "$(ac_registry | awk -F'|' '$1=="dnf"{print $5}')" "1080"
   ck "image age cap = host's 1440h"       "$(ac_registry | awk -F'|' '$1=="images"{print $5}')" "1440"
   ck "dnf size cap = 15G in MiB"          "$(ac_registry | awk -F'|' '$1=="dnf"{print $4}')" "15360"

@@ -152,37 +152,69 @@ now_kb="$(du -sk "$CASE/dnf" | cut -f1)"
 
 echo "== a registry entry whose dir DOES NOT EXIST is skipped SILENTLY (never an error) =="
 reset_case a4
-mkfile "$CASE/dnf/x.rpm" "1 day ago"          # only the dnf dir exists; git/store do not
+mkfile "$CASE/dnf/x.rpm" "1 day ago"          # only the dnf dir exists; the image store does not
 out="$(GCLIB FD_DNF_CACHE_MAX_AGE_DAYS=3650 FD_DNF_CACHE_CAP_MB=999999 2>&1)"; rc=$?
-[ "$rc" = 0 ] && ok "rc 0 with two of three caches absent" || no "non-zero rc on absent dirs (rc=$rc)" "$out"
-grep -Eq 'git|images' <<<"$out" && no "an absent cache was mentioned — not a silent skip" "$out" \
+[ "$rc" = 0 ] && ok "rc 0 with one of two caches absent" || no "non-zero rc on absent dirs (rc=$rc)" "$out"
+grep -Eq 'images' <<<"$out" && no "an absent cache was mentioned — not a silent skip" "$out" \
   || ok "absent caches produce NO output at all"
 [ ! -s "$PODLOG" ] && ok "the absent image store means podman was never invoked" \
   || no "podman was called for a store dir that does not exist" "$(cat "$PODLOG")"
-# The skip must be a SKIP, not an absence: the registry still declares all three.
-[ "$(GC bash "$LIB" --registry | grep -c .)" = 3 ] \
-  && ok "the registry still DECLARES all three caches (skipped ≠ undeclared)" || no "registry lost an entry"
-# The download cache is bounded by bin/fd-fetch.sh (it owns that content-addressed format), NOT by a
-# row here. A re-added row would silently bound nothing on a flat cache and would fight fd-fetch over
-# the same FD_DL_CACHE_CAP_GB knob, so its ABSENCE is the assertion. fd-fetch.test.sh D1 proves the
-# bound is still enforced from build-throwaway.sh's sweep.
+# The skip must be a SKIP, not an absence: the registry still declares both of its own caches.
+[ "$(GC bash "$LIB" --registry | grep -c .)" = 2 ] \
+  && ok "the registry still DECLARES both its caches (skipped ≠ undeclared)" || no "registry lost an entry"
+# NEITHER sibling cache is a row here: each is bounded by the script that OWNS ITS FORMAT, from the same
+# sweep. A re-added row would bound nothing it should (a flat content-addressed file cache has no
+# subdirectories; a flat <owner>-<repo>.git mirror name is not a repo the release arm can resolve) while
+# fighting that owner over the SAME *_CAP_GB knob with a different default — silently making one of the
+# two documented caps untrue. So both ABSENCES are the assertion. fd-fetch.test.sh D1 and
+# git-object-cache.test.sh A13 prove each bound is still enforced from build-throwaway.sh's sweep.
 [ -z "$(GC bash "$LIB" --registry | awk -F'|' '$1=="dl"')" ] \
   && ok "no dl row — bin/fd-fetch.sh owns the download cache's bound" || no "a dl registry row is back"
+[ -z "$(GC bash "$LIB" --registry | awk -F'|' '$1=="git"')" ] \
+  && ok "no git row — bin/git-object-cache.sh owns the git cache's bound" || no "a git registry row is back"
 
 echo "===== PART B — the PROJECT-COMPLETION bound (stubbed ship oracle) ====="
 
 echo "== a PER-REPO entry releases on THAT repo's SHIPPED — and not on a sibling's =="
+# DRIVEN DIRECTLY, because NO registry row is per-repo today: both caches that were declared `tree`+`repo`
+# are now bounded by their own format owners (see the withdrawn-row notes in bin/asset-cache.sh). The
+# `tree` kind and this release arm are kept for the next per-repo cache, so their behaviour is still
+# pinned here — but through the functions themselves, which is honest about there being no row that
+# reaches them. A row-driven version of this test would only prove the fixture, not the shipped registry.
 reset_case b1
-mkdir_aged "$CASE/git/e2e-alpha" "1 day ago"
-mkdir_aged "$CASE/git/e2e-beta"  "1 day ago"
+mkdir_aged "$CASE/perrepo/e2e-alpha" "1 day ago"
+mkdir_aged "$CASE/perrepo/e2e-beta"  "1 day ago"
 echo "SHIPPED 0" > "$ORACLE_DIR/e2e-alpha"
 echo "OPEN 3"    > "$ORACLE_DIR/e2e-beta"
-out="$(GCLIB FD_GIT_CACHE_MAX_AGE_DAYS=3650 FD_GIT_CACHE_CAP_MB=999999 2>&1)"; rc=$?
-{ ! have "$CASE/git/e2e-alpha" && have "$CASE/git/e2e-beta" && [ "$rc" = 0 ]; } \
+out="$(GC bash -c '. "$1"; ac_release_repo_subtrees perrepo "$2"' ac-test "$LIB" "$CASE/perrepo" 2>&1)"; rc=$?
+{ ! have "$CASE/perrepo/e2e-alpha" && have "$CASE/perrepo/e2e-beta" && [ "$rc" = 0 ]; } \
   && ok "the SHIPPED repo's subtree dropped; the OPEN sibling's untouched" \
-  || no "per-repo release wrong (rc=$rc)" "$out$(ls "$CASE/git" 2>&1)"
-grep -q 'gc: git completion-release e2e-alpha/' <<<"$out" \
+  || no "per-repo release wrong (rc=$rc)" "$out$(ls "$CASE/perrepo" 2>&1)"
+grep -q 'gc: perrepo completion-release e2e-alpha/' <<<"$out" \
   && ok "the release names the repo and its reason" || no "no completion-release report" "$out"
+
+echo "== the 'tree' kind is all-or-nothing: age-prunes whole subtrees, LRU-evicts oldest-first =="
+# Also driven directly, and for the same reason. This arm previously ran only with its caps disabled, so
+# its age/size behaviour was never actually asserted; pinning it here keeps the kind honest for whoever
+# adds the next per-repo row.
+reset_case b1b
+mkdir_aged "$CASE/perrepo/aged"   "20 days ago"
+mkdir_aged "$CASE/perrepo/fresh"  "1 day ago"
+out="$(GC bash -c '. "$1"; ac_gc_trees perrepo "$2" 240 999999' ac-test "$LIB" "$CASE/perrepo" 2>&1)"; rc=$?
+{ ! have "$CASE/perrepo/aged" && have "$CASE/perrepo/fresh" && [ "$rc" = 0 ]; } \
+  && ok "the aged subtree went WHOLE; the fresh one stayed" || no "tree age arm wrong (rc=$rc)" "$out"
+# Three 1 MiB subtrees against a 2 MB cap — the same arithmetic as the dnf LRU row above, so the cap is
+# genuinely EXCEEDED (ac_over_cap needs strictly-over) and the walk must stop after evicting exactly one.
+# It discriminates on the SORT: reverse the order and it is the NEWEST that goes instead.
+reset_case b1c
+mkdir_aged "$CASE/perrepo/a-oldest" "3 days ago" 1048576
+mkdir_aged "$CASE/perrepo/b-middle" "2 days ago" 1048576
+mkdir_aged "$CASE/perrepo/c-newest" "1 day ago"  1048576
+out="$(GC bash -c '. "$1"; ac_gc_trees perrepo "$2" 87600 2' ac-test "$LIB" "$CASE/perrepo" 2>&1)"; rc=$?
+{ ! have "$CASE/perrepo/a-oldest" && have "$CASE/perrepo/b-middle" \
+    && have "$CASE/perrepo/c-newest" && [ "$rc" = 0 ]; } \
+  && ok "over cap, the OLDEST subtree was evicted and the two newest kept" \
+  || no "tree LRU order wrong (rc=$rc)" "$out$(ls "$CASE/perrepo" 2>&1)"
 
 echo "== a SHARED entry does NOT release while ANY in-scope repo has DRIVABLE>0 =="
 # Observable: a 10-day-old rpm sits INSIDE the steady 45d cap but OUTSIDE the 7d cold floor. It survives
@@ -363,16 +395,26 @@ echo "== build-throwaway.sh --sweep-only enforces every bound in one pass and ex
 reset_case d1
 mkdir -p "$CASE/store" "$CASE/bin"
 mkfile "$CASE/dnf/ancient.rpm" "100 days ago"
-mkdir_aged "$CASE/git/e2e-alpha" "1 day ago"
 echo "SHIPPED 0" > "$ORACLE_DIR/e2e-alpha"
 printf 'e2e-alpha\n' > "$SCOPE_LIST"
 ln -s "$FIX/podman.sh" "$CASE/bin/podman"          # the wrapper's own sweep calls `podman` by name
-out="$(GC PATH="$CASE/bin:$PATH" bash "$WRAP" --sweep-only 2>&1)"; rc=$?
+# The sweep must reach EVERY cache's owner, so the two it does not bound itself are recorded when called.
+# This is the wiring half: a bound whose owner is never invoked from the sweep is not enforced at all,
+# and no amount of testing inside that owner would notice (the #278 lesson).
+cat > "$CASE/bin/git-object-cache.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "git-owner-called $*" >> "$GITGCLOG"
+EOS
+chmod +x "$CASE/bin/git-object-cache.sh"
+out="$(GC GITGCLOG="$CASE/gitgc.log" FD_GIT_CACHE_GC="$CASE/bin/git-object-cache.sh" \
+        PATH="$CASE/bin:$PATH" bash "$WRAP" --sweep-only 2>&1)"; rc=$?
 [ "$rc" = 0 ] && ok "--sweep-only exits 0" || no "--sweep-only rc=$rc" "$out"
-{ ! have "$CASE/dnf/ancient.rpm" && ! have "$CASE/git/e2e-alpha"; } \
-  && ok "one pass enforced the dnf AGE bound and the per-repo COMPLETION release" \
-  || no "a bound was not enforced in the sweep" "$out"
+[ ! -e "$CASE/dnf/ancient.rpm" ] \
+  && ok "one pass enforced the dnf AGE bound" || no "a bound was not enforced in the sweep" "$out"
 grep -q 'image prune' "$PODLOG" && ok "and the image-store bound ran in the same pass" || no "image bound skipped" "$(cat "$PODLOG")"
+grep -q 'git-owner-called gc' "$CASE/gitgc.log" 2>/dev/null \
+  && ok "and the git cache's OWNER was invoked from the same sweep" \
+  || no "the git cache's owner was never called — that cache is unbounded" "$(cat "$CASE/gitgc.log" 2>&1)"
 
 echo "== a missing GC library WARNS loudly and still exits 0 — a build is never blocked by it (R39) =="
 reset_case d2
