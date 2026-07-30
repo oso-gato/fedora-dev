@@ -295,11 +295,11 @@ run env FAKE_LIST_FAIL=1 bash "$SCRIPT" prune fedora-dev --commit
 echo "== prune keeps each repo's picker SMALL: control-only labels go from a TENANT =="
 alllabels
 run bash "$SCRIPT" prune fedora-dev
-{ echo "$OUT" | grep -q "WOULD DELETE 'halt'" && echo "$OUT" | grep -q "WOULD DELETE 'rebuild-approval'"; } \
+{ echo "$OUT" | grep -q "WOULD DELETE 'host-done'" && echo "$OUT" | grep -q "WOULD DELETE 'rebuild-approval'"; } \
   && ok "control-scoped labels are pruned from a tenant repo (they are decorative there)" \
   || bad "prune-control-scope-tenant" "out=[$OUT]"
 run bash "$SCRIPT" prune fedora-bootstrap
-{ ! echo "$OUT" | grep -q "WOULD DELETE 'halt'"; } \
+{ ! echo "$OUT" | grep -q "WOULD DELETE 'host-done'"; } \
   && ok "…and KEPT on the control repo, where the machinery actually reads them" \
   || bad "prune-control-scope-control" "out=[$OUT]"
 

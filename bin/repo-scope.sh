@@ -28,7 +28,7 @@
 # loop can still fix/ship itself and reach its control issue, but can never wander. A READABLE but
 # EMPTY scope denies EVERYTHING (a maintainer who empties the file means it). A MISSING READER is
 # stricter still: every caller treats a non-zero rc — 127 included — as "no action" (the
-# bin/fleet-halt.sh contract), so a broken install freezes all scoped action by construction.
+# fail-closed reader contract), so a broken install freezes all scoped action by construction.
 #
 # CONTRACT (what every caller relies on):
 #   repo-scope.sh check <repo>   rc 0 = IN scope (the ONLY "act") · rc 3 = OUT of scope ·
@@ -63,7 +63,7 @@
 # (before filing) and bin/host-refresh.sh (per scanned repo). The host's live-gate discovers
 # `live-validate` PRs ORG-WIDE — the same leak from the other end (R16 rule 5): this file is
 # CANONICAL here and meant to be MIRRORED into fedora-bootstrap with the control repo's copy of
-# scope.conf (the bin/fleet-halt.sh / gh-app-provision.sh precedent; keep in lockstep). Until that
+# scope.conf (the gh-app-provision.sh precedent; keep in lockstep). Until that
 # lands, the host half remains org-wide — a DISCLOSED residual, not a silent one.
 #
 # COST: one App-install enumeration API call per TTL window (cached), safe at the poller's cadence.

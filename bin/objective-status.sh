@@ -19,7 +19,7 @@
 #     drivable (label `live-validate` → read the verdict → iterate RED→GREEN → the poller merges). This
 #     is the signal that nails the maintainer's complaint: a pushed-but-unmerged PR is NOT "done".
 #   * THE STANDING WORK PLAN (#279) — the OPEN issue whose title starts with $PLAN_TITLE ("STANDING WORK
-#     PLAN"), discovered BY TITLE, never by a hardcoded number (the bin/fleet-halt.sh precedent). Its
+#     PLAN"), discovered BY TITLE, never by a hardcoded number (discovered by title, never a hardcoded number). Its
 #     unchecked `- [ ]` / `- [~]` items are reported as OPEN_PLAN_ITEMS + PLAN_ISSUE. **This fact is
 #     REPORTED, not folded into the verdict**: an unchecked box is a reason not to STOP, not a proof the
 #     built product is unshipped — folding it into `drivable` would let one stale checkbox freeze
@@ -52,7 +52,7 @@ BACKLOG_LABEL="${BACKLOG_LABEL:-backlog}"
 # `## Delivered means` line is what decides whether an acceptance probe is MANDATORY (see classify).
 INTAKE_LABEL="${INTAKE_LABEL:-objective}"
 ESCALATE_LABELS="${ESCALATE_LABELS:-escalate,needs-decision,blocked,awaiting-maintainer}"
-# The standing work plan is discovered BY TITLE PREFIX (fleet-halt.sh's control-issue precedent) — it
+# The standing work plan is discovered BY TITLE PREFIX (the control-issue discipline) — it
 # carries no label of its own. Set PLAN_TITLE='' to switch the fact off entirely.
 PLAN_TITLE="${PLAN_TITLE-STANDING WORK PLAN}"   # `-` not `:-`: an EXPLICIT empty value must disable it
 OS_PROBE_TIMEOUT="${OS_PROBE_TIMEOUT:-20}"
@@ -303,7 +303,7 @@ drivable_total=$(( open_backlog + drivable ))
 # FACT 2b — THE STANDING WORK PLAN (#279). REPORTED (OPEN_PLAN_ITEMS / PLAN_ISSUE), never folded into
 # `drivable_total`: see the header — an unchecked box is a reason not to STOP, not a proof the built
 # product is unshipped, and folding it in would let one stale checkbox freeze ship-actuator forever.
-# Discovered BY TITLE (fleet-halt.sh's precedent), strict-prefix re-checked because issue search is fuzzy.
+# Discovered BY TITLE (by title, never a hardcoded number), strict-prefix re-checked because issue search is fuzzy.
 # FAIL DIRECTION: an unreadable/absent plan reports 0 — the anti-stall gate simply loses this extra tooth
 # (it can only ADD teeth, never remove them), and no verdict is ever fabricated from a failed read.
 plan_items=0; plan_issue=""

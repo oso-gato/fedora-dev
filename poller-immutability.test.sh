@@ -101,7 +101,7 @@ run_poller(){
   reset_logs
   env HOME="$HOMEDIR" PATH="$BIN:$PATH" POLLER_REPOS=fedora-dev POLLER_ARMED=0 \
       HOST_REFRESH_EVERY=0 RECONCILE_EVERY=0 SHIP_ACTUATOR_EVERY=0 DEV_LOOP_LAUNCH_EVERY=0 \
-      REBUILD_REQUEST_EVERY=0 SELF_REFRESH=0 FLEET_HALT=true \
+      REBUILD_REQUEST_EVERY=0 SELF_REFRESH=0 \
       REPO_SCOPE="$BIN/repo-scope-stub.sh" \
       IMMUTABILITY_PROBE="$BIN/fake-probe.sh" IMMUTABILITY_PROBE_EVERY=1 \
       IMMUT_STATE="$STATEDIR" GH_LOG="$GH_LOG" PROBE_LOG="$PROBE_LOG" \
@@ -161,15 +161,6 @@ grep -q 'IMMUTABILITY_PROBE:-\$HERE/immutability-probe.sh' "$POLLER" \
 [ -x "$HERE/bin/immutability-probe.sh" ] \
   && ok "that default target exists and is executable (the tick's call site is not dead)" \
   || no "the default probe target is missing/not executable"
-
-# ══ PART B — R9 fleet halt ═════════════════════════════════════════════════════════════════════════
-echo "== PART B — a halted tick is OBSERVE-ONLY =="
-reset_state
-run_poller "$POLLER" FLEET_HALT=false
-{ [ "$RC" = 0 ] && ! probe_ran && [ "$(gh_issue_calls)" = 0 ] && [ ! -e "$STATEDIR/last" ] \
-    && logs 'immutability-probe: R9 HALT' && logs 'WOULD measure'; } \
-  && ok "HALT: logs what it WOULD do, builds nothing, files nothing, records nothing" \
-  || no "the halted tick acted (or did not say what it would have done)"
 
 # ══ PART C — fail-safe ═════════════════════════════════════════════════════════════════════════════
 echo "== PART C — a probe that fails can never stop the loop =="
@@ -337,19 +328,6 @@ pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/de
 
 # ══ PART I — MUTATIONS (BP8) ═══════════════════════════════════════════════════════════════════════
 echo "== PART I — mutations: each guard must be what makes its row pass =="
-
-# M1 — neutralize the halt gate INSIDE this tick only (the same guard text appears in every other tick).
-MUT1="$ROOT/poller-mut-halt.sh"
-sed '/^immutability_probe_tick(){/,/^}/ s/\[ "${POLLER_HALTED:-0}" = 1 \]/false/' "$POLLER" > "$MUT1"
-if ! cmp -s "$POLLER" "$MUT1"; then
-  reset_state
-  run_poller "$MUT1" FLEET_HALT=false
-  { probe_ran; } \
-    && ok "M1: without the halt gate a HALTED tick measures anyway ⇒ the real gate is what stops it" \
-    || no "M1: the mutant still did not measure (the halt row would not bite)"
-else
-  no "M1 mutation VACUOUS (sed did not change the halt gate)"
-fi
 
 # M2 — neutralize the RED→surface branch. `^    SURFACE)` cannot match `STAGED_SURFACE)` at the same
 # indent, so the staged arm is left intact and only the RED alarm is disarmed.

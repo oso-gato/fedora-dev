@@ -75,9 +75,8 @@
 #                     acted-marker-parked, precisely so a hand-posted verdict is still seen — no
 #                     model run is spent on it, only the reads. Against the dev App's 5k/h REST budget (SHARED with the fixer,
 #                     fitness reviewer and auto-merge): N=10 open PRs ≈ 4.3k/h — the ceiling is
-#                     ~10 sustained open PRs (was 2-3 unbatched). The R9 fleet-halt read (#151)
-#                     adds 2 calls per TICK, not per repo (1 title-search + 1 timeline ≈ +720/h;
-#                     the search API has its own 30/min budget, of which this uses 6/min).
+#                     ~10 sustained open PRs (was 2-3 unbatched). (Retiring the soft HALT on
+#                     2026-07-30 removed 2 search+timeline calls per TICK, ≈ -720/h.)
 #                     On exhaustion gh calls fail and
 #                     sweeps degrade to NOOP until the window resets — fail-closed,
 #                     self-recovering; GREEN-moment fetch failures skip that PR for that sweep
@@ -88,7 +87,6 @@
 #                     count of iterations.
 #   FRESH_TREE        the isolator (default: bin/fresh-tree.sh). Every fix runs in a throwaway worktree
 #                     off the PR's own head — NEVER the shared clone (#152). Overridable for testing.
-#   FLEET_HALT        the R9 fleet HALT reader (default: bin/fleet-halt.sh — see its header; #151).
 #                     Read at the TOP of every tick, BEFORE any model run / merge / retire / comment.
 #                     rc 0 alone means GO; ANY other outcome (a maintainer HALT, or a missing/crashed
 #                     checker — rc 20/PAUSE is retired, an unreadable signal now reads GO) makes the
@@ -1017,10 +1015,6 @@ FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
 # the isolator the fixer runs in (#152). Overridable so poller-fixer.test.sh can drive the REAL sweep.
 FRESH_TREE="${FRESH_TREE:-$HERE/fresh-tree.sh}"
-# the R9 fleet HALT reader (#151). Overridable so the mock suites can pin both directions
-# (poller-fixer.test.sh drives a halted sweep with FLEET_HALT=false, a normal one with FLEET_HALT=true).
-FLEET_HALT="${FLEET_HALT:-$HERE/fleet-halt.sh}"
-POLLER_HALTED=0
 # the independent fitness harness the REVIEW arm runs. Overridable (same reason as FRESH_TREE) so
 # fitness-review.test.sh can drive the REAL sweep against a scripted reviewer outcome.
 FITNESS_REVIEW="${FITNESS_REVIEW:-$HERE/fitness-review.sh}"
@@ -1037,8 +1031,8 @@ FITNESS_RETRY_BACKOFF="${FITNESS_RETRY_BACKOFF:-300}"
 # was absorbed as N per-head failures and PARKED EVERY PR permanently (the incident). The gate adds the
 # distinction the cheapest way: when a review FAILS (rc 3), a tiny `claude -p` liveness PROBE disambiguates
 # — DOWN ⇒ this is global, so DON'T strike the head; PAUSE the arm for the sweep (no strikes, no questions)
-# and skip the remaining reviews; it SELF-HEALS the next sweep once the probe passes (the fleet-halt PAUSE
-# pattern). UP ⇒ genuinely per-head ⇒ the bounded retry above. Probe-ON-FAILURE, so a sweep whose reviews
+# and skip the remaining reviews; it SELF-HEALS the next sweep once the probe passes (a PAUSE,
+# not a strike). UP ⇒ genuinely per-head ⇒ the bounded retry above. Probe-ON-FAILURE, so a sweep whose reviews
 # all SUCCEED pays NOTHING (a success IS the health signal). Disable with FITNESS_INFRA_CHECK=0 (⇒ the old
 # behaviour). A persistent outage past FITNESS_INFRA_PAUSE_SURFACE seconds surfaces ONE question (so a
 # never-recovering break is never a SILENT stall) — but the arm keeps auto-resuming, no human required.
@@ -1706,19 +1700,14 @@ retire_superseded(){
 }
 
 # HOST-REFRESH tick (#163) — see the HOST_REFRESH config block above; the design lives in
-# bin/host-refresh.sh's header. Called at the END of sweep(), so POLLER_HALTED is THIS tick's halt
-# read (filing a redeploy ticket / surfacing a host-apply question is an ACTION — R9 gates it like
-# every other action) and no sweep work is in flight. Failures are logged and SWALLOWED: a missed
+# bin/host-refresh.sh's header. Called at the END of sweep(), so no sweep work is in flight.
+# Failures are logged and SWALLOWED: a missed
 # scan degrades to the status quo (the monthly workload-refresh timer), never to a stopped loop.
 host_refresh_tick(){
   [ "${HOST_REFRESH_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
   HOST_REFRESH_TICKS=$((HOST_REFRESH_TICKS+1))
   tick_due host-refresh "$HOST_REFRESH_TICKS" "$HOST_REFRESH_EVERY" || return 0
   HOST_REFRESH_TICKS=0; tick_ran host-refresh
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "host-refresh: R9 HALT — scan skipped this tick (no ticket filed, no comment posted; resumes when the halt clears)"
-    return 0
-  fi
   "$HOST_REFRESH_SCAN" --once 2>&1 | tee -a "$LOG" >&2 \
     || log "host-refresh: scan failed (continuing — a missed redeploy degrades to the monthly timer)"
   return 0
@@ -1733,10 +1722,6 @@ reconcile_tick(){
   RECONCILE_TICKS=$((RECONCILE_TICKS+1))
   tick_due reconcile "$RECONCILE_TICKS" "$RECONCILE_EVERY" || return 0
   RECONCILE_TICKS=0; tick_ran reconcile
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "reconcile: R9 HALT — scan skipped this tick (no issue closed; resumes when the halt clears)"
-    return 0
-  fi
   "$RECONCILE_SCAN" --once 2>&1 | tee -a "$LOG" >&2 \
     || log "reconcile: scan failed (continuing — an unclosed issue stays OPEN for the next scan)"
   return 0
@@ -1754,10 +1739,6 @@ ship_actuator_tick(){
   SHIP_ACTUATOR_TICKS=$((SHIP_ACTUATOR_TICKS+1))
   tick_due ship "$SHIP_ACTUATOR_TICKS" "$SHIP_ACTUATOR_EVERY" || return 0
   SHIP_ACTUATOR_TICKS=0; tick_ran ship
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "ship-actuator: R9 HALT — skipped this tick (no gate run, no ship announced; resumes when the halt clears)"
-    return 0
-  fi
   # EVERY scoped repo gets a tick — not just whichever one $POLLER_REPO happens to be holding. The sweep
   # loop above reassigns POLLER_REPO per repo and leaves it holding the LAST repo swept, so the actuator
   # only ever considered that one arbitrary repo. e2e-beta received its ticks purely because it sorted
@@ -1973,10 +1954,6 @@ immutability_probe_tick(){
   IMMUTABILITY_PROBE_TICKS=$((IMMUTABILITY_PROBE_TICKS+1))
   tick_due immutability "$IMMUTABILITY_PROBE_TICKS" "$IMMUTABILITY_PROBE_EVERY" || return 0
   IMMUTABILITY_PROBE_TICKS=0; tick_ran immutability
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "immutability-probe: R9 HALT — WOULD measure both boxes (a real build here + a host ticket) and route the verdict; skipped this tick: nothing built, nothing filed, no issue touched (resumes when the halt clears)"
-    return 0
-  fi
   [ -x "$IMMUTABILITY_PROBE" ] || { log "immutability-probe: $IMMUTABILITY_PROBE is not executable — nothing measured this tick"; return 0; }
   mkdir -p "$IMMUT_STATE" 2>/dev/null || { log "immutability-probe: cannot create $IMMUT_STATE — nothing measured this tick"; return 0; }
   # No flock ⇒ single-flight is UNENFORCEABLE, and the fail direction is SKIP: two concurrent probes
@@ -2005,10 +1982,6 @@ dev_loop_launch_tick(){
   [ "$DEV_LOOP_LAUNCH_TICKS" -ge "$DEV_LOOP_LAUNCH_EVERY" ] || return 0
   DEV_LOOP_LAUNCH_TICKS=0
   [ "${DEV_LOOP_ENABLED:-1}" != 0 ] || return 0   # #220 self-arm gate: default ON; explicit =0 disables
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "dev-loop-launch: R9 HALT — not launching the authoring loop this tick (resumes when the halt clears)"
-    return 0
-  fi
   [ -x "$DEV_LOOP_SERVICE" ] || { log "dev-loop-launch: $DEV_LOOP_SERVICE not executable — skipping (degrades to the entrypoint's launch on the next rebuild)"; return 0; }
   if "$DEV_LOOP_SERVICE" --is-live 2>/dev/null; then
     return 0    # a live authoring loop already holds it — nothing to do (quiet: this is the steady state)
@@ -2030,10 +2003,6 @@ rebuild_request_tick(){
   [ "$REBUILD_REQUEST_TICKS" -ge "$REBUILD_REQUEST_EVERY" ] || return 0
   REBUILD_REQUEST_TICKS=0
   [ -e "$REBUILD_REQUEST_FLAG" ] || return 0
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "rebuild-request: R9 HALT — not filing the approval ticket this tick (flag kept; resumes when the halt clears)"
-    return 0
-  fi
   [ -x "$REBUILD_REQUEST_SCRIPT" ] || { log "rebuild-request: $REBUILD_REQUEST_SCRIPT not executable — skipping (flag kept)"; return 0; }
   if "$REBUILD_REQUEST_SCRIPT" file 2>&1 | tee -a "$LOG" >&2; then
     rm -f "$REBUILD_REQUEST_FLAG" 2>/dev/null || :
@@ -2047,25 +2016,14 @@ rebuild_request_tick(){
 # ORG-WIDE wrapper (P0 uniform loop): one tick sweeps EVERY apparatus repo through the SAME harness,
 # re-setting POLLER_REPO/SLUG per repo. sweep_repo() is the original single-repo body unchanged.
 #
-# R9 FLEET HALT (#151): the fleet-wide stop switch is read ONCE at the TOP of every tick — BEFORE any
-# model run is spawned, any merge taken, any retire close, any comment posted (R9's bound is "within
-# one sweep"). rc 0 alone means GO; ANY other outcome — a maintainer HALT, or a checker that is missing
-# or crashed — makes the whole tick OBSERVE-ONLY: sweep_repo still enumerates and logs what it WOULD do,
-# so the operator sees the queue, but acts on nothing and writes no state marker. This branch is
-# unchanged by #274; what changed is UPSTREAM, inside the checker: an UNREADABLE signal no longer
-# escalates to HALT — it returns rc 0 (GO), loudly, so internet weather can no longer freeze the fleet
-# (935 halts, ZERO maintainer-thrown: bin/fleet-halt.sh). The poller does NOT exit: HALT stops NEW action, not
-# running work (in-flight fixer/merge completes; the hard kill is App-key revocation, per R9), and a
-# maintainer removing the label resumes action on the very next sweep — no restart, no re-arm.
+# NO SOFT STOP IS READ HERE. The maintainer-thrown HALT label was RETIRED 2026-07-30 (R9): thrown by a
+# maintainer 0 times ever, fired by itself 935 times (all false), suppressing 338 real actions — one of
+# them the ticket that would have repaired a six-day outage. It duplicated two stronger stops that need
+# no code (App-key revocation, container stop) and depended on GitHub being readable, so it failed
+# exactly when an outage made it matter. Stopping this loop is now: revoke the key, or stop the box.
 sweep(){
-  local _r _hmsg
+  local _r
   REVIEW_INFRA=""   # reviewer-infra health is a per-SWEEP fact (global across all repos) — re-probed lazily on the first review failure this sweep
-  if _hmsg="$("$FLEET_HALT" 2>>"$LOG")"; then
-    POLLER_HALTED=0
-  else
-    POLLER_HALTED=1
-    log "FLEET HALT: ${_hmsg:-halt checker unavailable (fail-closed toward stopping)} — OBSERVE-ONLY tick: no fixer, no review, no merge, no retire, no comment"
-  fi
   # R16 OPERATING SCOPE (#167): every swept repo is re-checked against the maintainer-confirmed
   # scope EVERY tick, whatever put it in $POLLER_REPOS (env, a stale process, a mutated default).
   # Out of scope ⇒ NO action of any kind — no sweep, no fixer, no review, no merge, no retire —
@@ -2088,7 +2046,7 @@ sweep(){
 sweep_repo(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"
   # R9 HALT (#151): a halted tick retires nothing — a close is an ACTION, reversible or not.
-  [ "${POLLER_HALTED:-0}" = 1 ] || retire_superseded
+  retire_superseded
   # BATCHED list: ONE call yields number+ref+sha as TSV — the old per-PR headRefName/headRefOid
   # re-fetches duplicated fields this same list already carried (2 calls/PR saved). Branch names
   # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
@@ -2204,10 +2162,6 @@ sweep_repo(){
     # R9 HALT (#151): OBSERVE-ONLY — the decision above is LOGGED (the operator sees the queue) but not
     # acted on: no fixer model run, no review model run, no merge, no PRESENT/blocked comment — and no
     # state marker is written, so a halted sweep can never park, dedup or no-progress-signature a PR.
-    if [ "${POLLER_HALTED:-0}" = 1 ]; then
-      [ "$action" = NOOP ] || log "#$pr ${sha:0:7} HALTED — $action not taken (R9 fleet HALT; resumes the sweep after the halt clears)"
-      continue
-    fi
     case "$action" in
       NOOP)
         # R18 IDLE-WITH-WORK-PENDING (kd#23; audit 2026-07-18 CAT-42/01). host=NONE means no host verdict
@@ -2515,7 +2469,7 @@ case "${1:-}" in
       # destroyed rootfs. Anything already resolved keeps working (bash, date, grep) and anything looked
       # up fresh does not — `gh` vanishes with the deleted upper layer. The poller then sweeps forever,
       # fails every call, and looks perfectly healthy: process alive, log advancing, clone not behind.
-      # That state stood for SIX DAYS and self-inflicted a fleet-wide R9 HALT (fleet-halt.sh reads its
+      # That state stood for SIX DAYS and self-inflicted a fleet-wide stop (the since-retired halt read its
       # signal only through `gh api`), which then gated the very ticket that could have repaired the box.
       # Exiting is the ONLY correct move — the supervisor cannot relaunch us into the live box until we
       # let go. Advisory by construction: box-generation.sh returns 0 on ANY uncertainty, so an

@@ -145,7 +145,7 @@ if [ "${1:-}" = "--selftest" ]; then
   hr "policy needs a pull too"  'policy/CLAUDE.md'                  yes
   hr "docs only"                'README.md'                         no
   hr "ci only"                  '.github/workflows/build.yml'       no
-  hr "test only"                'fleet-halt.test.sh'                no
+  hr "test only"                'repo-labels.test.sh'                no
   hr "mixed doc+script"         $'README.md\nverify.sh'             yes
   hr "empty"                    ''                                  no
   ps_(){ local got; got="$(publish_state "$2" "$3")"; [ "$got" = "$4" ] && echo "ok: $1" || { echo "FAIL: $1 — publish_state($2,$3)=$got want $4"; f=1; }; }

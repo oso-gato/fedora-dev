@@ -329,29 +329,22 @@ done_case
 # ---------------------------------------------------------------------------------------------------
 # POLLER WIRING — the real bin/pr-poller.sh fires the scan on its cadence, R9-halt-gated.
 # ---------------------------------------------------------------------------------------------------
-echo "== WIRING: the poller fires the scan at HOST_REFRESH_EVERY, and a HALTED tick does NOT =="
+echo "== WIRING: the poller fires the scan at HOST_REFRESH_EVERY =="
 DESC="--once + HOST_REFRESH_EVERY=1 → the scan runs once"; OK=1
 setup_case
-run_poller HOST_REFRESH_EVERY=1 FLEET_HALT=true
+run_poller HOST_REFRESH_EVERY=1
 ck "$([ "$(recs)" = 1 ] && echo 1 || echo 0)" "scan invoked $(recs) times, want 1"
-done_case
-
-DESC="a HALTED tick observes only — the scan is skipped and says so (R9)"; OK=1
-setup_case
-run_poller HOST_REFRESH_EVERY=1 FLEET_HALT=false
-ck "$([ "$(recs)" = 0 ] && echo 1 || echo 0)" "a halted tick still ran the scan ($(recs) times) — filing a ticket is an ACTION"
-ck "$(haslog 'scan skipped this tick' && echo 1 || echo 0)" "the halt skip was not logged"
 done_case
 
 DESC="default cadence: a single --once sweep does NOT fire the scan (counter < 30)"; OK=1
 setup_case
-run_poller FLEET_HALT=true
+run_poller
 ck "$([ "$(recs)" = 0 ] && echo 1 || echo 0)" "the scan fired on the first sweep under the default cadence"
 done_case
 
 DESC="HOST_REFRESH_EVERY=0 disables the mechanism"; OK=1
 setup_case
-run_poller HOST_REFRESH_EVERY=0 FLEET_HALT=true
+run_poller HOST_REFRESH_EVERY=0
 ck "$([ "$(recs)" = 0 ] && echo 1 || echo 0)" "a disabled host-refresh still ran"
 done_case
 

@@ -110,19 +110,10 @@
 # about. (This is strictly better than the marker it replaces: a marker parked the issue even when the
 # question had FAILED to post — silently dropping the feature with no human ever told.)
 #
-# THE R9 FLEET HALT GATES EVERY PASS (fedora-dev#151; spec #135 R9 + P3's "HALT check in every sweep").
-# one_pass() reads the fleet-wide HALT switch (bin/fleet-halt.sh: a maintainer-applied `halt` label on
-# the FLEET HALT CONTROL issue in the control repo — maintainer-BOUND like every fleet trust anchor, so
-# the loop can neither halt nor UN-halt itself) at the TOP of every pass, BEFORE any author model run is
-# spawned. rc 0 alone means GO. Anything else — a maintainer HALT, or a checker that cannot run at all
-# (rc 20/PAUSE is retired: since #274 an UNREADABLE signal reads GO, loudly, rather than escalating to a
-# halt nobody threw) — makes the pass OBSERVE-ONLY: the backlog is still enumerated and logged,
-# so the operator sees the queue, but nothing spawns and nothing is filed. HALT stops NEW action only —
-# an author run already in flight completes (killing it mid-push is how work is lost; the hard kill is
-# App-key revocation, per R9); a maintainer removing the label resumes on the next pass, no restart.
-# This is the interlock the old `--watch` hard-refusal (exit 2) stood in for: #151 (its req 9) lifts
-# that refusal IN THE SAME CHANGE that lands the check — a clock that spawns bounded model runs is now
-# stoppable within one sweep, which is exactly what R9 demanded before a timer mode could exist.
+# NO SOFT STOP GATES A PASS. The maintainer-thrown HALT label was RETIRED 2026-07-30 (R9) on its own
+# record: 0 maintainer throws ever, 935 false self-fires, 338 real actions suppressed. Stopping the
+# authoring loop is now App-key revocation or stopping the container — both stronger, neither needing
+# this loop's cooperation or a readable GitHub.
 #
 #   dev-loop.sh <repo> [--once]   plan the approved objectives, then drive the backlog for <repo> —
 #                                 ONE full pass, then exit
@@ -141,7 +132,6 @@
 #      skips and parked issues cost no slot); DEV_LOGIN (the dev box's App identity, whose questions the
 #      park gate trusts — default oso-gato-nox-claudebox, the same bare comment-author form the poller's
 #      FITNESS_LOGIN uses; empty ⇒ parking is DISABLED, every question re-offered, never dropped);
-#      FLEET_HALT (the R9 halt reader, default the sibling bin/fleet-halt.sh — overridable for the mock
 #      test); LOOP_INTERVAL (seconds between --watch passes, default 300 — authoring cadence, not the
 #      poller's 10 s: each pass may spawn bounded model runs); DEV_LOOP_LOCK (the --watch singleton lock,
 #      default ${XDG_RUNTIME_DIR:-/tmp}/dev-loop-watch-<repo>.lock — tmpfs, never $HOME: the driver
@@ -167,7 +157,6 @@ APPROVED_LABEL="${APPROVED_LABEL:-approved}"
 DEV_PLAN="${DEV_PLAN:-$HERE/dev-plan.sh}"
 MAX_PLANS_PER_PASS="${MAX_PLANS_PER_PASS:-2}"
 # the R9 fleet HALT reader (#151) — rc 0 is the ONLY "go"; see the header. Overridable for the mock test.
-FLEET_HALT="${FLEET_HALT:-$HERE/fleet-halt.sh}"
 # the R16 operating-scope reader (#167) — rc 0 is the ONLY "in scope"; see bin/repo-scope.sh.
 REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
 # R16 per-session scope (2026-07-16): inside a REAL agent session narrow to THIS session's objective-BACKED
@@ -404,8 +393,8 @@ fi
 # it files lands as `backlog`, so the arm below picks it up in this very pass, bounded by MAX_PER_PASS.
 # NO LOCAL STATE, like everything else here: discovery is one label query and the park is derived from
 # the objective's own newest comment.
-plan_pass(){ # <repo> <slug> <halted>
-  local repo="$1" slug="$2" halted="$3"
+plan_pass(){ # <repo> <slug>
+  local repo="$1" slug="$2"
   [ -x "$DEV_PLAN" ] || { log "planner not executable ($DEV_PLAN) — no objective is planned this pass"; return 0; }
   # Same @tsv discipline as the backlog query (number, newest comment's author, newest comment's line 1)
   # and the same HAND SPLIT below: an issue with no comments emits two EMPTY trailing fields, which
@@ -441,10 +430,6 @@ plan_pass(){ # <repo> <slug> <halted>
       log "  parked objective $slug#$n — dev-plan's own refusal/question is still the newest comment (re-running it would only repeat it); reply on the issue to re-offer it"
       continue
     fi
-    if [ "$halted" = 1 ]; then
-      log "  HALTED — would plan objective $slug#$n (R9 fleet HALT; observe-only, no model run, nothing filed)"
-      continue
-    fi
     log "→ planning approved objective $slug#$n via dev-plan"
     # The label got it HERE; dev-plan decides whether it may act on it (it re-resolves the applier and
     # binds them to a maintainer role — see THE LABEL FILTER IS DISCOVERY, NOT AUTHORISATION).
@@ -472,20 +457,10 @@ one_pass(){ # <repo>
     log "R16 SCOPE: repo '$repo' is outside the maintainer-confirmed operating scope — pass refused (no enumeration, no author run, nothing filed)"
     return 0
   fi
-  # R9 FLEET HALT (#151) — read at the TOP of every pass, BEFORE any author model run is spawned (R9's
-  # bound is "within one sweep"). rc 0 alone means GO; a maintainer HALT, or a checker that cannot run
-  # at all (fail-closed BY CONSTRUCTION — rc 127 is not rc 0; rc 20/PAUSE is retired, see #274)
-  # makes this pass OBSERVE-ONLY: the backlog is still enumerated and logged below, so the operator sees
-  # the queue, but no author run spawns and nothing is filed. Un-halt resumes on the next pass.
-  local halted=0 hmsg
-  if ! hmsg="$("$FLEET_HALT")"; then
-    halted=1
-    log "FLEET HALT: ${hmsg:-halt checker unavailable (fail-closed toward stopping)} — OBSERVE-ONLY pass (no author run will be spawned, nothing filed)"
-  fi
   # THE STEP UPSTREAM OF THIS BACKLOG (see THE PLAN ARM in the header): an `approved` objective is
   # handed to the planner FIRST, so anything it decomposes is authored by the arm below in this same
   # pass. It carries the halt state rather than re-reading it — one halt read per pass.
-  plan_pass "$repo" "$slug" "$halted"
+  plan_pass "$repo" "$slug"
   # ONE list call carries the issue number, its NEWEST comment (author + line 1 + createdAt) AND the
   # release budget already spent on it — the park state, its CLOCK and its BUDGET are all DERIVED from
   # that one read (see PARKING and THE BUDGET LIVES ON THE BUS, above), so the driver keeps NO local
@@ -564,11 +539,6 @@ one_pass(){ # <repo>
         RELEASE)
           # R9 HALT: a release POSTS and then SPAWNS, so it is exactly the "new action" a halted pass
           # must not take. Observe it instead — the release is still due next pass, nothing is lost.
-          if [ "$halted" = 1 ]; then
-            would=$((would+1))
-            log "  HALTED — would RELEASE $slug#$n (parked ${held}s ≥ ${PARK_COOLOFF}s, $used/$PARK_MAX_RELEASES used; observe-only, nothing filed)"
-            continue
-          fi
           # THE ANNOUNCEMENT IS THE BUDGET RECORD, so it is posted BEFORE the re-attempt and a failure to
           # post HOLDS. Releasing without a record would leave `used` unchanged and re-attempt on EVERY
           # pass — an unbounded model-run spin (R4), which is the very thing this clock exists to prevent.
@@ -584,11 +554,6 @@ No reply is needed: if the parked run failed for an environmental reason (a work
           # …and fall through to the author run below: the re-attempt IS the release.
           ;;
         ESCALATE)
-          if [ "$halted" = 1 ]; then
-            would=$((would+1))
-            log "  HALTED — would ESCALATE $slug#$n (release budget spent; observe-only, nothing filed)"
-            continue
-          fi
           parked=$((parked+1))
           # ONCE is the contract: our own escalation comment on the thread is the idempotence anchor, so
           # a wiped box does not re-ask either. It parks (park_state treats it as a question), and a
@@ -620,11 +585,6 @@ The question above it on this thread is the one that needs an answer. Replying o
     # R9 HALT (#151): OBSERVE-ONLY — the offer is LOGGED (the operator sees the queue) but no bounded
     # model run spawns. The check sits ONCE at the top of the pass, not here per issue: HALT stops NEW
     # passes' work, it does not abort a pass already spawning (in-flight work is never killed).
-    if [ "$halted" = 1 ]; then
-      would=$((would+1))
-      log "  HALTED — would author $slug#$n (R9 fleet HALT; observe-only, no model run, nothing filed)"
-      continue
-    fi
     log "→ authoring backlog $slug#$n via dev-author"
     # dev-author is fail-closed + idempotent: already-authored / non-backlog / has-PR issues no-op inside
     # it, so the driver need not track that state. Any non-zero exit is logged and the loop CONTINUES —
@@ -651,11 +611,7 @@ The question above it on this thread is the one that needs an answer. Replying o
         log "  dev-author rc=$rc for $slug#$n (environmental — no question posted) — retrying next pass" ;;
     esac
   done 3<<<"$nums"
-  if [ "$halted" = 1 ]; then
-    log "$slug pass complete — HALTED (R9): $would issue(s) WOULD have been offered, $parked parked; no author run spawned, nothing filed"
-  else
-    log "$slug pass complete — $spawned author run(s) spawned: $authored PR(s) opened, $asked question(s) surfaced; $skipped in-flight skip(s), $parked parked, $released bounded release(s) taken"
-  fi
+  log "$slug pass complete — $spawned author run(s) spawned: $authored PR(s) opened, $asked question(s) surfaced; $skipped in-flight skip(s), $parked parked, $released bounded release(s) taken"
 }
 
 # ---- ENTRY -----------------------------------------------------------------------------------------

@@ -171,7 +171,7 @@ marker="$STATE/shipped-${REPO}-${sha}.done"
 #   (a) the $INTAKE_LABEL label — what bin/intake-file.sh stamps on every objective it files (the
 #       forward-going convention; the title there is free-form, so a title rule alone would miss them);
 #   (b) a STRICT $OBJECTIVE_TITLE title prefix, re-checked HERE in shell because issue search is fuzzy —
-#       the bin/fleet-halt.sh / objective-status.sh $PLAN_TITLE precedent. `OBJECTIVE in:title` matches the
+#       the objective-status.sh $PLAN_TITLE precedent. `OBJECTIVE in:title` matches the
 #       word anywhere and case-insensitively, so the remote query is a candidate FETCH, never the decision.
 # rc 1 when NEITHER query could be read: a transient API failure must not read as "no objective to close"
 # (that would write the done-marker and lose the close forever — the fail-open direction).
