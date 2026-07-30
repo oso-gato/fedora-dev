@@ -75,6 +75,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: seam-audit (a gh flag gh rejects makes the call a no-op)
+        # GATES on the judgment-free class only: a long flag absent from that gh subcommand's own --help.
+        # Such a call is rejected before any network request and returns nothing, while a stubbed gh in a
+        # test accepts it happily — which is how reconcile shipped a `--arg` that would have stopped it
+        # closing any ticket in any repo, with its suite reporting 31/31 over the dead code.
+        # The ADVISORY classes (a seam every test row overrides; a sed mutation with no vacuity guard) are
+        # printed for a human and never gate: stubbing a model or a real host is legitimate, and gating on
+        # that would mean allowlisting ~20 correct stubs, i.e. rubber-stamping rather than checking.
+        run: |
+          bash bin/seam-audit.sh --selftest
+          bash bin/seam-audit.sh --list
+
       - name: Run every *.test.sh
         run: |
           set -uo pipefail
