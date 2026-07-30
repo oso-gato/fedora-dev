@@ -43,6 +43,16 @@ echo "$*" >> "$GH_CALLS"
 case "${1:-} ${2:-}" in
   "label list")   [ "${FAKE_LIST_FAIL:-0}" = 1 ] && exit 1; cat "$FAKE_LABELS" 2>/dev/null; exit 0 ;;
   "label create") [ "${3:-}" = "${FAKE_CREATE_FAIL:-}" ] && exit 1; exit 0 ;;
+  "label delete") [ "${3:-}" = "${FAKE_DELETE_FAIL:-}" ] && exit 1; exit 0 ;;
+esac
+# `gh api repos/<o>/<r>/issues?labels=<name>&… -q length` — the USAGE count prune reads before deleting.
+# Only FAKE_USED_LABEL is in use (FAKE_USED_N, default 1); everything else answers 0. FAKE_USED_FAIL=1
+# makes the read ERROR, which prune must treat as unreadable and HOLD on (never delete on a blind count).
+case "${1:-}" in
+  api) [ "${FAKE_USED_FAIL:-0}" = 1 ] && exit 1
+       _l="${2#*labels=}"; _l="${_l%%&*}"
+       if [ "$_l" = "${FAKE_USED_LABEL:-}" ]; then printf '%s\n' "${FAKE_USED_N:-1}"; else echo 0; fi
+       exit 0 ;;
 esac
 exit 0
 EOF
@@ -63,6 +73,8 @@ export REPO_SCOPE="$ROOT/repo-scope.sh"
 run(){ : > "$GH_CALLS"; OUT="$("$@" 2>&1)"; RC=$?; }
 created(){    grep -cE "^label create $1( |$)" "$GH_CALLS" 2>/dev/null || true; }
 any_create(){ grep -cE '^label create '       "$GH_CALLS" 2>/dev/null || true; }
+deleted(){    grep -cE "^label delete $1( |$)" "$GH_CALLS" 2>/dev/null || true; }
+any_delete(){ grep -cE '^label delete '       "$GH_CALLS" 2>/dev/null || true; }
 setlabels(){ printf '%s\n' "$@" > "$FAKE_LABELS"; }
 alllabels(){ bash "$SCRIPT" list | awk '{print $1}' > "$FAKE_LABELS"; }
 
@@ -165,6 +177,84 @@ run bash "$SCRIPT" audit
 { [ "$RC" = 0 ] && echo "$OUT" | grep -q 'no label drift'; } \
   && ok "every label literal used in the real bin/ tree is declared in the registry" \
   || bad "audit-clean" "rc=$RC out=[$OUT] — add the label to REGISTRY or stop using it"
+
+echo "== prune — DESTRUCTIVE, so dry-run by default and it never touches the registry =="
+# The maintainer's standing instruction is a SMALL controlled set per repo. Before `prune` existed the
+# cleanup was a hand-run loop nothing could repeat — and a destructive verb with no WIRING test is the
+# defect pattern this repo keeps finding (a pure core cannot see that nothing calls it).
+alllabels; printf 'junk-label\n' >> "$FAKE_LABELS"
+run bash "$SCRIPT" prune fedora-dev
+{ [ "$RC" = 0 ] && echo "$OUT" | grep -q "WOULD DELETE 'junk-label'" && [ "$(any_delete)" = 0 ]; } \
+  && ok "dry-run by default: says what it WOULD delete and deletes nothing" \
+  || bad "prune-dryrun" "rc=$RC deletes=$(any_delete) out=[$OUT]"
+
+run bash "$SCRIPT" prune fedora-dev --commit
+{ [ "$RC" = 0 ] && [ "$(deleted junk-label)" = 1 ] \
+  && [ "$(deleted backlog)" = 0 ] && [ "$(deleted live-validate)" = 0 ] && [ "$(deleted approved)" = 0 ]; } \
+  && ok "--commit deletes the off-registry label and NEVER a registry one" \
+  || bad "prune-commit" "rc=$RC junk=$(deleted junk-label) backlog=$(deleted backlog) lv=$(deleted live-validate)"
+
+alllabels; printf 'junk-label\n' >> "$FAKE_LABELS"
+run env FAKE_USED_LABEL=junk-label FAKE_USED_N=3 bash "$SCRIPT" prune fedora-dev --commit
+{ [ "$RC" = 0 ] && [ "$(deleted junk-label)" = 0 ] && echo "$OUT" | grep -q "HOLD 'junk-label'" \
+  && echo "$OUT" | grep -q 'IN USE on 3' && echo "$OUT" | grep -q -- '--force'; } \
+  && ok "an off-registry label IN USE is HELD, named, and left alone (deleting strips it from those items)" \
+  || bad "prune-hold-inuse" "rc=$RC junk-deleted=$(deleted junk-label) out=[$OUT]"
+
+run env FAKE_USED_LABEL=junk-label FAKE_USED_N=3 bash "$SCRIPT" prune fedora-dev --commit --force
+{ [ "$RC" = 0 ] && [ "$(deleted junk-label)" = 1 ]; } \
+  && ok "--force deletes an in-use off-registry label (the explicit, recorded choice)" \
+  || bad "prune-force" "rc=$RC deleted=$(deleted junk-label) out=[$OUT]"
+
+run env FAKE_USED_FAIL=1 bash "$SCRIPT" prune fedora-dev --commit
+{ [ "$RC" = 0 ] && [ "$(any_delete)" = 0 ] && echo "$OUT" | grep -q 'could not read its usage'; } \
+  && ok "an UNREADABLE usage count HOLDS — never delete on a blind count (fail-closed)" \
+  || bad "prune-usage-unreadable" "rc=$RC deletes=$(any_delete) out=[$OUT]"
+
+run bash "$SCRIPT" prune foreign --commit
+{ [ "$RC" = 4 ] && [ "$(any_delete)" = 0 ] && echo "$OUT" | grep -q 'R16 SCOPE'; } \
+  && ok "an OUT-OF-SCOPE repo is refused before any delete (R16 rule 4 — a destructive actuator checks)" \
+  || bad "prune-scope" "rc=$RC deletes=$(any_delete) out=[$OUT]"
+
+SCOPE_BROKEN=1
+run bash "$SCRIPT" prune fedora-dev --commit
+{ [ "$RC" = 4 ] && [ "$(any_delete)" = 0 ]; } \
+  && ok "a MISSING scope reader (rc 127) refuses too — fail-closed, not a go" \
+  || bad "prune-scope-broken" "rc=$RC deletes=$(any_delete)"
+SCOPE_BROKEN=0
+
+run env FAKE_LIST_FAIL=1 bash "$SCRIPT" prune fedora-dev --commit
+{ [ "$RC" = 3 ] && [ "$(any_delete)" = 0 ]; } \
+  && ok "an unreadable label list prunes NOTHING blind" \
+  || bad "prune-list-unreadable" "rc=$RC deletes=$(any_delete)"
+
+echo "== prune keeps each repo's picker SMALL: control-only labels go from a TENANT =="
+alllabels
+run bash "$SCRIPT" prune fedora-dev
+{ echo "$OUT" | grep -q "WOULD DELETE 'halt'" && echo "$OUT" | grep -q "WOULD DELETE 'rebuild-approval'"; } \
+  && ok "control-scoped labels are pruned from a tenant repo (they are decorative there)" \
+  || bad "prune-control-scope-tenant" "out=[$OUT]"
+run bash "$SCRIPT" prune fedora-bootstrap
+{ ! echo "$OUT" | grep -q "WOULD DELETE 'halt'"; } \
+  && ok "…and KEPT on the control repo, where the machinery actually reads them" \
+  || bad "prune-control-scope-control" "out=[$OUT]"
+
+echo "== MUTATION — the audit RESOLVES variable defaults (it used to discard them) =="
+# The old audit ended its pipeline with `grep -vE '^\$'`, so `--label "$APPROVED_LABEL"` was found and
+# then thrown away: six real labels were invisible and it reported "no drift" over the hole. Proof that
+# the fix bites: drop a label declared ONLY via a variable default and require the audit to catch it.
+BINDIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
+MUT2="$BINDIR/mut-audit-$$.sh"; MUT3="$BINDIR/mut-audit-old-$$.sh"
+trap 'rm -f "$MUT2" "$MUT3"' EXIT
+sed '/^approved|/d' "$SCRIPT" > "$MUT2"; chmod +x "$MUT2"
+if cmp -s "$SCRIPT" "$MUT2"; then bad "audit-resolve-vacuous" "the sed changed nothing"; else
+  bash "$MUT2" audit >/dev/null 2>&1; mrc=$?
+  sed 's|names="$(resolve_token "$t" "$defs")"|names="$(printf "%s" "$t" \| grep -vE "^\\"?\\$" \|\| true)"|' "$MUT2" > "$MUT3"
+  bash "$MUT3" audit >/dev/null 2>&1; orc=$?
+  { [ "$mrc" = 1 ] && [ "$orc" = 0 ]; } \
+    && ok "resolving bites: fixed audit rc=1 on a var-only label, OLD audit rc=0 (blind)" \
+    || bad "audit-resolve" "fixed-rc=$mrc old-rc=$orc (want 1 and 0)"
+fi
 
 echo "== MUTATION — the scope belt must be what refuses, not the stub =="
 
