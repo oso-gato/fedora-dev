@@ -8,12 +8,18 @@
 #                        VENDORED lg_load + sanity checks) — catches contract bugs at Tier-1 BEFORE the
 #                        host round-trip (unexpanded $_GD_* cross-ref / non-absolute SECRET_MOUNT / a
 #                        publish flag in the fence / an lg_load-rejected contract). No-op if no .live-gate.
-#   T0b build-parity(gate): bin/check-build-parity.sh — assert T1's build carries the SAME dnf-cache
-#                        bind + BUILD_ARGS as the host Tier-2 build, so an in-box GREEN predicts a host
-#                        GREEN (bug #53). Now GATED, not a manual afterthought.
-#   T1 build (gate)    : podman build --isolation=chroot + the persistent dnf-cache bind  [+ $BUILD_ARGS]
-#                        (same -v …/fd-dnf:/var/cache/libdnf5 build-throwaway.sh + the host gate use,
-#                         so T1 reproduces the REAL build env — catches bind-mount-only failures).
+#   T0b build-parity(gate): bin/check-build-parity.sh — assert T1's build carries the SAME cache binds
+#                        + BUILD_ARGS as the host Tier-2 build, so an in-box GREEN predicts a host
+#                        GREEN (bug #53). Now GATED, not a manual afterthought. Its rc is READ, not just
+#                        tested for zero: rc 1 is real drift (a T1 build missing what the host has ⇒ the
+#                        #53 false GREEN) and FAILS; rc 3 is the disclosed "a Tier-1 bind the host half
+#                        has not adopted YET" state, which is a BANDWIDTH gap, not a false GREEN — it is
+#                        reported by name and does NOT gate (see check-build-parity.sh's DIRECTION rule).
+#   T1 build (gate)    : podman build --isolation=chroot + the persistent dnf-cache bind + the pinned-
+#                        download cache bind (#320)  [+ $BUILD_ARGS]
+#                        (same -v …/fd-dnf:/var/cache/libdnf5 and …/fd-dl:/var/cache/fd-dl that
+#                         build-throwaway.sh uses, so T1 reproduces the REAL build env — catches
+#                         bind-mount-only failures).
 #                        NON-IMAGE repos (#180): a repo with no root Containerfile is a repo with NO
 #                        image, not a build failure — the DEFAULTED target resolves root Containerfile,
 #                        else the repo's own .live-gate CFILE (fedora-bootstrap's shellgate =>
@@ -48,6 +54,8 @@ fi
 NAME="$(basename "$REPO")"; OUT="$(mktemp -d)"; fail=0
 TAG=""; [ "$NOIMAGE" = 0 ] && TAG="localhost/${NAME}:candidate-$(echo "$FILE" | tr -c 'a-zA-Z0-9' - )"
 DNF_CACHE="${FD_DNF_CACHE:-$HOME/.cache/fd-dnf}"   # persistent dnf cache bound into T1 (matches build-throwaway.sh + the host live-gate)
+DL_CACHE="${FD_DL_CACHE:-$HOME/.cache/fd-dl}"      # persistent PINNED-DOWNLOAD cache bound into T1 at the FIXED
+                                                   # /var/cache/fd-dl bin/fd-fetch.sh resolves (#320; matches build-throwaway.sh)
 g(){ printf '  %-22s %s\n' "$1" "$2"; case "$2" in FAIL*|NO-*) fail=1;; esac; }
 i(){ printf '  %-22s %s\n' "$1" "$2"; }
 SYS=0; [ -n "$FILE" ] && grep -qE 'ENTRYPOINT.*(/sbin/init|systemd)|STOPSIGNAL[[:space:]]+SIGRTMIN' "$REPO/$FILE" 2>/dev/null && SYS=1
@@ -68,7 +76,19 @@ echo "== T0b build-parity (gate) =="
 # it is safe to gate on unconditionally.
 CBP="$BIN/check-build-parity.sh"
 if [ -f "$CBP" ]; then
-  if bash "$CBP" >"$OUT/parity.log" 2>&1; then g build-parity PASS; else g build-parity FAIL; sed 's/^/    /' "$OUT/parity.log"; fi
+  bash "$CBP" >"$OUT/parity.log" 2>&1; prc=$?
+  case "$prc" in
+    0) g build-parity PASS;;
+    # rc 3 = a Tier-1 bind whose Tier-2 half has not landed yet (today: the #320 download cache). The
+    # direction matters and is why this is not a FAIL: T1-missing-what-T2-has hides a build failure until
+    # the host round-trip (#53); T1-ahead-of-T2 only means the HOST build re-downloads a pinned asset —
+    # slower there, never a false GREEN here, because the fetch contract falls back to fetching. Reported
+    # by name so it cannot pass as "OK", and it never silently becomes permanent: check-build-parity.sh
+    # prints exactly which file lacks the bind.
+    3) i build-parity "PENDING (Tier-2 host half not landed — bandwidth gap, not a false GREEN)"
+       sed 's/^/    /' "$OUT/parity.log";;
+    *) g build-parity FAIL; sed 's/^/    /' "$OUT/parity.log";;
+  esac
 else i build-parity "skipped (check-build-parity.sh not adjacent)"; fi
 
 echo "== T1 build (gate) =="
@@ -77,12 +97,16 @@ if [ "$NOIMAGE" = 1 ]; then
   # tell "no image to build" from "the image failed to build" at a glance.
   i build "SKIPPED — $NOIMAGE_WHY"
 elif [ "$DOBUILD" = build ]; then
-  mkdir -p "$DNF_CACHE"
+  mkdir -p "$DNF_CACHE" "$DL_CACHE"   # the mount's OWNER creates it — fd-fetch.sh never conjures one
   # shellcheck disable=SC2086
   # Bind the persistent dnf cache at /var/cache/libdnf5 — the SAME mount build-throwaway.sh + the host
   # live-gate use — so T1 reproduces the real build env (and catches bind-mount-only failures, e.g. an
-  # `rm -rf /var/cache/libdnf5` that fails EBUSY only when the cache is a live mountpoint).
-  podman build --isolation=chroot -v "$DNF_CACHE:/var/cache/libdnf5:rw" ${BUILD_ARGS:-} -t "$TAG" -f "$REPO/$FILE" "$REPO" >"$OUT/build.log" 2>&1 \
+  # `rm -rf /var/cache/libdnf5` that fails EBUSY only when the cache is a live mountpoint). Same for the
+  # pinned-download cache at /var/cache/fd-dl (#320): a repo whose Containerfile uses the declared fetch
+  # contract (bin/fd-fetch.sh) serves its pinned assets from the home volume here exactly as it will in
+  # build-throwaway.sh. The bind is INERT for a repo that does not use the contract — no Containerfile is
+  # rewritten and no build semantics change, so T1 still builds what CI builds.
+  podman build --isolation=chroot -v "$DNF_CACHE:/var/cache/libdnf5:rw" -v "$DL_CACHE:/var/cache/fd-dl:rw" ${BUILD_ARGS:-} -t "$TAG" -f "$REPO/$FILE" "$REPO" >"$OUT/build.log" 2>&1 \
     && g build PASS || { g build FAIL; tail -20 "$OUT/build.log"; echo "VERDICT: RED (build)"; exit 1; }
 else podman image exists "$TAG" && g build SKIP-exists || { g build NO-IMAGE; exit 1; }; fi
 
