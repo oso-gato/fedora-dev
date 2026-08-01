@@ -2,14 +2,7 @@
 
 > **THE WHY** — the objective / north star this apparatus is built to.
 
-> **Confirmed by the maintainer on 2026-07-14; Trinity amendment 2026-07-16; NO-ALLOWLIST amendment
-> 2026-07-21; SCOPE = LIVE INSTALLATION amendment confirmed 2026-07-27** (the operating scope is the
-> App INSTALLATION read live — not a software allowlist and not a fixed split of the account:
-> **whatever the maintainer installs the App on, private repositories included, is in scope**. The
-> earlier "private-data camp the apparatus can never reach" wall is retired; the maintainer draws the
-> boundary by installing or removing the App, and the apparatus never widens its own reach. R16 states
-> this normatively.)
-> This is the durable, versioned objective the apparatus builds to. It is the ground truth the fitness gate
+> **Confirmed by the maintainer.** This is the durable objective the apparatus builds to. It is the ground truth the fitness gate
 > re-grounds on, mirrored by spec issue [#135](https://github.com/oso-gato/fedora-dev/issues/135). The
 > **functional + non-functional requirements** live in [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md); the
 > **build principles** in [`00-BUILDPRINCIPLE.md`](./00-BUILDPRINCIPLE.md). This objective is locked;
@@ -50,7 +43,6 @@ list in software would add no authority — only a copy that drifts out of date.
 or narrows the apparatus's reach by installing or removing the App, and **the apparatus never widens
 its own reach**. Which repositories that is today, and the identities the apparatus works under, are
 operational facts — not part of this objective.
-
 
 ## Document authority — the Trinity and the design
 
