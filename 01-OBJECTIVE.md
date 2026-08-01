@@ -4,7 +4,7 @@
 
 > **PROPOSED 2026-08-01 — NOT YET CONFIRMED.** Drafted by the dev box at the maintainer's
 > instruction, after an 11-agent analysis recommended *against* the merge and the maintainer
-> overruled it. That overrule is recorded, not re-litigated: see `## Out of scope`. Revision 4 —
+> overruled it. That overrule is recorded, not re-litigated: see `## Out of scope`. Revision 5 —
 > the binding half was rebuilt after an independent fitness review returned revision 1 with seven
 > blocking findings, and `## Delivered means` was set to `merged` by the maintainer (revision 2 had
 > `running`, chosen by the drafter without asking; see that section for what the choice costs here).
@@ -75,10 +75,14 @@ therefore ordered, gated and reversible at every step, or it is not attempted.
   - **The self-refresh still applies to BOTH halves.** `hcr_install_from` hard-errors on a missing
     manifest source — the loud path. The silent one is `bin/host-refresh.sh`'s root-anchored
     classifiers: `IMAGE_RE=^(Containerfile[^/]*|install[^/]*\.sh|entrypoint[^/]*\.sh)$` stops
-    matching a relocated `Containerfile`, so **no redeploy ticket is ever filed again and the dev
-    container freezes at its last pre-move digest**, while `INERT_RE` stops classifying a relocated
-    doc as inert, so a README edit files an apply-bootstrap that re-runs `setup.sh` as root on the
-    live host. Both classifiers and every manifest path resolve correctly in the new tree, proven by
+    matching a relocated `Containerfile`, so **no PER-MERGE redeploy ticket is ever filed again and
+    the dev container falls back to the monthly `workload-refresh@fedora-dev.timer`
+    (`OnCalendar=*-*-15 04:00`) as its only refresh path** — a merged image-baked change can sit up
+    to ~30 days before it is live, with no error anywhere. `bin/host-refresh.sh:32` names this fail
+    direction itself ("a missed redeploy degrades to the monthly timer — the accepted status quo,
+    logged where detectable"); what breaks is the per-merge guarantee, not the container. In the
+    reverse direction `INERT_RE` stops classifying a relocated doc as inert, so a README edit files
+    an apply-bootstrap that re-runs `setup.sh` as root on the live host. Both classifiers and every manifest path resolve correctly in the new tree, proven by
     test, not by reading.
   - **The live-gate fence never widens.** fedora-dev's `.live-gate` sets a global `CAND_FENCE`
     carrying `NET_ADMIN`, `SYS_ADMIN`, `/dev/net/tun`, `/dev/fuse` and `label=disable`;
@@ -191,9 +195,10 @@ $ hr=$(git ls-files | grep -m1 'host-refresh\.sh$'); cf=$(git ls-files | grep -m
   IRE=$(git show "HEAD:$hr" | grep -m1 '^IMAGE_RE=' | sed 's/^IMAGE_RE="${HOST_REFRESH_IMAGE_RE:-//; s/}"$//')
   printf '%s\n' "$cf" | grep -qE "$IRE"
 observed: PASSES today (rc=0) — the tree's real Containerfile matches the live IMAGE_RE. This is
-          THE silent-freeze guard: IMAGE_RE is ^(Containerfile[^/]*|…)$ and `[^/]*` excludes
-          slashes, so a relocated Containerfile matches nothing, no redeploy ticket is ever filed
-          again, and the dev container freezes at its last pre-move digest with no error anywhere.
+          THE missed-redeploy guard: IMAGE_RE is ^(Containerfile[^/]*|…)$ and `[^/]*` excludes
+          slashes, so a relocated Containerfile matches nothing, no per-merge redeploy ticket is
+          ever filed again, and the dev container silently drops to the monthly workload-refresh@
+          timer as its only refresh path (~30-day worst-case staleness), with no error anywhere.
 
 $ hr=$(git ls-files | grep -m1 'host-refresh\.sh$'); test -n "$hr" && bash "$hr" --selftest
 observed: PASSES today (rc=0) — executes the two path classifiers rather than grepping for them.
@@ -216,7 +221,8 @@ merged
 `merged`, so this objective is delivered when it is on `main`; an absent live probe may not block the
 ship. That is a legitimate choice and it is his to make, but note where this particular change's
 failure modes live: **every silent hazard named in `## Scope` manifests only *after* merge, on the
-live host.** A frozen dev container (`IMAGE_RE` no longer matching a relocated `Containerfile`), a
+live host.** A dev container that only ever refreshes monthly (`IMAGE_RE` no longer matching a
+relocated `Containerfile`), a
 control clone that cannot fast-forward from a re-pointed remote, an R1 hold that stopped firing —
 none of them are visible to a test suite run on the merged tree. So the following are recorded as
 **post-merge verification, deliberately outside the ship gate**, and someone must still read them:
@@ -225,7 +231,7 @@ none of them are visible to a test suite run on the merged tree. So the followin
   the heartbeat: `HCR_OUTCOME="OK applied <sha>"` is overwritten by `OK uptodate <sha>` on the next
   15-minute tick.)
 - A post-move dev-container redeploy has been filed **and** applied — the check that catches the
-  frozen-container failure, which is otherwise silent and indefinite.
+  missed-redeploy failure, which is otherwise silent and bounded only by the monthly refresh timer.
 
 If either is to gate the ship rather than follow it, this field becomes `running` — a one-word
 change, and the only one needed.
