@@ -4,7 +4,7 @@
 
 > **PROPOSED 2026-08-01 — NOT YET CONFIRMED.** Drafted by the dev box at the maintainer's
 > instruction, after an 11-agent analysis recommended *against* the merge and the maintainer
-> overruled it. That overrule is recorded, not re-litigated: see `## Out of scope`. Revision 3 —
+> overruled it. That overrule is recorded, not re-litigated: see `## Out of scope`. Revision 4 —
 > the binding half was rebuilt after an independent fitness review returned revision 1 with seven
 > blocking findings, and `## Delivered means` was set to `merged` by the maintainer (revision 2 had
 > `running`, chosen by the drafter without asking; see that section for what the choice costs here).
@@ -61,12 +61,17 @@ therefore ordered, gated and reversible at every step, or it is not attempted.
 - **The invariants below hold, verified, after the move.** Each is enforced today by a mechanism
   that breaks *silently* if the tree moves under it. They are in scope precisely because they are
   the ways this goes wrong quietly rather than loudly:
-  - **The R1 spec hold still fires at all three `00-GOVERNANCE.md` §6(f) layers.**
-    `bin/auto-merge.sh` matches the confirmed spec by bare root filename; `.github/CODEOWNERS`
-    matches it by root-anchored path; the `main` Code-Owner branch rule keys off CODEOWNERS and is
-    the only thing that blocks *even a raw-API merge*. A relocated spec doc matches **none** of the
-    three, and the only carve-out from zero-gate fails **open** — a defect PR #224 already caused
-    once.
+  - **The R1 spec hold still fires on both layers that are actually ON.** `00-GOVERNANCE.md` §6(f)
+    describes three defence-in-depth layers, but **layer 3 is not enabled on this repository** —
+    verified live 2026-08-01: the sole ruleset `require-pr-to-main` (id 18222949, active) carries
+    `require_code_owner_review: false` and `required_approving_review_count: 0`. So today
+    `bin/auto-merge.sh`'s `grep -qxF` on bare root filenames is the **only enforcing** layer, and
+    `.github/CODEOWNERS` is **notification-only** (`00-DESIGN.md:286`). Both match by root-anchored
+    path, so a relocated spec doc matches neither, and the only carve-out from zero-gate fails
+    **open** — a defect PR #224 already caused once. Consequence to state plainly rather than imply:
+    the raw-API merge path is **not** narrowed today; residual K2 stands open independently of this
+    change. See `## Notes` — enabling layer 3 is a maintainer settings act the apparatus cannot
+    perform for itself.
   - **The self-refresh still applies to BOTH halves.** `hcr_install_from` hard-errors on a missing
     manifest source — the loud path. The silent one is `bin/host-refresh.sh`'s root-anchored
     classifiers: `IMAGE_RE=^(Containerfile[^/]*|install[^/]*\.sh|entrypoint[^/]*\.sh)$` stops
@@ -113,8 +118,18 @@ $ bash unified-repo.test.sh
 
 observed: FAILS today (no such file — writing it is part of this work)
 
-Its first act is `cd "$(git rev-parse --show-toplevel)"`; every pathspec is `:(top)`-anchored. It
-must assert each of the following, every one of which was **run and seen failing** on 2026-08-01:
+Two disciplines the suite must obey, both learned by getting them wrong in an earlier revision:
+
+- **RESOLVE a path, never assume one** — `git ls-files | grep -m1 '<name>$'`. The layout is the
+  loop's to choose (see `## Objective`), so a check hardcoding `dev/` or `bin/` makes `Done`
+  structurally unreachable for a layout this document expressly permits.
+- **FAIL when the subject is ABSENT.** `git show HEAD:<path>` on a missing file exits non-zero to
+  *stderr*, but a pipeline's rc is the last command's — so `! git show HEAD:absent | grep -q X`
+  returns **0**, a vacuous pass. Verified directly. A check whose subject is missing must fail.
+
+Its first act is `cd "$(git rev-parse --show-toplevel)"`.
+
+### A — must BECOME true (the work). All six run and seen RED on 2026-08-01.
 
 ```
 $ git ls-files | grep -q 'setup\.sh$' && git ls-files | grep -q 'Containerfile$' \
@@ -137,33 +152,61 @@ observed: FAILS today (rc=1 — no paths: under the PUSH trigger, so every commi
           a naive `/push:/{p=1} p&&/paths:/` reads a paths: under pull_request: as satisfying
           push: — verified, it returns rc=0 on exactly the defect it must catch)
 
-$ git show HEAD:.github/CODEOWNERS | grep -qE '^/?dev/00-OBJECTIVES\.md[[:space:]]+@oso-gato'
-observed: FAILS today (rc=1 — CODEOWNERS is root-anchored; a relocated spec doc is owned by
-          nobody, and the Code-Owner branch rule is what blocks even a raw-API merge)
+$ am=$(git ls-files | grep -m1 'auto-merge\.sh$'); obj=$(git ls-files | grep -m1 '01-OBJECTIVE\.md$')
+  test -n "$am" && test -n "$obj" \
+    && git show "HEAD:$am" | grep -m1 '^TRINITY_PATHS=' | grep -qF -- "$obj"
+observed: FAILS today (rc=1 — TRINITY_PATHS lists only the four 00-* docs; observed in fedora-dev)
 
-$ git show HEAD:bin/auto-merge.sh | grep -m1 '^TRINITY_PATHS=' | grep -q '01-OBJECTIVE.md'
-observed: FAILS today (rc=1 — TRINITY_PATHS lists only the four 00-* docs)
+$ n=0; bad=0
+  for f in $(git ls-files | grep -E '(^|/)\.live-gate$'); do
+      n=$((n+1)); git show "HEAD:$f" | grep -q '^CAND_FENCE=' && bad=1
+  done; test "$n" -ge 1 && test "$bad" = 0
+observed: FAILS today (rc=1, found=1 bad=1 — fedora-dev's .live-gate sets a GLOBAL CAND_FENCE with
+          NET_ADMIN, SYS_ADMIN, /dev/net/tun, /dev/fuse, label=disable; every wide cap must move
+          under a FENCE_<target> key so the host's shellgate cannot inherit it. The zero-found case
+          FAILS deliberately — the earlier `! git show HEAD:.live-gate | grep -q …` form returned
+          rc=0 when the file was simply absent, i.e. the safety gate passed with the fence never
+          examined)
 
-$ git show HEAD:bin/host-refresh.sh | grep -m1 '^IMAGE_RE=' | grep -q 'dev/'
-observed: FAILS today (rc=1 — IMAGE_RE is ^(Containerfile[^/]*|...)$; a relocated Containerfile
-          matches nothing, so the dev container silently never redeploys again)
-
-$ ! git show HEAD:.live-gate | grep -q '^CAND_FENCE='
-observed: FAILS today (rc=1 — fedora-dev's .live-gate sets a global CAND_FENCE with NET_ADMIN,
-          SYS_ADMIN, /dev/net/tun, /dev/fuse, label=disable; every wide cap must live under a
-          FENCE_<target> key so the host's shellgate cannot inherit it)
-
-$ git grep -q 'repo-scope' -- ':(top)live-gate-run.sh' ':(top)live-gate-watch.sh'
+$ w=$(git ls-files | grep -m1 'live-gate-watch\.sh$'); test -n "$w" \
+    && git grep -q 'repo-scope' -- ":(top)$w"
 observed: FAILS today (rc=1 — zero references; host PR discovery is org-wide and unscoped;
           observed in fedora-bootstrap @ origin/main)
 ```
 
-At least one assertion per invariant must **execute** the mechanism rather than grep for it — a text
-suite is the one instrument that cannot see a silent break. The cheapest and highest-value:
-drive `bin/auto-merge.sh` against a synthetic PR file list containing a relocated spec doc and
-require the **exit 4** maintainer-merge hold.
+### B — must STAY true (regression guards). All three GREEN today.
 
-Done when `unified-repo.test.sh` passes on the unified repository's `main`.
+These are **not** RED-FIRST criteria and are not dressed up as such: they pass now and must still
+pass after the move. Labelling them honestly is the fix for two untrue `observed: FAILS`
+annotations an earlier revision carried.
+
+```
+$ spec=$(git ls-files | grep -m1 '00-OBJECTIVES\.md$'); test -n "$spec" \
+    && git show HEAD:.github/CODEOWNERS | grep -F -- "$spec" | grep -q '@oso-gato'
+observed: PASSES today (rc=0) — CODEOWNERS covers the spec docs where they currently sit. It must
+          still cover them wherever they end up; today's root-anchored entries would silently
+          cover nothing if the docs moved.
+
+$ hr=$(git ls-files | grep -m1 'host-refresh\.sh$'); cf=$(git ls-files | grep -m1 'Containerfile$')
+  IRE=$(git show "HEAD:$hr" | grep -m1 '^IMAGE_RE=' | sed 's/^IMAGE_RE="${HOST_REFRESH_IMAGE_RE:-//; s/}"$//')
+  printf '%s\n' "$cf" | grep -qE "$IRE"
+observed: PASSES today (rc=0) — the tree's real Containerfile matches the live IMAGE_RE. This is
+          THE silent-freeze guard: IMAGE_RE is ^(Containerfile[^/]*|…)$ and `[^/]*` excludes
+          slashes, so a relocated Containerfile matches nothing, no redeploy ticket is ever filed
+          again, and the dev container freezes at its last pre-move digest with no error anywhere.
+
+$ hr=$(git ls-files | grep -m1 'host-refresh\.sh$'); test -n "$hr" && bash "$hr" --selftest
+observed: PASSES today (rc=0) — executes the two path classifiers rather than grepping for them.
+          At least one assertion per invariant must EXECUTE the mechanism: a text suite is the one
+          instrument that cannot see a silent break.
+```
+
+Highest-value addition, cheap and behavioural: drive `bin/auto-merge.sh` against a synthetic PR file
+list containing the spec docs at their post-move paths and require the **exit 4** maintainer-merge
+hold — proving the R1 carve-out rather than restating it.
+
+Done when `unified-repo.test.sh` passes on the unified repository's `main`: every **A** check green,
+and every **B** check still green.
 
 ## Delivered means
 
@@ -208,6 +251,13 @@ Stop after 2 attempts at the same failure, and treat a wait that cannot end as a
   retired repo is archived — and `bin/auto-merge.sh` holds any PR touching those docs at exit 4, so
   this is the one thing in scope that **the loop is structurally forbidden from fixing itself**.
   Either confirm the amendment with this objective, or it blocks at the end.
+- **SECOND DECISION FOR THE MAINTAINER: enable the Code-Owner branch rule?** Verified live
+  2026-08-01 — `require-pr-to-main` (id 18222949) has `require_code_owner_review: false` and
+  `required_approving_review_count: 0`. Layer 3 of `00-GOVERNANCE.md` §6(f), described there as what
+  blocks *even a raw-API merge*, **is off**, so CODEOWNERS is notification-only and the R1 carve-out
+  is bypassable via the raw API **today** — before anything moves. This is a GitHub settings act the
+  apparatus provably cannot perform for itself. It is not caused by this objective and does not block
+  it; it is recorded because this document would otherwise be relying on a guard that is not running.
 - **The R1 protection this document claims is thinner than it reads — disclosed, not hidden.**
   `.github/CODEOWNERS` covers only the four spec docs; it does **not** cover itself, and it does not
   cover `bin/auto-merge.sh`. So the machinery enforcing maintainer-only spec amendment is itself
