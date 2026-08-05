@@ -75,7 +75,7 @@
 # slash-anchored) — a shell / decoy / self carrying only the bare string fails that anchor.
 #
 # SURFACE durably + dedup + quiet-when-healthy. On anomaly: create-or-update ONE issue in the control
-# repo (DEADMAN_REPO), discovered BY TITLE (a fixed prefix, like fleet-halt — no hardcoded number); the
+# repo (DEADMAN_REPO), discovered BY TITLE (a fixed prefix — no hardcoded number); the
 # body lists the current anomalies + a timestamp and is UPDATED in place on repeat (never spammed). When
 # a later check is healthy: post a "cleared" comment + close it. While healthy the deadman makes NO gh
 # writes and logs minimally. Dedup state is a single idempotent marker ($DEADMAN_STATE/anomaly.open) plus
@@ -796,7 +796,7 @@ responder_prune(){
 # responder_reset — a CONFIRMED-healthy check ends every occurrence: drop all acted markers.
 responder_reset(){ rm -f "$DEADMAN_STATE/responder"/*.acted 2>/dev/null || true; }
 
-# find_open_issue — discover the ONE anomaly issue BY TITLE prefix (fleet-halt's discipline: no hardcoded
+# find_open_issue — discover the ONE anomaly issue BY TITLE prefix (the discipline: no hardcoded
 # number; the search matches words, the strict local prefix is the contract). Echoes a number or nothing.
 find_open_issue(){
   local rows num title

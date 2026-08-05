@@ -3,7 +3,7 @@
 # the CLONE-side poller kick-starts the authoring loop (dev-loop-service.sh) so it self-arms on a running
 # box with NO rebuild. The tick must: launch ONLY when no live authoring loop already holds it
 # (`dev-loop-service.sh --is-live` adjudicates), stay quiet when one is live, respect the DEV_LOOP_ENABLED
-# default-ON gate (explicit =0 disables), and skip under R9 HALT. Drives the REAL pr-poller.sh --once with
+# default-ON gate (explicit =0 disables), Drives the REAL pr-poller.sh --once with
 # DEV_LOOP_LAUNCH_EVERY=1 (a lone --once fires the tick), an empty gh (quiet sweep), and a STUB
 # dev-loop-service that answers --is-live and records a launch. MUTATION RUN IN-SUITE: neutralize the
 # --is-live gate → the poller launches even when a loop is already live (double-launch). No GitHub/network/
@@ -52,27 +52,23 @@ run_poller(){ # <poller-script> [env=val…]
 launched(){ [ -s "$LAUNCH_LOG" ]; }
 
 echo "== no live authoring loop + RUN + enabled → the poller LAUNCHES it (self-arm) =="
-run_poller "$POLLER" FLEET_HALT=true
+run_poller "$POLLER"
 { launched && grep -q 'no live authoring loop' "$OUT"; } \
   && ok "launched dev-loop-service when none was live" || no "did not launch a missing authoring loop"
 
 echo "== a live authoring loop already holds it → the poller does NOT launch (quiet steady state) =="
-run_poller "$POLLER" FLEET_HALT=true IS_LIVE=1
+run_poller "$POLLER" IS_LIVE=1
 { ! launched; } && ok "no launch when a loop is already live" || no "double-launched over a live loop"
 
 echo "== DEV_LOOP_ENABLED=0 → disabled, no launch =="
-run_poller "$POLLER" FLEET_HALT=true DEV_LOOP_ENABLED=0
+run_poller "$POLLER" DEV_LOOP_ENABLED=0
 { ! launched; } && ok "DEV_LOOP_ENABLED=0 disables the launch" || no "launched despite DEV_LOOP_ENABLED=0"
-
-echo "== R9 HALT → the tick skips (launching a service is an ACTION) =="
-run_poller "$POLLER" FLEET_HALT=false
-{ ! launched && grep -q 'dev-loop-launch: R9 HALT' "$OUT"; } && ok "halted tick launches nothing + says so" || no "launched under HALT or did not log the skip"
 
 echo "== MUTATION: neutralize the --is-live gate → the poller launches even over a LIVE loop =="
 MUT="$ROOT/pr-poller-mut.sh"
 sed 's#if "$DEV_LOOP_SERVICE" --is-live 2>/dev/null; then#if false; then#' "$POLLER" > "$MUT"
 if grep -q -- '--is-live 2>/dev/null; then' "$POLLER" && ! grep -q -- '--is-live 2>/dev/null; then' "$MUT"; then
-  run_poller "$MUT" FLEET_HALT=true IS_LIVE=1
+  run_poller "$MUT" IS_LIVE=1
   { launched; } && ok "mutant: launches over a live loop ⇒ the real --is-live gate discriminates" || no "mutant did not double-launch (the gate row would not bite)"
 else
   no "mutation VACUOUS (sed did not change the --is-live gate)"

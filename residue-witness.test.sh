@@ -150,8 +150,29 @@ bash "$SUT" snapshot "$TMP/d1" 2>/dev/null
 bash "$SUT" snapshot "$TMP/d2" 2>/dev/null
 if cmp -s "$TMP/d1" "$TMP/d2"; then ok "B1 two snapshots are byte-identical"
 else no "B1 two snapshots are byte-identical" "$(diff "$TMP/d1" "$TMP/d2" | head -4 | tr '\n' ' ')"; fi
-ck "B1 the snapshot is non-empty and covers all four classes" \
-   "$(cut -f1 "$TMP/d1" | LC_ALL=C sort -u | tr '\n' ',')" "container,image,mount,tree,"
+
+# GRAMMAR AND THE ONE UNIVERSAL CLASS — deliberately NOT an inventory of this box.
+# This row used to demand the snapshot COVER all four classes. That is a fact about the BOX, not about
+# the witness: a class the box holds no object of correctly enumerates nothing. Measured on a CI runner
+# (fedora-dev run 30537850260) the snapshot read `image,mount` — no container, no throwaway tree — so
+# the row turned the repo's own `tests` gate RED for an environmental reason, while every OTHER PART B
+# row on that same runner passed, the whole detection proof and all five mutations included. Skipping
+# PART B over it would have been worse: it would drop that real coverage for a reason confined to one
+# row, which is the "excuse wider than the reason" .github/workflows/tests.yml exists to forbid.
+# THE FOUR-CLASS COVERAGE CLAIM BELONGS TO B2, which INJECTS one artifact per class and asserts each is
+# DETECTED — strictly stronger than whatever happens to be lying around here, and true on any host that
+# can run PART B at all.
+# What is environment-INDEPENDENT, and what these rows therefore keep biting on: a snapshot is never
+# empty and always covers `mount`, because the witness reads THIS process's own mountinfo and no Linux
+# box lacks mounts — so a silently-dead mount enumerator still fails here; and every label must be one
+# of the four, so a stray or garbled class can never pass itself off as residue.
+ck "B1 the snapshot is non-empty" "$([ -s "$TMP/d1" ] && printf yes || printf no)" "yes"
+ck "B1 it covers the one class every box has (mount)" \
+   "$(cut -f1 "$TMP/d1" | LC_ALL=C sort -u | grep -c '^mount$')" "1"
+ck "B1 every class label is one of the four" \
+   "$(cut -f1 "$TMP/d1" | LC_ALL=C sort -u | grep -cvE '^(container|image|mount|tree)$')" "0"
+printf '      | classes this box holds: %s — a class it holds none of is not a defect (B2 injects one of each)\n' \
+   "$(cut -f1 "$TMP/d1" | LC_ALL=C sort -u | tr '\n' ',' | sed 's/,$//')"
 
 # --- B2: THE NEGATIVE CONTROL — the row this whole feature exists for.
 nc_out="$(bash "$SUT" --negative-control 2>&1)"; nc_rc=$?

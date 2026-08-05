@@ -87,6 +87,20 @@ case "${FAKE_FIXER:-commit}" in
            echo "fixed the build";;
   blocked) echo "FIXER_BLOCKED: the approach in the PR is wrong; needs a decision";;
   noop)    echo "looked at it, changed nothing";;      # no commit, no sentinel
+  rewrite) # THE LIVE #328 SHAPE: the fixer brought `main` in and REWROTE the branch's own history,
+           # so origin's tip is no longer an ancestor of HEAD and a PLAIN push is rejected
+           # non-fast-forward. Observed cause was `git rebase` (the branch's commits came back with
+           # new shas under identical messages); `commit --amend` reproduces the property the push
+           # actually cares about — HEAD is not a descendant of origin/<ref> — deterministically,
+           # without needing main to move first. NB a plain `git merge` would NOT reproduce it: a
+           # merge commit still has the branch tip as a parent, so it fast-forwards and pushes fine.
+           # ORDER IS LOAD-BEARING: the commit origin ALREADY HAS must be the one rewritten. Amending
+           # a NEW commit on top leaves origin's tip as its parent — still a fast-forward, which
+           # pushes fine and would make this row pass against the very bug it exists to catch (it
+           # did, on the first draft — the in-suite mutation is what exposed it).
+           git commit -q --amend -m "work (replayed onto main)" >/dev/null 2>&1
+           echo fixed >> f; git add -A >/dev/null 2>&1; git commit -qm "fix the boom" >/dev/null 2>&1
+           echo "fixed the build, on a rewritten history";;
 esac
 exit 0
 EOF
@@ -122,12 +136,10 @@ setup_case(){
 
 sweep(){ # <ref> <sha-the-poller-thinks-is-head> [env…]
   local ref="$1" sha="$2"; shift 2
-  # FLEET_HALT=true pins the R9 gate OPEN (#151) so every row below tests what it means to test; the
-  # HALTED row overrides it with FLEET_HALT=false (later env assignments win) to pin the gate SHUT.
   # shellcheck disable=SC2086
   env PATH="$BIN:$PATH" HOME="$HOMEDIR" FIX_LOG="$FIX_LOG" FD_WORKTREES="$WTDIR" \
       POLLER_REPOS=fedora-dev POLLER_REPO=fedora-dev POLLER_ARMED=0 FIXER_TIMEOUT=60 \
-      POLLER_FIXER="claude -p" FLEET_HALT=true FAKE_REF="$ref" FAKE_SHA="$sha" "$@" \
+      POLLER_FIXER="claude -p" FAKE_REF="$ref" FAKE_SHA="$sha" "$@" \
       bash "$POLLER" --once > "$CASE/out.log" 2>&1
 }
 
@@ -176,6 +188,32 @@ ck "$([ "$(origin_sha feat/x)" != "$SHA" ] && echo 1 || echo 0)" "origin/feat/x 
 ck "$(grep -q "GITPUSH.*HEAD:refs/heads/feat/x" "$FIX_LOG" && echo 1 || echo 0)" "the harness did not push the feature ref explicitly"
 ck "$(git -C "$ORIGIN" rev-parse refs/heads/main >/dev/null 2>&1 && [ "$(origin_sha main)" = "$MAIN_SHA" ] && echo 1 || echo 0)" "origin/main moved — the fixer must NEVER touch main"
 done_case
+
+echo "== REWRITTEN HISTORY LANDS (the live #328 stall: 4 fix rounds, ~2h of model time, head never moved) =="
+DESC="rewritten-history push"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+sweep feat/x "$SHA" FAKE_FIXER=rewrite
+logs 'FIXER LANDED'; notlogs 'FIXER PUSH FAILED'
+ck "$([ "$(origin_sha feat/x)" != "$SHA" ] && echo 1 || echo 0)" "origin/feat/x did NOT advance — a rewritten fix still cannot land"
+ck "$(git -C "$ORIGIN" rev-parse refs/heads/main >/dev/null 2>&1 && [ "$(origin_sha main)" = "$MAIN_SHA" ] && echo 1 || echo 0)" "origin/main moved — a force push must NEVER reach main"
+[ "$OK" = 1 ] && { pass=$((pass+1)); echo "  ok   a rewritten history lands, so the head MOVES and the gates re-read new code"; }
+
+echo "== THE FORCE IS LEASED, PINNED TO THE GATED HEAD — not a bare --force =="
+DESC="lease pinning"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+sweep feat/x "$SHA" FAKE_FIXER=rewrite
+ck "$(grep -q "GITPUSH.*--force-with-lease=refs/heads/feat/x:$SHA" "$FIX_LOG" && echo 1 || echo 0)" "the push did not carry a lease pinned to the gated head ($SHA)"
+ck "$(grep -qE 'GITPUSH.*(--force[^-]|--force$)' "$FIX_LOG" && echo 0 || echo 1)" "a BARE --force was used — it would silently discard a concurrent push"
+ck "$(grep -q "GITPUSH.*HEAD:refs/heads/feat/x" "$FIX_LOG" && echo 1 || echo 0)" "the explicit refspec is gone — the push could name another destination"
+[ "$OK" = 1 ] && { pass=$((pass+1)); echo "  ok   force is leased to the gated head + refspec-scoped (cannot clobber, cannot reach main)"; }
+
+echo "== A FAILED PUSH REPORTS GIT'S OWN ERROR, never a guessed cause =="
+DESC="push error honesty"; OK=1
+setup_case feat/x; FAKE_REF=feat/x
+sweep feat/x "$SHA" FAKE_FIXER=commit FAKE_PUSH=fail
+logs 'FIXER PUSH FAILED'
+ck "$(grep -q 'check credentials / branch protection' "$CASE/out.log" "$FIX_LOG" 2>/dev/null && echo 0 || echo 1)" "still asserts 'credentials / branch protection' — the #328 cause was non-fast-forward, and both were fine"
+[ "$OK" = 1 ] && { pass=$((pass+1)); echo "  ok   the failure line no longer guesses a cause it can print"; }
 
 echo "== NOT LANDED: the push LIES (rc 0, origin never moves) → verification against ORIGIN catches it =="
 DESC="a push that reports success but lands nothing is NOT reported as landed"; OK=1
@@ -238,25 +276,6 @@ ck "$([ ! -d "$WT" ] && echo 1 || echo 0)" "the throwaway worktree was not reape
 done_case
 
 # ---------------------------------------------------------------------------------------------------
-# R9 FLEET HALT (#151): the switch is read at the TOP of every tick, BEFORE any model run — a halted
-# sweep is OBSERVE-ONLY: it still logs the routing decision (the operator sees the queue) but spawns no
-# fixer, pushes nothing, posts nothing. FLEET_HALT=false stands in for every non-GO outcome at once
-# (a maintainer HALT or a dead checker: rc ≠ 0 is the whole contract — rc 20/PAUSE is retired, and
-# since #274 an unreadable signal returns rc 0, so it is not one of these outcomes). This is the detector
-# requirement 8 demands for THIS sweeper: delete the halt check from sweep()/sweep_repo() and it fails
-# (the fixer runs and the RED PR is acted on under HALT).
-echo "== R9 FLEET HALT (#151): a HALTED tick is OBSERVE-ONLY — no fixer, no push, no comment =="
-DESC="a fleet HALT spawns no model run on a RED PR (observed, logged, untouched)"; OK=1
-setup_case feat/x; FAKE_REF=feat/x
-sweep feat/x "$SHA" FAKE_FIXER=commit FLEET_HALT=false
-common; never_ran; no_push
-ck "$(grep -q '^SURFACE' "$FIX_LOG" && echo 0 || echo 1)" "a HALTED sweep posted a comment — observe-only must write nothing"
-logs 'FLEET HALT'                                    # the tick says it is halted…
-logs 'HALTED — FIX not taken'                        # …and logs the decision it did NOT act on
-notlogs 'FIXER LANDED'
-ck "$([ "$(origin_sha feat/x)" = "$SHA" ] && echo 1 || echo 0)" "origin/feat/x moved during a HALTED sweep"
-done_case
-
 echo "== FRESH-TREE FAILS: fail-closed — no isolation ⇒ NO fix attempted (no shared-clone fallback) =="
 DESC="an un-isolatable fix is refused, not run in the shared clone"; OK=1
 setup_case feat/x; FAKE_REF=feat/ghost                 # origin has no such ref → fresh-tree.sh exits 2

@@ -203,7 +203,26 @@ Your Claude login + transcripts survive every rebuild (they live in `~/.claude` 
 
 **Build validation:** build → deploy via `run.sh` → confirm `(healthy)` → functional-probe each access path. Final proof = CI green + host-side live-gate. **Changes to fedora-dev itself:** edit the live clone at `~/.local/share/fedora-dev/`, `gh pr create`, and wait for merge — ad-hoc edits vanish on the next rebuild.
 
+**Measuring rather than asserting:** `bash bin/bandwidth-probe.sh` reports the bytes two consecutive builds actually pulled, per asset class (OS packages, base images, git objects, language/vendor downloads), on both boxes. Read its KV block bottom-up: `VERDICT: GREEN|RED` is the answer, `CONTROL: DETECTS|BLIND` says whether the run could see a real download at all (BLIND ⇒ its zeros mean nothing), `HOST:` covers the other box, and each `CLASS_<NAME>: <state> <bytes-build-1> <bytes-build-2>` line carries the measurement — where `SKIPPED` means the class had nothing to measure and, like any non-`ZERO` state, blocks exit 0. `FLOOR:` states the sampled noise threshold, because the counter is box-wide and a threshold nobody can see is a threshold nobody can trust. It reads RED today by design.
+
 Full procedure: [`policy/CLAUDE.md`](policy/CLAUDE.md) — PIPELINE + HOW DO I sections, always in context for the agent.
+
+### Pinned downloads are cached locally — `ADD <url>` is not used
+
+A build that needs a pinned vendor file (a source tarball, a vendor `.repo`) fetches it with
+`bin/fd-fetch.sh <https-url> <sha256> <dest>`, which serves it from a content-addressed cache on the
+home volume (`~/.cache/fd-dl`, bound into every dev-box build at `/var/cache/fd-dl`) and verifies the
+sha256 every time — cache hits included, so a corrupted or tampered entry is discarded rather than
+trusted, and a hash mismatch fails the build having published nothing.
+
+Why not `ADD <url>`: podman/buildah reports a layer-cache **hit** on `ADD <url>` and still downloads the
+whole file anyway (it needs the bytes to compute the cache key, then throws them away). Measured in-box:
+a 10 MiB tarball re-transferred in full on a rebuild that printed `--> Using cache`, versus **zero** asset
+bytes through the cache-aware fetch. The cache is bounded (entries unused for 45 days are pruned, then
+LRU-evicted to 10 GB) by the same sweeper that reaps throwaway builds.
+
+Agent-facing detail — the contract, the measurements and the bounds: [`CLAUDE.md`](CLAUDE.md) Principle 2,
+*Pinned fetches*.
 
 ## Troubleshooting & break-glass
 

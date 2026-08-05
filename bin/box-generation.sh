@@ -11,7 +11,7 @@
 # The failure mode is the nasty one: a torn-down overlay keeps working for anything already resolved,
 # and fails only for what must be looked up fresh. `bash`, `date`, `grep` kept working. `gh` — installed
 # into the deleted upper layer — vanished. So the poller stayed alive, kept logging, kept sweeping, and
-# every single sweep failed. Worse, `fleet-halt.sh` reads its signal ONLY through `gh api`, so a missing
+# every single sweep failed. Worse, the then-live halt reader read its signal ONLY through `gh api`, so a missing
 # binary self-inflicted a fleet-wide R9 HALT (395 consecutive unreadable reads), which then gated the
 # very ticket that could have repaired the box, and collapsed R16 scope from 7 repos to 2.
 #

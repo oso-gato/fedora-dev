@@ -14,7 +14,11 @@
 #
 #   repo-labels.sh check <repo>    rc 0 iff every REQUIRED label exists on <repo>; lists what is missing
 #   repo-labels.sh ensure <repo>   idempotently CREATE any missing label (safe to run every time)
-#   repo-labels.sh audit           scan bin/*.sh for label literals that are NOT in this registry (drift)
+#   repo-labels.sh audit           scan bin/*.sh for labels NOT in this registry (drift); resolves $VARs
+#   repo-labels.sh prune <repo> [--commit] [--force]
+#                                  DELETE every label on <repo> this registry does not declare for it.
+#                                  DRY-RUN by default; an off-registry label that is IN USE is HELD
+#                                  unless --force (deleting strips it from those items).
 #   repo-labels.sh list            print the registry
 #   repo-labels.sh parked          print the labels that take an item OUT of the drivable set
 #   repo-labels.sh --selftest      exercise the pure conformance core (no gh / network)
@@ -27,7 +31,7 @@
 # Covered by repo-labels.test.sh. Control-plane (the pipeline's own vocabulary).
 set -uo pipefail
 
-# ---- THE REGISTRY — the single source of truth. name|colour|role|description[|PARKED] ---------------
+# ---- THE REGISTRY — the single source of truth. name|colour|role|description[|PARKED][|CONTROL] ------
 # role: APPLY = the apparatus puts it on;  READ = the apparatus reads it and must understand it.
 # Adding a label ANYWHERE in bin/ without adding it here is drift and `audit` fails on it.
 #
@@ -47,12 +51,22 @@ shipped|5319e7|APPLY|The objective was declared shipped autonomously by the ship
 maintainer-merge|5319e7|APPLY|Touches the confirmed spec — maintainer merges it, never the loop (R1)|PARKED
 apparatus-blocked|b60205|APPLY|Bounded auto-recovery is exhausted; a human is genuinely needed|PARKED
 host-task|fbca04|APPLY|A ticket addressed to the host agent over the bus (R5)
+host-done|0e8a16|APPLY|The host agent completed this ticket (bus outcome)||CONTROL
+host-failed|b60205|APPLY|The host agent could not complete this ticket (bus outcome)||CONTROL
+objective|5319e7|APPLY|A drafted objective awaiting the maintainer's 'approved' tap (R31 intake)
+approved|0e8a16|READ|The MAINTAINER's confirmation — the one human act that authorises planning (R1)
+rebuild-approval|fbca04|APPLY|A rebuild ticket awaiting the maintainer's 'approved' tap (R17)|PARKED|CONTROL
 escalate|d93f0b|READ|A genuine maintainer decision — removes the item from the drivable set|PARKED
 needs-decision|d93f0b|READ|Synonym of escalate, honoured by the ship oracle|PARKED
 blocked|d93f0b|READ|Work cannot proceed; not drivable by the loop|PARKED
 awaiting-maintainer|d93f0b|READ|Parked pending the maintainer; not drivable by the loop|PARKED
 EOF
 )"
+
+# The CONTROL repo — the one repo whose machinery owns the host bus + approval vocabulary. Declared HERE,
+# above the pure core, because the scope filter is part of that core and `--selftest` must be able to
+# override it without reaching the I/O section (ORG is still set further down, next to its first use).
+CONTROL_REPO="${LABELS_CONTROL_REPO:-fedora-bootstrap}"
 
 # ---- PURE CORE (--selftest covers exactly this) ----------------------------------------------------
 # label_ok <name> → rc 0 iff the name conforms to the naming rules above.
@@ -63,12 +77,82 @@ label_ok(){
   printf '%s' "$n" | grep -qE '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' || return 1
   return 0
 }
-# registry_names → every declared label name, one per line.
-registry_names(){ printf '%s\n' "$REGISTRY" | awk -F'|' 'NF{print $1}'; }
+# THE 6TH FIELD — `CONTROL` — scopes a label to the CONTROL repo only (the host's bus + approval
+# vocabulary). It exists because the registry is applied PER REPO by `check`/`ensure`/`prune`, so a flat
+# set would demand `host-done`/`host-failed`/`rebuild-approval`/`halt` on every tenant repo — `check`
+# would fail everywhere and `ensure` would litter each repo with four labels nothing there ever reads.
+# The maintainer's standing instruction is a SMALL controlled set per repo, so a label that only one
+# repo's machinery touches must not appear in the other's picker. Empty = every repo in scope.
+#
+# registry_names [repo] → declared label names, one per line. With a repo, only those in scope FOR it:
+# every unscoped label, plus the CONTROL-scoped ones when that repo IS the control repo. Without a repo
+# it lists the whole vocabulary (what `audit` grades against — drift is drift wherever it appears).
+registry_names(){
+  local repo="${1-}"
+  if [ -z "$repo" ]; then printf '%s\n' "$REGISTRY" | awk -F'|' 'NF{print $1}'; return; fi
+  printf '%s\n' "$REGISTRY" | awk -F'|' -v r="$repo" -v c="$CONTROL_REPO" \
+    'NF && ($6=="" || ($6=="CONTROL" && r==c)) {print $1}'
+}
 # registry_field <name> <n> → the nth field for a registered label (empty if unregistered).
 registry_field(){ printf '%s\n' "$REGISTRY" | awk -F'|' -v n="$1" -v f="$2" '$1==n{print $f}'; }
 # is_registered <name> → rc 0 iff declared here.
 is_registered(){ registry_names | grep -qxF "${1-}"; }
+# label_defaults — stdin: shell source. stdout: `VAR|value` for every label-ish variable whose DEFAULT is
+# declared inline, i.e. `SOMETHING_LABEL="${OVERRIDE:-value}"`. A comma-separated default (ESCALATE_LABELS)
+# yields one line PER name, because the audit grades names and a list is not one.
+#
+# WHY THIS EXISTS: `audit` used to end its pipeline with `grep -vE '^\$'`, which threw away EVERY variable
+# reference — so `--label "$APPROVED_LABEL"` was found and then deliberately discarded. Six labels the
+# apparatus genuinely applies or reads (approved · objective · halt · rebuild-approval · host-done ·
+# host-failed) were therefore invisible to the drift guard, and it reported "no label drift" over a
+# six-label hole. Measured 2026-07-30: registry declared 10, code used 16, audit said clean. A guard that
+# cannot see the majority of its own subject is worse than none, because it is TRUSTED.
+label_defaults(){
+  grep -hoE '[A-Za-z_]*LABELS?="\$\{[A-Za-z_]+:-[^}"]+\}"' \
+    | sed -E 's/^([A-Za-z_]+)="\$\{[A-Za-z_]+:-(.*)\}"$/\1|\2/' \
+    | awk -F'|' 'NF==2{n=split($2,a,","); for(i=1;i<=n;i++){gsub(/^[ \t]+|[ \t]+$/,"",a[i]); if(a[i]!="") print $1"|"a[i]}}' \
+    | sort -u
+}
+# LABEL_TOKEN_RE — the ONE grammar both label flags are read with, and label_tokens applies it.
+# stdin: shell source. stdout: every label ARGUMENT token, one per line, sorted. It captures the WHOLE
+# argument — surrounding quote, `$`, `{}` and all — and capturing it WHOLE is the entire point.
+#
+# WHY IT IS SHARED AND QUOTE-TOLERANT (fitness finding on 7282a3f). `--add-label` and `--label` used to
+# carry DIFFERENT literal alternatives, and only `--label`'s tolerated a leading quote. The consequences
+# were measured on this tree, not reasoned about:
+#   --add-label "host-$st"    → captured NOTHING. That is verbatim the host bus's real line
+#                               (fedora-bootstrap host-agent-watch.sh:235) and the exact construction
+#                               the audit's own comment claimed to flag — so a parity port of this file
+#                               would have been silent about host-done/host-failed while promising not
+#                               to be. A guard is dangerous BECAUSE it is trusted.
+#   --add-label host-$st      → captured `host-`, truncated at the `$` ⇒ DRIFT on a label nobody uses.
+#   --add-label "a-literal"   → captured NOTHING; a quoted literal was ungraded entirely.
+# One grammar for both flags fixes all three: the token arrives WHOLE, so a dynamically-built name still
+# carries its `$` when the caller grades it and is REPORTED as ungradeable instead of being dropped or
+# mis-graded as drift on a truncated fragment.
+#
+# RESIDUAL, stated rather than implied: the class spans the two shell quotes, `$`, `{}` and the label
+# characters. A construction it cannot span at all — a backtick substitution — is still invisible to this
+# scan; a `$(…)` carrying a space truncates to `"$`, which is `$`-bearing and therefore still reported.
+LABEL_QUOTES="\"'"
+LABEL_TOKEN_RE="--(add-)?label [$LABEL_QUOTES]?[-A-Za-z0-9_\${}$LABEL_QUOTES]+[$LABEL_QUOTES]?"
+label_tokens(){ grep -oE -- "$LABEL_TOKEN_RE" | sed -E 's/^--(add-)?label //' | sort -u; }
+# resolve_token <token> <defaults-block> → the concrete label name(s) the token denotes, one per line.
+# A bare literal resolves to itself. A `$VAR` / `"$VAR"` resolves through the defaults block. A variable
+# with NO declared default resolves to NOTHING and is reported by the caller as UNRESOLVABLE — never
+# silently dropped, which is exactly the failure being fixed here. BOTH shell quotes are stripped, so a
+# literal grades identically however it is quoted (`backlog`, `"backlog"`, `'backlog'` are one label).
+resolve_token(){
+  local t="${1-}" defs="${2-}"
+  t="${t#[\"\']}"; t="${t%[\"\']}"
+  case "$t" in
+    '$'*|'${'*)
+      local v="${t#\$}"; v="${v#\{}"; v="${v%\}}"
+      printf '%s\n' "$defs" | awk -F'|' -v v="$v" '$1==v{print $2}'
+      ;;
+    *) printf '%s\n' "$t" ;;
+  esac
+}
 # parked_names → every label that takes an item OUT of the drivable set (the 5th field), one per line.
 # Read by the deadman's work-progress axis so "waiting by design" is never mistaken for "stuck".
 parked_names(){ printf '%s\n' "$REGISTRY" | awk -F'|' '$5=="PARKED"{print $1}'; }
@@ -112,6 +196,57 @@ if [ "${1:-}" = "--selftest" ]; then
   ck "shipped NOT parked"     "$(inpk shipped)" "no"
   ck "every parked label is registered" \
      "$( bad2=""; for n in $(parked_names); do is_registered "$n" || bad2="$bad2 $n"; done; echo "${bad2:-none}" )" "none"
+
+  echo "== label_defaults: the variable defaults the old audit threw away =="
+  _src='APPROVED_LABEL="${APPROVED_LABEL:-approved}"
+INTAKE_LABEL="${INTAKE_LABEL:-objective}"
+ESCALATE_LABELS="${ESCALATE_LABELS:-escalate,needs-decision,blocked}"
+NOT_A_LABEL_VAR="${FOO:-bar}"
+LABEL="${HOST_TICKET_LABEL:-host-task}"'
+  ck "a plain default is harvested"      "$(printf '%s\n' "$_src" | label_defaults | grep '^APPROVED_LABEL|')" "APPROVED_LABEL|approved"
+  ck "a differently-named override"      "$(printf '%s\n' "$_src" | label_defaults | grep '^INTAKE_LABEL|')" "INTAKE_LABEL|objective"
+  ck "a bare LABEL= is harvested"        "$(printf '%s\n' "$_src" | label_defaults | grep '^LABEL|')" "LABEL|host-task"
+  ck "a comma list becomes ONE ROW EACH" "$(printf '%s\n' "$_src" | label_defaults | grep -c '^ESCALATE_LABELS|')" "3"
+  ck "a non-label variable is ignored"   "$(printf '%s\n' "$_src" | label_defaults | grep -c 'NOT_A_LABEL_VAR')" "0"
+
+  echo "== resolve_token: a \$VAR resolves; an UNDECLARED one resolves to NOTHING (never silently kept) =="
+  _defs="$(printf '%s\n' "$_src" | label_defaults)"
+  ck "a bare literal is itself"        "$(resolve_token 'backlog' "$_defs")" "backlog"
+  ck "a quoted \$VAR resolves"         "$(resolve_token '"$APPROVED_LABEL"' "$_defs")" "approved"
+  ck "an unquoted \$VAR resolves"      "$(resolve_token '$INTAKE_LABEL' "$_defs")" "objective"
+  ck "a \${braced} \$VAR resolves"      "$(resolve_token '"${LABEL}"' "$_defs")" "host-task"
+  # sorted, not source-ordered: label_defaults ends in `sort -u` so a duplicate default cannot inflate
+  # the set. Order is not part of the contract — membership is — so the row asserts the SET.
+  ck "a multi-value var yields all"    "$(resolve_token '$ESCALATE_LABELS' "$_defs" | sort | tr '\n' ' ')" "blocked escalate needs-decision "
+  ck "an UNDECLARED var resolves to nothing" "$(resolve_token '"$MYSTERY_LABEL"' "$_defs")" ""
+  ck "a single-quoted literal is the same label" "$(resolve_token "'backlog'" "$_defs")" "backlog"
+
+  # The GRADING side of a dynamically-built name: it must reach the caller still $-bearing, because that
+  # is what routes it to the ungradeable NOTE instead of the drift line. The CAPTURE side (label_tokens)
+  # is deliberately NOT fixtured here: `audit` scans bin/*.sh, THIS FILE INCLUDED, so a literal
+  # `--add-label <token>` written as a selftest fixture would be read as production label usage and
+  # reported as drift against the real tree. Its rows live in repo-labels.test.sh, driven end-to-end
+  # through the real `audit` verb against a throwaway probe — the wiring test, which is the stronger
+  # coverage anyway (a pure core cannot see whether anything calls it).
+  ck "a dynamic name resolves to a \$-bearing name (⇒ NOTE, never drift)" \
+     "$(resolve_token '"host-$st"' "$_defs")" 'host-$st'
+  ck "…and never to the truncated fragment the old capture produced" \
+     "$(resolve_token '"host-$st"' "$_defs" | grep -cx 'host-')" "0"
+
+  echo "== the CONTROL scope keeps a repo's picker small =="
+  # CONTROL_REPO is expanded once at load, so the knob a subshell must set is CONTROL_REPO itself —
+  # setting LABELS_CONTROL_REPO here would be a dead assignment and the row would pass on the default,
+  # i.e. test the right thing for the wrong reason.
+  ck "control-only labels are OUT of a tenant's set" \
+     "$(CONTROL_REPO=fedora-bootstrap; registry_names fedora-dev | grep -cE '^(host-done|host-failed|rebuild-approval)$')" "0"
+  ck "…and the knob is LIVE (a tenant named as the control repo DOES get them)" \
+     "$(CONTROL_REPO=fedora-dev; registry_names fedora-dev | grep -cE '^(host-done|host-failed|rebuild-approval)$')" "3"
+  ck "…and IN the control repo's set" \
+     "$(registry_names fedora-bootstrap | grep -cE '^(host-done|host-failed|rebuild-approval)$')" "3"
+  ck "the unscoped core is in BOTH"    \
+     "$(registry_names fedora-dev | grep -cE '^(backlog|live-validate|objective|approved)$')" "4"
+  ck "no repo requires more than the whole vocabulary" \
+     "$([ "$(registry_names fedora-bootstrap | grep -c .)" -le "$(registry_names | grep -c .)" ] && echo ok)" "ok"
   echo; echo "repo-labels selftest: $p passed, $f failed"; [ "$f" -eq 0 ]; exit
 fi
 
@@ -130,9 +265,9 @@ case "${1:-}" in
     have="$(gh label list --repo "$ORG/$REPO" --limit 200 --json name -q '.[].name' 2>/dev/null)" || {
       log "cannot read labels on $ORG/$REPO (unreadable — NOT the same as 'none missing')"; exit 3; }
     missing=""
-    for n in $(registry_names); do printf '%s\n' "$have" | grep -qxF "$n" || missing="$missing $n"; done
+    for n in $(registry_names "$REPO"); do printf '%s\n' "$have" | grep -qxF "$n" || missing="$missing $n"; done
     if [ -n "$missing" ]; then log "$ORG/$REPO MISSING:${missing}"; exit 1; fi
-    log "$ORG/$REPO: all $(registry_names | grep -c .) required labels present"; exit 0 ;;
+    log "$ORG/$REPO: all $(registry_names "$REPO" | grep -c .) labels required FOR THIS REPO are present"; exit 0 ;;
 
   ensure)
     REPO="${2:?usage: repo-labels.sh ensure <repo>}"
@@ -149,7 +284,7 @@ case "${1:-}" in
     have="$(gh label list --repo "$ORG/$REPO" --limit 200 --json name -q '.[].name' 2>/dev/null)" || {
       log "cannot read labels on $ORG/$REPO — not establishing blind (fail-closed)"; exit 3; }
     made=0 failed=""
-    for n in $(registry_names); do
+    for n in $(registry_names "$REPO"); do
       printf '%s\n' "$have" | grep -qxF "$n" && continue
       if gh label create "$n" --repo "$ORG/$REPO" --color "$(registry_field "$n" 2)" \
            --description "$(registry_field "$n" 4)" >/dev/null 2>&1; then
@@ -161,20 +296,100 @@ case "${1:-}" in
     exit 0 ;;
 
   audit)
-    # DRIFT GUARD: a label literal used in bin/ that this registry does not declare.
+    # DRIFT GUARD: a label used in bin/ that this registry does not declare.
     # The vocabulary has ONE home, and a script inventing its own is caught here.
+    # Variable references are now RESOLVED through their declared defaults instead of discarded — see
+    # label_defaults for what that filter was hiding.
     HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-    found="$(grep -rhE -- '--add-label|--label ' "$HERE"/*.sh 2>/dev/null | grep -vE '^[[:space:]]*#' \
-             | grep -oE -- '--add-label ([a-zA-Z][a-zA-Z0-9_-]*)|--label "?([a-z][a-z0-9-]{2,30})"?' \
-             | sed -E 's/^--(add-)?label "?//; s/"$//' | sort -u | grep -vE '^\$' )"
-    drift=""
-    for n in $found; do is_registered "$n" || drift="$drift $n"; done
-    if [ -n "$drift" ]; then
+    src="$(cat "$HERE"/*.sh 2>/dev/null | grep -vE '^[[:space:]]*#')"
+    defs="$(printf '%s\n' "$src" | label_defaults)"
+    toks="$(printf '%s\n' "$src" | label_tokens)"
+    drift="" unresolved=""
+    while IFS= read -r t; do
+      [ -n "$t" ] || continue
+      names="$(resolve_token "$t" "$defs")"
+      if [ -z "$names" ]; then
+        # A variable with no declared default. Report it — a token we cannot resolve is precisely the
+        # thing the old `grep -v '^\$'` swallowed, and silence here is how the hole reopens.
+        case "$t" in *'$'*) unresolved="$unresolved $t";; esac
+        continue
+      fi
+      while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        # A dynamically-built name (`host-$st`) cannot be graded statically. label_tokens captures it
+        # WHOLE, so it reaches here still bearing its `$` and is REPORTED as ungradeable — never
+        # silently dropped, and never mis-graded as drift on the truncated fragment `host-`. Its
+        # concrete forms are declared in the registry (host-done / host-failed).
+        case "$n" in *'$'*) unresolved="$unresolved $n"; continue;; esac
+        is_registered "$n" || drift="$drift $n"
+      done <<EOF
+$names
+EOF
+    done <<EOF
+$toks
+EOF
+    drift="$(printf '%s' "$drift" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+    unresolved="$(printf '%s' "$unresolved" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+    rc=0
+    if [ -n "${drift// /}" ]; then
       log "LABEL DRIFT — used in bin/ but not declared in the registry:${drift}"
       log "add it to REGISTRY (with a role + description) or stop using it — the vocabulary has one home"
-      exit 1
+      rc=1
     fi
-    log "no label drift — every label used in bin/ is declared"; exit 0 ;;
+    [ -n "${unresolved// /}" ] && log "NOTE — label tokens that cannot be graded statically:${unresolved} (declare their concrete forms in the registry)"
+    [ "$rc" = 0 ] && log "no label drift — every label used in bin/ is declared ($(registry_names | grep -c .) in the registry)"
+    exit "$rc" ;;
 
-  *) echo "usage: repo-labels.sh {check|ensure|audit|list|--selftest} [repo]" >&2; exit 2 ;;
+  prune)
+    # PRUNE — delete every label on <repo> that this registry does NOT declare for it. The maintainer's
+    # standing instruction is a SMALL controlled set per repo ("I don't want to see all those other label
+    # choices"), and until this existed the cleanup was a hand-run loop that nothing could repeat.
+    #
+    # DESTRUCTIVE, so it is DRY-RUN BY DEFAULT and needs `--commit` to act (the auto-merge.sh idiom).
+    # Deleting a label also STRIPS IT from every issue and PR carrying it, so an off-registry label that
+    # is IN USE is HELD, listed, and left alone unless `--force` is also given: losing a maintainer's
+    # historical triage is not a tidy-up, and a prune that quietly does it would be a worse defect than
+    # the clutter it removes. Registry labels are NEVER candidates, whatever the flags.
+    REPO="${2:?usage: repo-labels.sh prune <repo> [--commit] [--force]}"; shift 2 || true
+    COMMIT=0; FORCE=0
+    for a in "$@"; do case "$a" in --commit) COMMIT=1;; --force) FORCE=1;; esac; done
+    HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+    REPO_SCOPE="${REPO_SCOPE:-$HERE/repo-scope.sh}"
+    "$REPO_SCOPE" check "$REPO" 2>/dev/null || {
+      log "R16 SCOPE: '$REPO' is outside the operating scope — deleting NOTHING on it"; exit 4; }
+    have="$(gh label list --repo "$ORG/$REPO" --limit 200 --json name -q '.[].name' 2>/dev/null)" || {
+      log "cannot read labels on $ORG/$REPO — not pruning blind (fail-closed)"; exit 3; }
+    keep="$(registry_names "$REPO")"
+    del=0 held=0 failed=""
+    while IFS= read -r n; do
+      [ -n "$n" ] || continue
+      printf '%s\n' "$keep" | grep -qxF "$n" && continue          # registered for this repo → never touched
+      used="$(gh api "repos/$ORG/$REPO/issues?labels=$(printf '%s' "$n" | sed 's/ /%20/g')&state=all&per_page=100" \
+                -q 'length' 2>/dev/null)"
+      case "$used" in ''|*[!0-9]*) used=UNKNOWN;; esac
+      if [ "$used" = UNKNOWN ]; then
+        log "HOLD '$n' — could not read its usage; not deleting on an unreadable count (fail-closed)"; held=$((held+1)); continue
+      fi
+      if [ "$used" -gt 0 ] && [ "$FORCE" = 0 ]; then
+        log "HOLD '$n' — off-registry but IN USE on $used item(s); --force to delete anyway (it would be stripped from them)"
+        held=$((held+1)); continue
+      fi
+      if [ "$COMMIT" = 0 ]; then
+        log "WOULD DELETE '$n' (off-registry, $used item(s))"; del=$((del+1)); continue
+      fi
+      if gh label delete "$n" --repo "$ORG/$REPO" --yes >/dev/null 2>&1; then
+        log "deleted '$n' from $ORG/$REPO ($used item(s) affected)"; del=$((del+1))
+      else failed="$failed $n"; fi
+    done <<EOF
+$have
+EOF
+    [ -n "${failed// /}" ] && { log "$ORG/$REPO: could NOT delete:${failed}"; exit 1; }
+    if [ "$COMMIT" = 0 ]; then
+      log "$ORG/$REPO: DRY RUN — $del would be deleted, $held held. Re-run with --commit to act."
+    else
+      log "$ORG/$REPO: pruned $del, held $held"
+    fi
+    exit 0 ;;
+
+  *) echo "usage: repo-labels.sh {check|ensure|audit|prune|list|parked|--selftest} [repo] [--commit] [--force]" >&2; exit 2 ;;
 esac

@@ -69,20 +69,13 @@ prompts on nothing (the hook and classifier WERE the per-iteration human clicks 
 box-rebuild/assemble machinery · key-sync · `*sudoers*`. Merges via the poller like any change (no
 standalone-click rule — the ZERO-GATE decision removed it); the fitness reviewer still scrutinises them.
 
-**FLEET HALT (R9, fedora-dev#151)** — the fleet-wide, maintainer-thrown SOFT STOP. A repo MAINTAINER
-(admin|maintain) applies the `halt` label to the FLEET HALT CONTROL issue in the control repo
-(`oso-gato/fedora-bootstrap`, discovered by title — live: #128); every sweeper (`bin/pr-poller.sh`,
-`bin/dev-loop.sh`, the host watcher) reads it via `bin/fleet-halt.sh` at the TOP of every sweep, BEFORE
-any model run is spawned or merge taken, and goes OBSERVE-ONLY while it stands (logs what it WOULD do;
-acts on nothing; does NOT exit — un-halting needs no restart). MAINTAINER-BOUND both directions from
-the label's own timeline events (an App identity can neither halt nor UN-halt the loop). ONLY a READ,
-PRESENT, maintainer-applied label halts: an UNREADABLE signal RUNS — logged, and loudly past K
-consecutive failures — and NEVER escalates to HALT. That direction was INVERTED 2026-07-28 (STEP 3 of
-#274) on measured evidence: failing closed produced 935 halts of which ZERO were maintainer-thrown,
-suppressing 338 concrete actions and blocking the very ticket that would have repaired a six-day
-outage. This label is not what makes a merge safe (the two INDEPENDENT gates are), so failing it open
-weakens nothing. The control issue ABSENT is likewise a definite "no halt asserted". HALT stops NEW
-action only (in-flight work completes); the hard stop is App-key revocation, per R9.
+**STOPPING THE FLEET (R9)** — the maintainer-thrown SOFT HALT label is **RETIRED (2026-07-30)**. It was
+read by every sweeper before acting, and was retired on its own record: thrown by a maintainer **0 times
+ever**, fired by itself **935 times, all false**, suppressing **338 real actions** — one of them the
+ticket that would have repaired a six-day outage. It duplicated two stronger stops and depended on
+GitHub being readable, so it failed exactly when an outage made it matter. THE STOPS THAT REMAIN, both
+stronger and neither needing the loop's cooperation: **revoke the App key** (works with GitHub
+unreachable; the stop of record) or **stop the containers on the host**. No sweeper reads any soft stop.
 
 ## THE LOOP — dev↔host, two-tier validation
 

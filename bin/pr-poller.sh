@@ -75,9 +75,8 @@
 #                     acted-marker-parked, precisely so a hand-posted verdict is still seen — no
 #                     model run is spent on it, only the reads. Against the dev App's 5k/h REST budget (SHARED with the fixer,
 #                     fitness reviewer and auto-merge): N=10 open PRs ≈ 4.3k/h — the ceiling is
-#                     ~10 sustained open PRs (was 2-3 unbatched). The R9 fleet-halt read (#151)
-#                     adds 2 calls per TICK, not per repo (1 title-search + 1 timeline ≈ +720/h;
-#                     the search API has its own 30/min budget, of which this uses 6/min).
+#                     ~10 sustained open PRs (was 2-3 unbatched). (Retiring the soft HALT on
+#                     2026-07-30 removed 2 search+timeline calls per TICK, ≈ -720/h.)
 #                     On exhaustion gh calls fail and
 #                     sweeps degrade to NOOP until the window resets — fail-closed,
 #                     self-recovering; GREEN-moment fetch failures skip that PR for that sweep
@@ -88,7 +87,6 @@
 #                     count of iterations.
 #   FRESH_TREE        the isolator (default: bin/fresh-tree.sh). Every fix runs in a throwaway worktree
 #                     off the PR's own head — NEVER the shared clone (#152). Overridable for testing.
-#   FLEET_HALT        the R9 fleet HALT reader (default: bin/fleet-halt.sh — see its header; #151).
 #                     Read at the TOP of every tick, BEFORE any model run / merge / retire / comment.
 #                     rc 0 alone means GO; ANY other outcome (a maintainer HALT, or a missing/crashed
 #                     checker — rc 20/PAUSE is retired, an unreadable signal now reads GO) makes the
@@ -126,6 +124,23 @@
 #                     HOST_REFRESH_SCAN (the scanner, default bin/host-refresh.sh — its header carries
 #                     the whole design) · HOST_REFRESH_EVERY (scan once per N sweeps; default 30;
 #                     0 disables). Runs at the END of a sweep tick, gated by THAT tick's R9 halt read.
+#   IMMUTABILITY_PROBE*  the IMMUTABILITY CADENCE (#317 — objective #310's *"the check runs on its own,
+#                     repeatedly"*). IMMUTABILITY_PROBE (the prober, default bin/immutability-probe.sh —
+#                     its header carries the whole design) · IMMUTABILITY_PROBE_EVERY (run once per N
+#                     sweeps; 0 disables) · IMMUT_STAGED_MAX · IMMUT_PROBE_TIMEOUT · IMMUT_ALARM_REPO ·
+#                     IMMUT_STATE · IMMUT_HISTORY_MAX · IMMUT_GH_TIMEOUT.
+#                     THE DEFAULT CADENCE IS RARE — 2880 sweeps, ~24 h at the 30 s POLL_INTERVAL —
+#                     BECAUSE A RUN COSTS A REAL BUILD ON BOTH BOXES: the dev half runs three real
+#                     `build-throwaway.sh` cycles in the nested engine, and the host half files a
+#                     `host-ticket.sh --wait immutability-probe` that makes erebus build a disposable
+#                     candidate of its own. That is minutes of CPU and a bus round-trip per run, so this
+#                     is the one tick whose cost argues for daily rather than half-hourly. Daily is
+#                     still infinitely more often than "whenever a human remembers", which is the
+#                     cadence this replaces. Runs at the END of a sweep tick, gated by THAT tick's R9
+#                     halt read (starting a build on both boxes is an ACTION, and it files a bus
+#                     ticket), SINGLE-FLIGHT (never two probes at once), and FAIL-SAFE: any probe
+#                     failure is logged and swallowed. On RED it opens/updates ONE tracking issue and
+#                     on the next GREEN comments + closes it; while GREEN it makes ZERO gh calls.
 #   POLLER_DEFER_RC / LOCK_DEFER_MAX / LOCK_DEFER_WINDOW / POLLER_BOX_GEN_FILE / POLLER_BOX_GEN
 #                     the LOCK-LIVENESS contract (#173 — the flock singleton must survive a box
 #                     recreate). The --watch lock lives on the HOME VOLUME, which OUTLIVES the poller
@@ -624,6 +639,49 @@ marker_live(){
   printf 'LIVE\n'
 }
 
+# immut_action <probe-rc> <alarm-open:0|1> <staged-streak> <staged-max> <staged-surfaced:0|1>
+#   → SURFACE | CLEAR | QUIET | STAGED_SURFACE | STAGED_QUIET | ERROR      (pure; --selftest covers it)
+#
+# What the immutability-probe tick DOES with the measurement it just took (#317). The probe's exit
+# contract is the whole input: 0 GREEN · 1 RED · 3 STAGED/PARTIAL · 2 usage/harness (and anything else
+# — a crash, a timeout kill — lands in the same bucket).
+#
+#   rc 1  → SURFACE        residue demonstrably survived a build. Create-or-UPDATE the ONE tracking
+#                          issue; a second RED must never open a second issue.
+#   rc 0  → CLEAR / QUIET   the box is clean. CLEAR only when an alarm we opened is standing (comment +
+#                          close); otherwise QUIET — and QUIET means literally ZERO gh calls, because a
+#                          healthy probe that chatters is a healthy probe nobody reads.
+#   rc 3  → STAGED_*       a half could not be measured. NOT an alarm: STAGED is a disclosed undetermined
+#                          state, not a box that failed its check, and crying wolf on it would train the
+#                          maintainer to ignore the one signal that matters. But silence forever is the
+#                          exact failure this objective exists to prevent, so a PERSISTENT STAGED does
+#                          surface — once per episode, at the streak bound.
+#   else  → ERROR          rc 2 / a crash / a timeout. Log it, record it, open nothing: "the probe could
+#                          not run" is a fact about the probe, not about the box's immutability, and
+#                          filing it under a residue alarm would put an untrue claim on the record.
+#
+# A STAGED RUN NEVER CLEARS A STANDING RED. "I could not measure" is not evidence the residue is gone —
+# only a GREEN retires an alarm. Same reasoning as the probe's own ERROR-folds-to-RED rule: an absent
+# measurement must never read as a passing one.
+#
+# THE SURFACED FLAG, NOT A BARE `-eq`, IS WHAT MAKES "ONCE" TRUE AND RETRYABLE. Firing only at
+# streak == max would be "once" until the gh call failed, and then never — the alarm would be lost to a
+# single API blip. Firing at >= max while the episode is unsurfaced retries until it lands, then goes
+# quiet; the caller clears the flag when the streak breaks, so a LATER staged episode surfaces again.
+# max 0 disables the staged surface entirely (an operator's deliberate "I know, stop telling me").
+immut_action(){
+  local rc="${1-}" open="${2:-0}" streak="${3:-0}" max="${4:-0}" surfaced="${5:-0}"
+  case "$rc" in
+    0) [ "$open" = 1 ] && { printf 'CLEAR\n'; return 0; }; printf 'QUIET\n'; return 0 ;;
+    1) printf 'SURFACE\n'; return 0 ;;
+    3) case "$streak$max" in *[!0-9]*) printf 'STAGED_QUIET\n'; return 0 ;; esac
+       [ "$max" -gt 0 ] 2>/dev/null && [ "$streak" -ge "$max" ] && [ "$surfaced" != 1 ] \
+         && { printf 'STAGED_SURFACE\n'; return 0; }
+       printf 'STAGED_QUIET\n'; return 0 ;;
+    *) printf 'ERROR\n'; return 0 ;;
+  esac
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
   ck(){ local got; got="$(plan "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — plan($2,$3,$4,$5)=$got want $6"; fail=1; }; }
@@ -775,6 +833,26 @@ if [ "${1:-}" = "--selftest" ]; then
   tv "unreadable clock, sweep due"   30 30 -1   900 DUE
   tv "disabled tick never fires"     99 0  99999 900 WAIT
   tv "garbage → wait"                x  30 60   900 WAIT
+  # #317 — what the immutability tick does with a measurement. A healthy probe is SILENT (zero gh
+  # calls); only a GREEN retires an alarm; a persistent STAGED surfaces once per episode.
+  im(){ local got; got="$(immut_action "$2" "$3" "$4" "$5" "$6")"; [ "$got" = "$7" ] && echo "ok: $1" || { echo "FAIL: $1 — immut_action($2,$3,$4,$5,$6)=$got want $7"; fail=1; }; }
+  im "RED → surface"                  1 0 0 3 0 SURFACE
+  im "RED again → still surface (update, not a 2nd issue)" 1 1 0 3 0 SURFACE
+  im "GREEN, alarm standing → clear"  0 1 0 3 0 CLEAR
+  im "GREEN, nothing open → QUIET (zero gh calls)" 0 0 0 3 0 QUIET
+  im "STAGED under the bound → quiet" 3 0 1 3 0 STAGED_QUIET
+  im "STAGED at the bound → surface"  3 0 3 3 0 STAGED_SURFACE
+  im "STAGED past the bound, already surfaced → quiet" 3 0 9 3 1 STAGED_QUIET
+  # Retryable: a surface that FAILED to post leaves surfaced=0, so the next run tries again rather than
+  # losing the alarm to one API blip.
+  im "STAGED past the bound, post failed → retry" 3 0 4 3 0 STAGED_SURFACE
+  im "staged surface disabled (max 0)" 3 0 99 0 0 STAGED_QUIET
+  # A STAGED run NEVER clears a standing RED: "could not measure" is not evidence the residue is gone.
+  im "STAGED does not clear a RED alarm" 3 1 1 3 0 STAGED_QUIET
+  im "rc 2 (harness error) → ERROR, no issue" 2 0 0 3 0 ERROR
+  im "crash rc 137 → ERROR, no issue" 137 0 0 3 0 ERROR
+  im "ERROR does not clear a standing alarm" 2 1 0 3 0 ERROR
+  im "garbage streak → quiet"         3 0 x 3 0 STAGED_QUIET
   # #173 — the lock-liveness adjudication. ONLY a positively-confirmed live, same-generation holder
   # defers a start; every doubt resolves toward STARTING (a silently dead poller is unrecoverable).
   lk(){ local got; got="$(lock_verdict "$2" "$3" "$4" "$5")"; [ "$got" = "$6" ] && echo "ok: $1" || { echo "FAIL: $1 — lock_verdict('$2','$3','$4','$5')=$got want $6"; fail=1; }; }
@@ -937,10 +1015,6 @@ FIXER_TIMEOUT="${FIXER_TIMEOUT:-1800}"
 RETIRE_LOOKBACK="${RETIRE_LOOKBACK:-15}"
 # the isolator the fixer runs in (#152). Overridable so poller-fixer.test.sh can drive the REAL sweep.
 FRESH_TREE="${FRESH_TREE:-$HERE/fresh-tree.sh}"
-# the R9 fleet HALT reader (#151). Overridable so the mock suites can pin both directions
-# (poller-fixer.test.sh drives a halted sweep with FLEET_HALT=false, a normal one with FLEET_HALT=true).
-FLEET_HALT="${FLEET_HALT:-$HERE/fleet-halt.sh}"
-POLLER_HALTED=0
 # the independent fitness harness the REVIEW arm runs. Overridable (same reason as FRESH_TREE) so
 # fitness-review.test.sh can drive the REAL sweep against a scripted reviewer outcome.
 FITNESS_REVIEW="${FITNESS_REVIEW:-$HERE/fitness-review.sh}"
@@ -957,8 +1031,8 @@ FITNESS_RETRY_BACKOFF="${FITNESS_RETRY_BACKOFF:-300}"
 # was absorbed as N per-head failures and PARKED EVERY PR permanently (the incident). The gate adds the
 # distinction the cheapest way: when a review FAILS (rc 3), a tiny `claude -p` liveness PROBE disambiguates
 # — DOWN ⇒ this is global, so DON'T strike the head; PAUSE the arm for the sweep (no strikes, no questions)
-# and skip the remaining reviews; it SELF-HEALS the next sweep once the probe passes (the fleet-halt PAUSE
-# pattern). UP ⇒ genuinely per-head ⇒ the bounded retry above. Probe-ON-FAILURE, so a sweep whose reviews
+# and skip the remaining reviews; it SELF-HEALS the next sweep once the probe passes (a PAUSE,
+# not a strike). UP ⇒ genuinely per-head ⇒ the bounded retry above. Probe-ON-FAILURE, so a sweep whose reviews
 # all SUCCEED pays NOTHING (a success IS the health signal). Disable with FITNESS_INFRA_CHECK=0 (⇒ the old
 # behaviour). A persistent outage past FITNESS_INFRA_PAUSE_SURFACE seconds surfaces ONE question (so a
 # never-recovering break is never a SILENT stall) — but the arm keeps auto-resuming, no human required.
@@ -1026,6 +1100,41 @@ RECONCILE_TICKS=0
 SHIP_ACTUATOR="${SHIP_ACTUATOR:-$HERE/ship-actuator.sh}"
 SHIP_ACTUATOR_EVERY="${SHIP_ACTUATOR_EVERY:-60}"
 SHIP_ACTUATOR_TICKS=0
+# IMMUTABILITY PROBE (#317) — objective #310's third scope bullet: *"The check runs on its own,
+# repeatedly — immutability is currently true by construction and by nobody's measurement."* A probe only
+# a human remembers to run is still nobody's measurement, so the pair measures ITSELF on a clock and a
+# RED is impossible to miss. Same wiring shape as the ticks above; see immutability_probe_tick().
+#
+# THE CADENCE IS RARE BY DESIGN, and the reason is COST, not caution: one run is a real
+# `build-throwaway.sh` cycle (three of them, in fact) on this box PLUS a bus round-trip that makes the
+# host build a disposable candidate of its own. 2880 sweeps ≈ 24 h at the 30 s POLL_INTERVAL. 0 disables;
+# a lone `--once` fires it only under =1 (the manual catch-up / test seam, since each --once is a fresh
+# process whose counter starts at 0).
+IMMUTABILITY_PROBE="${IMMUTABILITY_PROBE:-$HERE/immutability-probe.sh}"
+IMMUTABILITY_PROBE_EVERY="${IMMUTABILITY_PROBE_EVERY:-2880}"
+IMMUTABILITY_PROBE_TICKS=0
+# The DURABLE record — the measurement must outlive the log buffer (a poller log is rotated/truncated and
+# a `--watch` restart loses the scrollback; a verdict nobody can read tomorrow is not a measurement).
+# bin/immutability-probe.sh --status READS this; THIS tick WRITES it. That split is deliberate: the tick
+# owns the record because the probe is invoked through a SEAM (a fake probe in the suite must still leave
+# a real record), and the format contract between the two files is pinned end-to-end by
+# poller-immutability.test.sh rather than by two copies of a parser.
+IMMUT_STATE="${IMMUT_STATE:-$HOME/.local/state/immutability-probe}"
+IMMUT_HISTORY_MAX="${IMMUT_HISTORY_MAX:-100}"
+# A STAGED verdict is a disclosed undetermined state, not an alarm — but a PERMANENTLY unmeasurable half
+# must not masquerade as quiet health (the silent-degradation case objective #310 exists to prevent), so
+# this many CONSECUTIVE STAGED runs surface once. 0 disables that surface.
+IMMUT_STAGED_MAX="${IMMUT_STAGED_MAX:-3}"
+# Bounds. The probe already bounds its own host wait; this is the belt that keeps a wedged probe from
+# holding the sweep loop open forever (R39 — a tick must never be the thing that stops the loop).
+IMMUT_PROBE_TIMEOUT="${IMMUT_PROBE_TIMEOUT:-3600}"
+IMMUT_GH_TIMEOUT="${IMMUT_GH_TIMEOUT:-60}"
+IMMUT_ALARM_REPO="${IMMUT_ALARM_REPO:-oso-gato/fedora-dev}"
+IMMUT_ALARM_TITLE="${IMMUT_ALARM_TITLE:-🔴 immutability RED — a build left residue behind}"
+# A STAGED alarm is a DIFFERENT claim from a RED one and gets its own stable title. Filing "the probe
+# could not measure a half" under a title asserting residue was found would ship an untrue claim on the
+# one artifact whose whole job is to be believed.
+IMMUT_STAGED_TITLE="${IMMUT_STAGED_TITLE:-🟡 immutability UNMEASURED — the probe cannot measure a half}"
 # ── DEV-LOOP LAUNCH (self-arm the authoring loop, 2026-07-19) ────────────────────────────────────────
 # The authoring loop (dev-loop-service.sh) is launched by entrypoint.sh — but entrypoint.sh is
 # IMAGE-BAKED, so on a box whose RUNNING image predates the loop, NOTHING launches it until a rebuild.
@@ -1487,10 +1596,28 @@ FIX_EOF
   # 3) THE HARNESS PUSHES — and only when the model actually committed and did not declare BLOCKED. The
   # refspec is EXPLICIT (HEAD:refs/heads/<ref>): this push can name no destination but the feature ref,
   # least of all main. Then VERIFY AT ORIGIN — the push's exit code is not evidence the fix landed.
-  local head prc=0 remote=""
+  local head prc=0 remote="" perr=""
   head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
   if [ "$bflag" = 0 ] && [ -n "$head" ] && [ "$head" != "$sha" ]; then
-    git -C "$wt" push -q origin "HEAD:refs/heads/$ref" >/dev/null 2>&1 || prc=1
+    # --force-with-lease PINNED TO THE GATED HEAD, and it is a CORRECTNESS fix, not a loosening.
+    #
+    # THE DEFECT (observed live 2026-07-30 on #328): the fixer is told not to push, but NOTHING stops
+    # it from bringing `main` into its worktree — and a fitness RETURN whose finding is "CI is red"
+    # practically REQUIRES it, since the branch cannot be tested against a main it predates. Doing so
+    # rewrites the branch's lineage relative to origin's, so this plain push was rejected
+    # `non-fast-forward` and the fix could NEVER land. The head therefore never moved, fitness
+    # re-read byte-identical code, returned the identical verdict, and the poller re-spawned a
+    # 30-minute model run every ~30 minutes — FOUR times, zero progress, ~2h of model time burned.
+    # The bound that should have caught it keys on the failure REPEATING; this failure was perfectly
+    # repeatable and still ran, because nothing keyed on the head STANDING STILL.
+    #
+    # WHY THE LEASE IS SAFE, and why a bare --force would not be. The lease pins origin/<ref> to
+    # $sha — the exact gated head this worktree was cut from — so the push lands ONLY if nobody else
+    # moved the branch, and is REFUSED (not resolved by clobbering) if anyone did. Combined with the
+    # explicit refspec, which can name no destination but this feature ref, the blast radius is
+    # unchanged: it cannot reach `main`, and it cannot overwrite a concurrent push. A bare --force
+    # WOULD silently discard a racing commit, so it is deliberately not used.
+    perr="$(git -C "$wt" push --force-with-lease="refs/heads/$ref:$sha" origin "HEAD:refs/heads/$ref" 2>&1)" || prc=1
     remote="$(git -C "$wt" ls-remote origin "refs/heads/$ref" 2>/dev/null | awk 'NR==1{print $1}')"
   fi
 
@@ -1504,8 +1631,14 @@ FIX_EOF
       log "FIXER NO-COMMIT $SLUG#$pr @ ${sha:0:7} — the fixer committed nothing (timeout / no progress); nothing pushed"
       surface "$pr" "$sha" "blocked" "the fixer run finished without committing anything (it timed out, or could not make progress) — nothing was pushed and the head is unchanged. Failing gate: ${cause}. A human decision is needed." ;;
     PUSH_FAILED)
-      log "FIXER PUSH FAILED $SLUG#$pr — committed ${head:0:7} but the push to $ref errored; the fix did NOT land"
-      surface "$pr" "$sha" "blocked" "the fixer committed a fix but \`git push\` to \`$ref\` FAILED — the fix did NOT land (check credentials / branch protection). Nothing was merged." ;;
+      # REPORT GIT'S OWN ERROR, never a guess. The previous text asserted "check credentials /
+      # branch protection" for EVERY push failure; the live #328 case was `non-fast-forward` — the
+      # credential and the rulesets were both fine — so the one line a human reads to diagnose the
+      # stall pointed at two things that were not wrong, and the actual cause appeared nowhere in
+      # the log. A harness that guesses a cause it could have PRINTED is lying to its operator.
+      local _pe; _pe="$(printf '%s' "$perr" | tail -4 | tr '\n' ' ' | cut -c1-400)"
+      log "FIXER PUSH FAILED $SLUG#$pr — committed ${head:0:7} but the push to $ref errored; the fix did NOT land: ${_pe:-<no stderr captured>}"
+      surface "$pr" "$sha" "blocked" "the fixer committed a fix but \`git push\` to \`$ref\` FAILED — the fix did NOT land. Git said: \`${_pe:-<no stderr captured>}\`. Nothing was merged." ;;
     NOT_LANDED)
       log "FIXER DID NOT LAND $SLUG#$pr — push reported success but origin/$ref holds ${remote:0:7}, not the fix ${head:0:7}"
       surface "$pr" "$sha" "blocked" "the fixer committed \`${head:0:7}\` and the push reported SUCCESS, but \`origin/$ref\` did not advance to it — the fix did NOT land. A human should check the remote / branch protection." ;;
@@ -1567,19 +1700,14 @@ retire_superseded(){
 }
 
 # HOST-REFRESH tick (#163) — see the HOST_REFRESH config block above; the design lives in
-# bin/host-refresh.sh's header. Called at the END of sweep(), so POLLER_HALTED is THIS tick's halt
-# read (filing a redeploy ticket / surfacing a host-apply question is an ACTION — R9 gates it like
-# every other action) and no sweep work is in flight. Failures are logged and SWALLOWED: a missed
+# bin/host-refresh.sh's header. Called at the END of sweep(), so no sweep work is in flight.
+# Failures are logged and SWALLOWED: a missed
 # scan degrades to the status quo (the monthly workload-refresh timer), never to a stopped loop.
 host_refresh_tick(){
   [ "${HOST_REFRESH_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
   HOST_REFRESH_TICKS=$((HOST_REFRESH_TICKS+1))
   tick_due host-refresh "$HOST_REFRESH_TICKS" "$HOST_REFRESH_EVERY" || return 0
   HOST_REFRESH_TICKS=0; tick_ran host-refresh
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "host-refresh: R9 HALT — scan skipped this tick (no ticket filed, no comment posted; resumes when the halt clears)"
-    return 0
-  fi
   "$HOST_REFRESH_SCAN" --once 2>&1 | tee -a "$LOG" >&2 \
     || log "host-refresh: scan failed (continuing — a missed redeploy degrades to the monthly timer)"
   return 0
@@ -1594,10 +1722,6 @@ reconcile_tick(){
   RECONCILE_TICKS=$((RECONCILE_TICKS+1))
   tick_due reconcile "$RECONCILE_TICKS" "$RECONCILE_EVERY" || return 0
   RECONCILE_TICKS=0; tick_ran reconcile
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "reconcile: R9 HALT — scan skipped this tick (no issue closed; resumes when the halt clears)"
-    return 0
-  fi
   "$RECONCILE_SCAN" --once 2>&1 | tee -a "$LOG" >&2 \
     || log "reconcile: scan failed (continuing — an unclosed issue stays OPEN for the next scan)"
   return 0
@@ -1615,10 +1739,6 @@ ship_actuator_tick(){
   SHIP_ACTUATOR_TICKS=$((SHIP_ACTUATOR_TICKS+1))
   tick_due ship "$SHIP_ACTUATOR_TICKS" "$SHIP_ACTUATOR_EVERY" || return 0
   SHIP_ACTUATOR_TICKS=0; tick_ran ship
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "ship-actuator: R9 HALT — skipped this tick (no gate run, no ship announced; resumes when the halt clears)"
-    return 0
-  fi
   # EVERY scoped repo gets a tick — not just whichever one $POLLER_REPO happens to be holding. The sweep
   # loop above reassigns POLLER_REPO per repo and leaves it holding the LAST repo swept, so the actuator
   # only ever considered that one arbitrary repo. e2e-beta received its ticks purely because it sorted
@@ -1629,6 +1749,222 @@ ship_actuator_tick(){
     "$SHIP_ACTUATOR" "$_sr" 2>&1 | tee -a "$LOG" >&2 \
       || log "ship-actuator: $_sr tick failed (continuing — that objective stays open for the next tick)"
   done
+  return 0
+}
+
+# ── IMMUTABILITY PROBE tick (#317) ──────────────────────────────────────────────────────────────────
+# Objective #310's third scope bullet, made real: the pair measures its OWN immutability on a clock, and
+# a RED becomes impossible to miss. Everything below is plumbing around ONE decision — immut_action(),
+# the pure core above — plus a durable record, because a verdict that lives only in a log buffer is a
+# measurement nobody can consult tomorrow.
+
+# immut_find_issue <title> — the standing alarm's number, discovered BY TITLE. The marker file is the
+# fast path; this is the belt for a marker lost to a box recreate, so a wiped state can never double-file
+# (the bin/apparatus-deadman.sh precedent). Title matched EXACTLY in the shell, not interpolated into a
+# jq filter — the titles carry an em-dash and an emoji and have no business being parsed as a program.
+immut_find_issue(){
+  local want="$1" n ttl
+  timeout "$IMMUT_GH_TIMEOUT" gh issue list --repo "$IMMUT_ALARM_REPO" --state open --limit 100 \
+    --json number,title -q '.[] | "\(.number)\t\(.title)"' 2>/dev/null |
+  while IFS=$'\t' read -r n ttl; do
+    [ "$ttl" = "$want" ] && { printf '%s\n' "$n"; break; }
+  done
+}
+
+# immut_surface <title> <marker-file> <body-file> — create-or-UPDATE the ONE tracking issue. rc 0 only
+# when the write actually landed, which is what makes the caller's "surfaced" flag honest: a failed post
+# leaves the flag unset and the next tick retries rather than losing the alarm to one API blip.
+immut_surface(){
+  local title="$1" mk="$2" bodyf="$3" num url
+  num="$(cat "$mk" 2>/dev/null)"; case "$num" in ''|*[!0-9]*) num="";; esac
+  [ -n "$num" ] || num="$(immut_find_issue "$title")"
+  case "$num" in ''|*[!0-9]*) num="";; esac
+  if [ -n "$num" ]; then
+    if timeout "$IMMUT_GH_TIMEOUT" gh issue edit "$num" --repo "$IMMUT_ALARM_REPO" --body-file "$bodyf" >/dev/null 2>&1; then
+      printf '%s\n' "$num" > "$mk" 2>/dev/null || :
+      log "immutability-probe: updated the standing alarm $IMMUT_ALARM_REPO#$num (no duplicate filed)"
+      return 0
+    fi
+    log "immutability-probe: FAILED to update $IMMUT_ALARM_REPO#$num (gh error) — retrying next tick"
+    return 1
+  fi
+  if url="$(timeout "$IMMUT_GH_TIMEOUT" gh issue create --repo "$IMMUT_ALARM_REPO" --title "$title" --body-file "$bodyf" 2>/dev/null)"; then
+    num="${url##*/}"; case "$num" in ''|*[!0-9]*) num="";; esac
+    [ -n "$num" ] && { printf '%s\n' "$num" > "$mk" 2>/dev/null || :; }
+    log "immutability-probe: opened the alarm on $IMMUT_ALARM_REPO (${url:-created})"
+    return 0
+  fi
+  log "immutability-probe: FAILED to open the alarm issue (gh error) — retrying next tick"
+  return 1
+}
+
+# immut_clear <marker-file> <what> — comment + close a standing alarm. QUIET when nothing is open: it
+# acts ONLY on a marker naming an issue we opened, which is what keeps a healthy steady state at ZERO
+# gh calls. The marker is dropped whatever gh says: a close that failed leaves an issue a human can
+# close, whereas a marker kept forever would re-attempt the same close every tick (R4).
+immut_clear(){
+  local mk="$1" what="$2" num
+  num="$(cat "$mk" 2>/dev/null)"; case "$num" in ''|*[!0-9]*) num="";; esac
+  [ -n "$num" ] || return 0
+  timeout "$IMMUT_GH_TIMEOUT" gh issue comment "$num" --repo "$IMMUT_ALARM_REPO" \
+    --body "**Immutability probe → operator [cleared]:** the probe measured GREEN on $(date -u +%Y-%m-%dT%H:%M:%SZ) — $what. Closing." >/dev/null 2>&1
+  timeout "$IMMUT_GH_TIMEOUT" gh issue close "$num" --repo "$IMMUT_ALARM_REPO" >/dev/null 2>&1
+  log "immutability-probe: CLEARED — commented + closed $IMMUT_ALARM_REPO#$num ($what)"
+  rm -f "$mk" 2>/dev/null || :
+  return 0
+}
+
+# immut_body <kind> <verdict-line> <rc> <at> <dev> <host> <ticket> <residue> <report> → the alarm body.
+# It carries exactly what the issue promises: the verdict line, the RESIDUE lines, WHICH BOX, and the
+# host ticket URL — so the alarm is actionable without opening a shell on either box.
+immut_body(){
+  local kind="$1" line="$2" rc="$3" at="$4" dev="$5" host="$6" ticket="$7" residue="$8" report="$9"
+  if [ "$kind" = RED ]; then
+    printf '**Immutability probe → operator [RED]:** a build left residue behind.\n\n'
+    printf 'BP5 / Principle 10 says a throwaway build leaves NOTHING behind. This run MEASURED otherwise.\n\n'
+  else
+    printf '**Immutability probe → operator [UNMEASURED]:** the probe has been STAGED for %s consecutive runs.\n\n' "${IMMUT_STAGED_MAX}"
+    printf 'This is NOT a residue failure — nothing was found. It is the opposite problem: a half of the\n'
+    printf 'pair cannot be measured at all, and an unmeasurable check that stays quiet is indistinguishable\n'
+    printf 'from a healthy one. That silent degradation is what objective #310 exists to prevent, so it is\n'
+    printf 'surfaced once rather than left to look like health.\n\n'
+  fi
+  printf '```\n%s\n```\n\n' "$line"
+  printf '| | |\n|---|---|\n'
+  printf '| measured at | `%s` |\n' "$at"
+  printf '| probe rc | `%s` |\n' "$rc"
+  printf '| dev box (`fedora-dev` / nox) | **%s** |\n' "${dev:-?}"
+  printf '| host box (`fedora-bootstrap` / erebus) | **%s** |\n' "${host:-?}"
+  printf '| host ticket | %s |\n\n' "${ticket:-_none filed_}"
+  if [ -n "$residue" ]; then
+    printf '### Residue that survived the cycle\n\n```\n%s\n```\n\n' "$residue"
+  fi
+  printf '### Full probe report\n\n```\n%s\n```\n\n' "$report"
+  printf -- '---\n'
+  printf 'Filed by the `pr-poller.sh` immutability tick (#317). It updates this issue on each further\n'
+  printf 'non-GREEN run and CLOSES it automatically on the next GREEN — so a stale alarm here means the\n'
+  printf 'condition is still live, not that nobody tidied up.\n'
+  printf '\n<sub>Reading the last recorded measurement without re-running the build: `bin/immutability-probe.sh --status`.</sub>\n'
+}
+
+# immut_measure — take ONE measurement, record it durably, and route the verdict. Called under the
+# single-flight lock. Returns 0 ALWAYS (R39: a tick must never be the thing that stops the loop).
+immut_measure(){
+  local out rc at line verdict dev host ticket residue streak surfaced open action bodyf n
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  log "immutability-probe: measuring (a real build cycle on this box + a host round-trip over the bus) — bounded at ${IMMUT_PROBE_TIMEOUT}s"
+  out="$(timeout "$IMMUT_PROBE_TIMEOUT" "$IMMUTABILITY_PROBE" all 2>&1)"; rc=$?
+
+  # Line 1 is the probe's machine-readable contract: `immutability-probe: <overall> dev=<v> host=<v>`.
+  line="$(printf '%s\n' "$out" | grep -m1 '^immutability-probe: ')"
+  verdict="$(printf '%s' "$line" | sed -n 's/^immutability-probe: \([A-Z]*\).*/\1/p')"
+  [ -n "$verdict" ] || verdict=UNKNOWN
+  dev="$(printf '%s' "$line" | sed -n 's/.*dev=\([A-Z]*\).*/\1/p')"
+  host="$(printf '%s' "$line" | sed -n 's/.*host=\([A-Z]*\).*/\1/p')"
+  # The host ticket URL as PROVENANCE. Matched as "the first URL in the report" rather than against a
+  # fixed prefix, so it keeps working whatever sentence the host half wraps it in.
+  ticket="$(printf '%s\n' "$out" | grep -m1 -o 'https\?://[^[:space:]]*')"
+  residue="$(printf '%s\n' "$out" | grep '^RESIDUE ' || :)"
+
+  # ---- the DURABLE record (bin/immutability-probe.sh --status reads exactly these keys) ----
+  {
+    printf 'verdict: %s\n' "$verdict"
+    printf 'rc: %s\n'      "$rc"
+    printf 'at: %s\n'      "$at"
+    printf 'dev: %s\n'     "${dev:--}"
+    printf 'host: %s\n'    "${host:--}"
+    printf 'ticket: %s\n'  "${ticket:--}"
+    printf 'line: %s\n'    "${line:-(the probe produced no verdict line)}"
+  } > "$IMMUT_STATE/last.tmp" 2>/dev/null && mv -f "$IMMUT_STATE/last.tmp" "$IMMUT_STATE/last" 2>/dev/null || \
+    log "immutability-probe: could not write the verdict record to $IMMUT_STATE/last (continuing)"
+
+  # The bounded history — "has this ever been GREEN, and when did it start failing" must be answerable
+  # from the box itself, without GitHub and without the log buffer.
+  printf '%s rc=%s %s dev=%s host=%s\n' "$at" "$rc" "$verdict" "${dev:--}" "${host:--}" \
+    >> "$IMMUT_STATE/history" 2>/dev/null || :
+  if [ -f "$IMMUT_STATE/history" ]; then
+    tail -n "$IMMUT_HISTORY_MAX" "$IMMUT_STATE/history" > "$IMMUT_STATE/history.tmp" 2>/dev/null \
+      && mv -f "$IMMUT_STATE/history.tmp" "$IMMUT_STATE/history" 2>/dev/null || :
+  fi
+
+  # ---- the STAGED streak (consecutive unmeasurable runs) ----
+  streak="$(cat "$IMMUT_STATE/staged.streak" 2>/dev/null)"; case "$streak" in ''|*[!0-9]*) streak=0;; esac
+  if [ "$rc" = 3 ]; then
+    streak=$((streak + 1))
+  else
+    streak=0
+    rm -f "$IMMUT_STATE/staged.surfaced" 2>/dev/null || :   # a new episode surfaces again
+  fi
+  printf '%s\n' "$streak" > "$IMMUT_STATE/staged.streak" 2>/dev/null || :
+  surfaced=0; [ -e "$IMMUT_STATE/staged.surfaced" ] && surfaced=1
+
+  # An alarm of EITHER kind counts as standing, so a GREEN retires whichever one is open — and QUIET
+  # (zero gh calls) still holds when neither is.
+  open=0
+  for n in "$IMMUT_STATE/alarm.open" "$IMMUT_STATE/staged-alarm.open"; do
+    [ -s "$n" ] && open=1
+  done
+
+  action="$(immut_action "$rc" "$open" "$streak" "$IMMUT_STAGED_MAX" "$surfaced")"
+  log "immutability-probe: $verdict (rc=$rc) dev=${dev:--} host=${host:--}${ticket:+ · ticket $ticket} → $action"
+
+  case "$action" in
+    SURFACE)
+      bodyf="$(mktemp 2>/dev/null)" || { log "immutability-probe: mktemp failed — cannot compose the alarm body (retrying next tick)"; return 0; }
+      immut_body RED "$line" "$rc" "$at" "$dev" "$host" "$ticket" "$residue" "$out" > "$bodyf" 2>/dev/null
+      immut_surface "$IMMUT_ALARM_TITLE" "$IMMUT_STATE/alarm.open" "$bodyf" || :
+      rm -f "$bodyf" 2>/dev/null || :
+      ;;
+    STAGED_SURFACE)
+      bodyf="$(mktemp 2>/dev/null)" || { log "immutability-probe: mktemp failed — cannot compose the staged notice (retrying next tick)"; return 0; }
+      immut_body STAGED "$line" "$rc" "$at" "$dev" "$host" "$ticket" "$residue" "$out" > "$bodyf" 2>/dev/null
+      # The flag is set ONLY on a landed post, so "surface it once" cannot silently become "never".
+      if immut_surface "$IMMUT_STAGED_TITLE" "$IMMUT_STATE/staged-alarm.open" "$bodyf"; then
+        : > "$IMMUT_STATE/staged.surfaced" 2>/dev/null || :
+      fi
+      rm -f "$bodyf" 2>/dev/null || :
+      ;;
+    CLEAR)
+      immut_clear "$IMMUT_STATE/alarm.open"        "the residue is gone"
+      immut_clear "$IMMUT_STATE/staged-alarm.open" "both halves are measurable again"
+      ;;
+    STAGED_QUIET)
+      log "immutability-probe: STAGED run $streak of $IMMUT_STAGED_MAX before this is surfaced — recorded, no issue opened (an undetermined state is not an alarm)"
+      ;;
+    ERROR)
+      log "immutability-probe: the probe could not produce a verdict (rc=$rc) — recorded, NO issue opened: that is a fact about the probe, not about the box. Last lines: $(printf '%s' "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)"
+      ;;
+    QUIET) : ;;   # healthy and silent — deliberately zero gh calls
+  esac
+  return 0
+}
+
+# IMMUTABILITY PROBE tick (#317) — see the IMMUTABILITY_PROBE config block above. Same discipline as
+# host_refresh_tick/reconcile_tick: END of a sweep tick, R9-halt-gated (starting a build on BOTH boxes
+# and filing a bus ticket are ACTIONS), rate-limited through the elapsed-time-aware tick_due so a
+# self-refresh relaunch cannot reset a 2880-sweep cadence to never-fires — the starvation #300 caused
+# for the other actuator ticks would be far worse here, since this tick is the RAREST of them all and a
+# reset counter would mean the box is never measured at all while main is advancing.
+# SINGLE-FLIGHT: a probe already in flight (a concurrent poller, or a maintainer's manual run) is left
+# alone rather than raced — two probes would each stage a kill-9 leak and then witness the OTHER's, which
+# would manufacture exactly the residue this tick exists to detect. FAIL-SAFE throughout: every failure
+# is logged and swallowed, and the tick always returns 0.
+immutability_probe_tick(){
+  [ "${IMMUTABILITY_PROBE_EVERY:-0}" -gt 0 ] 2>/dev/null || return 0
+  IMMUTABILITY_PROBE_TICKS=$((IMMUTABILITY_PROBE_TICKS+1))
+  tick_due immutability "$IMMUTABILITY_PROBE_TICKS" "$IMMUTABILITY_PROBE_EVERY" || return 0
+  IMMUTABILITY_PROBE_TICKS=0; tick_ran immutability
+  [ -x "$IMMUTABILITY_PROBE" ] || { log "immutability-probe: $IMMUTABILITY_PROBE is not executable — nothing measured this tick"; return 0; }
+  mkdir -p "$IMMUT_STATE" 2>/dev/null || { log "immutability-probe: cannot create $IMMUT_STATE — nothing measured this tick"; return 0; }
+  # No flock ⇒ single-flight is UNENFORCEABLE, and the fail direction is SKIP: two concurrent probes
+  # would each stage a kill-9 leak and then witness the OTHER's, manufacturing exactly the residue this
+  # tick exists to detect — a FALSE RED is worse than a missed run, which is itself loud (the record ages
+  # and `--status` says so). Named for its real cause, never reported as "already in flight".
+  command -v flock >/dev/null 2>&1 || { log "immutability-probe: flock is unavailable, so single-flight cannot be enforced — skipping (two concurrent probes would witness each other's staged leaks and manufacture a false RED)"; return 0; }
+  (
+    flock -n 8 || { log "immutability-probe: a probe is already in flight (another poller, or a manual run) — skipping this tick rather than racing it"; exit 0; }
+    immut_measure
+  ) 8>>"$IMMUT_STATE/probe.lock" || :
   return 0
 }
 
@@ -1646,10 +1982,6 @@ dev_loop_launch_tick(){
   [ "$DEV_LOOP_LAUNCH_TICKS" -ge "$DEV_LOOP_LAUNCH_EVERY" ] || return 0
   DEV_LOOP_LAUNCH_TICKS=0
   [ "${DEV_LOOP_ENABLED:-1}" != 0 ] || return 0   # #220 self-arm gate: default ON; explicit =0 disables
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "dev-loop-launch: R9 HALT — not launching the authoring loop this tick (resumes when the halt clears)"
-    return 0
-  fi
   [ -x "$DEV_LOOP_SERVICE" ] || { log "dev-loop-launch: $DEV_LOOP_SERVICE not executable — skipping (degrades to the entrypoint's launch on the next rebuild)"; return 0; }
   if "$DEV_LOOP_SERVICE" --is-live 2>/dev/null; then
     return 0    # a live authoring loop already holds it — nothing to do (quiet: this is the steady state)
@@ -1671,10 +2003,6 @@ rebuild_request_tick(){
   [ "$REBUILD_REQUEST_TICKS" -ge "$REBUILD_REQUEST_EVERY" ] || return 0
   REBUILD_REQUEST_TICKS=0
   [ -e "$REBUILD_REQUEST_FLAG" ] || return 0
-  if [ "${POLLER_HALTED:-0}" = 1 ]; then
-    log "rebuild-request: R9 HALT — not filing the approval ticket this tick (flag kept; resumes when the halt clears)"
-    return 0
-  fi
   [ -x "$REBUILD_REQUEST_SCRIPT" ] || { log "rebuild-request: $REBUILD_REQUEST_SCRIPT not executable — skipping (flag kept)"; return 0; }
   if "$REBUILD_REQUEST_SCRIPT" file 2>&1 | tee -a "$LOG" >&2; then
     rm -f "$REBUILD_REQUEST_FLAG" 2>/dev/null || :
@@ -1688,25 +2016,14 @@ rebuild_request_tick(){
 # ORG-WIDE wrapper (P0 uniform loop): one tick sweeps EVERY apparatus repo through the SAME harness,
 # re-setting POLLER_REPO/SLUG per repo. sweep_repo() is the original single-repo body unchanged.
 #
-# R9 FLEET HALT (#151): the fleet-wide stop switch is read ONCE at the TOP of every tick — BEFORE any
-# model run is spawned, any merge taken, any retire close, any comment posted (R9's bound is "within
-# one sweep"). rc 0 alone means GO; ANY other outcome — a maintainer HALT, or a checker that is missing
-# or crashed — makes the whole tick OBSERVE-ONLY: sweep_repo still enumerates and logs what it WOULD do,
-# so the operator sees the queue, but acts on nothing and writes no state marker. This branch is
-# unchanged by #274; what changed is UPSTREAM, inside the checker: an UNREADABLE signal no longer
-# escalates to HALT — it returns rc 0 (GO), loudly, so internet weather can no longer freeze the fleet
-# (935 halts, ZERO maintainer-thrown: bin/fleet-halt.sh). The poller does NOT exit: HALT stops NEW action, not
-# running work (in-flight fixer/merge completes; the hard kill is App-key revocation, per R9), and a
-# maintainer removing the label resumes action on the very next sweep — no restart, no re-arm.
+# NO SOFT STOP IS READ HERE. The maintainer-thrown HALT label was RETIRED 2026-07-30 (R9): thrown by a
+# maintainer 0 times ever, fired by itself 935 times (all false), suppressing 338 real actions — one of
+# them the ticket that would have repaired a six-day outage. It duplicated two stronger stops that need
+# no code (App-key revocation, container stop) and depended on GitHub being readable, so it failed
+# exactly when an outage made it matter. Stopping this loop is now: revoke the key, or stop the box.
 sweep(){
-  local _r _hmsg
+  local _r
   REVIEW_INFRA=""   # reviewer-infra health is a per-SWEEP fact (global across all repos) — re-probed lazily on the first review failure this sweep
-  if _hmsg="$("$FLEET_HALT" 2>>"$LOG")"; then
-    POLLER_HALTED=0
-  else
-    POLLER_HALTED=1
-    log "FLEET HALT: ${_hmsg:-halt checker unavailable (fail-closed toward stopping)} — OBSERVE-ONLY tick: no fixer, no review, no merge, no retire, no comment"
-  fi
   # R16 OPERATING SCOPE (#167): every swept repo is re-checked against the maintainer-confirmed
   # scope EVERY tick, whatever put it in $POLLER_REPOS (env, a stale process, a mutated default).
   # Out of scope ⇒ NO action of any kind — no sweep, no fixer, no review, no merge, no retire —
@@ -1722,13 +2039,14 @@ sweep(){
   host_refresh_tick
   reconcile_tick
   ship_actuator_tick
+  immutability_probe_tick
   dev_loop_launch_tick
   rebuild_request_tick
 }
 sweep_repo(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"
   # R9 HALT (#151): a halted tick retires nothing — a close is an ACTION, reversible or not.
-  [ "${POLLER_HALTED:-0}" = 1 ] || retire_superseded
+  retire_superseded
   # BATCHED list: ONE call yields number+ref+sha as TSV — the old per-PR headRefName/headRefOid
   # re-fetches duplicated fields this same list already carried (2 calls/PR saved). Branch names
   # cannot contain tabs, so TSV framing is safe; ref+sha come from the SAME list snapshot as the
@@ -1844,10 +2162,6 @@ sweep_repo(){
     # R9 HALT (#151): OBSERVE-ONLY — the decision above is LOGGED (the operator sees the queue) but not
     # acted on: no fixer model run, no review model run, no merge, no PRESENT/blocked comment — and no
     # state marker is written, so a halted sweep can never park, dedup or no-progress-signature a PR.
-    if [ "${POLLER_HALTED:-0}" = 1 ]; then
-      [ "$action" = NOOP ] || log "#$pr ${sha:0:7} HALTED — $action not taken (R9 fleet HALT; resumes the sweep after the halt clears)"
-      continue
-    fi
     case "$action" in
       NOOP)
         # R18 IDLE-WITH-WORK-PENDING (kd#23; audit 2026-07-18 CAT-42/01). host=NONE means no host verdict
@@ -2155,7 +2469,7 @@ case "${1:-}" in
       # destroyed rootfs. Anything already resolved keeps working (bash, date, grep) and anything looked
       # up fresh does not — `gh` vanishes with the deleted upper layer. The poller then sweeps forever,
       # fails every call, and looks perfectly healthy: process alive, log advancing, clone not behind.
-      # That state stood for SIX DAYS and self-inflicted a fleet-wide R9 HALT (fleet-halt.sh reads its
+      # That state stood for SIX DAYS and self-inflicted a fleet-wide stop (the since-retired halt read its
       # signal only through `gh api`), which then gated the very ticket that could have repaired the box.
       # Exiting is the ONLY correct move — the supervisor cannot relaunch us into the live box until we
       # let go. Advisory by construction: box-generation.sh returns 0 on ANY uncertainty, so an

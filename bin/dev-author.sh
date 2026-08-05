@@ -270,10 +270,21 @@ REPO_LABELS="${REPO_LABELS:-$HERE/repo-labels.sh}"
 [ -x "$REPO_LABELS" ] && { "$REPO_LABELS" ensure "$REPO" >/dev/null || log "label contract could not be established on $SLUG — the PR may not enrol (continuing)"; }
 CLONE_ROOT="${CLONE_ROOT:-$HOME/repos}"
 _src="$REPO"; [ -d "$_src/.git" ] || _src="$CLONE_ROOT/$REPO"
+# THE OBJECT CACHE COMES FIRST (#319). This provisioning is where the loop paid a repo's ENTIRE history
+# over the wire, once per lost clone — every repo newly brought in scope, every clone lost to a box
+# recreate. `git-object-cache.sh clone` materialises the same clone from a persistent bare mirror on the
+# home volume, so fifty author runs against a repo cost that repo's history ONCE.
+# IT OBEYS THIS BLOCK'S DESIGN RULE — it only ever HELPS: a missing helper, an unusable cache, an
+# unreachable origin or a mirror it refuses to link are all just rc≠0, and the full network clone below
+# still runs exactly as before. It introduces no new failure path, only a cheaper first attempt.
+# KEEP ITS STDERR, for the same reason the label contract above does: those lines are the only record of
+# whether the cache served this clone, went stale, or was bypassed. Only stdout (the path) is dropped.
+GIT_OBJECT_CACHE="${GIT_OBJECT_CACHE:-$HERE/git-object-cache.sh}"
 if [ ! -d "$_src/.git" ]; then
   log "no local clone of $SLUG — provisioning one (in-scope; isolation needs it)"
   mkdir -p "$CLONE_ROOT" 2>/dev/null
-  gh repo clone "$SLUG" "$CLONE_ROOT/$REPO" -- --quiet >/dev/null 2>&1 || true
+  [ -x "$GIT_OBJECT_CACHE" ] && { "$GIT_OBJECT_CACHE" clone "$SLUG" "$CLONE_ROOT/$REPO" >/dev/null || log "object cache did not provision $SLUG — falling through to a full clone"; }
+  [ -d "$CLONE_ROOT/$REPO/.git" ] || gh repo clone "$SLUG" "$CLONE_ROOT/$REPO" -- --quiet >/dev/null 2>&1 || true
   if [ -d "$CLONE_ROOT/$REPO/.git" ]; then _src="$CLONE_ROOT/$REPO"; log "cloned $SLUG → $_src"
   else log "could not provision a clone of $SLUG — leaving isolation to fresh-tree (behaviour unchanged)"; fi
 fi

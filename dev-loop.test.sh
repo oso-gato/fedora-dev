@@ -131,7 +131,6 @@ cat > "$BIN/dev-author.sh" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null            # FAITHFUL: the real author's `claude -p` drains any stdin it inherits, to EOF
 printf 'AUTHOR %s %s\n' "$1" "$2" >> "$AUTHOR_LOG"
-[ -n "${FAKE_TOUCH_HALT:-}" ] && : > "$HALT_FLAG"   # a HALT thrown while THIS pass is already in flight
 post_question(){   # what surface_blocked() does: one comment, line 1 = the machine-owned anchor
   [ -n "${FAKE_POST_FAILS:-}" ] && return 0
   # backdated by $FAKE_COMMENT_AGE so a row can age this park past its cool-off with no sleep
@@ -170,16 +169,6 @@ for r in ${FAKE_PLAN_REFUSE:-}; do
 done
 printf 'https://github.com/oso-gato/fedora-dev/issues/%s\n' "$((500 + $2))"
 exit 0
-EOF
-# fleet-halt stub — the R9 HALT reader's CONTRACT, not its internals (bin/fleet-halt.sh has its own
-# suite): rc 0 + RUN is the only "go"; HALT is asserted when $HALT_FLAG exists or FAKE_HALT is set (the
-# flag-file form lets a row flip the switch MID-PASS, to prove in-flight work is not killed).
-cat > "$BIN/fleet-halt-stub" <<'EOF'
-#!/usr/bin/env bash
-if [ -n "${FAKE_HALT:-}" ] || [ -f "${HALT_FLAG:-/nonexistent}" ]; then
-  echo "HALT — test switch"; exit 10
-fi
-echo RUN; exit 0
 EOF
 chmod +x "$BIN"/*
 export ANCHOR
@@ -221,11 +210,9 @@ fresh(){
   export FAKE_OBJECTIVES="" FAKE_PLAN_SKIP="" FAKE_PLAN_REFUSE=""
   unset MAX_PLANS_PER_PASS
   export FAKE_BACKLOG="" FAKE_AUTHOR_FAIL="" FAKE_AUTHOR_SKIP="" FAKE_AUTHOR_RC="" FAKE_POST_FAILS=""
-  export FAKE_HALT="" HALT_FLAG="$ROOT/halt-flag-$RANDOM" FAKE_TOUCH_HALT=""
   export FAKE_COMMENT_AGE=0 FAKE_COMMENT_FAILS=""
   # a cool-off far past any row's ageing, so the pre-#277 rows keep their terminal-park semantics
   export PARK_COOLOFF=999999 PARK_MAX_RELEASES=2
-  rm -f "$HALT_FLAG"
   unset MAX_PER_PASS
 }
 # reply <issue> <login> — a REPLY lands on the issue AFTER the question: the answer that un-parks it.
@@ -241,7 +228,6 @@ drive(){ # <desc> <expected-author-invocations, space-separated>
   # REPO_SCOPE/STOP_RELEASE are pinned to the REAL siblings so a driver copy run from elsewhere (the
   # mutation row) still resolves them and dies for the RIGHT reason, never a scope refusal.
   PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" DEV_PLAN="$BIN/dev-plan.sh" \
-    FLEET_HALT="$BIN/fleet-halt-stub" \
     REPO_SCOPE="$HERE/bin/repo-scope.sh" STOP_RELEASE="$HERE/bin/stop-release.sh" \
     bash "${DRIVE_SCRIPT:-$LOOP}" fedora-dev >/dev/null 2>&1 || true
   local got; got="$(awk '{print $3}' "$AUTHOR_LOG" | sort -n | tr '\n' ' ' | sed 's/ $//')"
@@ -281,67 +267,17 @@ if [ -f "$AUTHOR" ]; then
     || ck "bin/dev-author.sh never passes the prompt as an argv argument" yes yes
 fi
 
-# --- R9 FLEET HALT (#151). The old --watch hard-refusal is LIFTED BY #151 ITSELF (its req 9) and
-# --- replaced by the REAL interlock it stood in for: one_pass() reads the fleet HALT switch
-# --- (bin/fleet-halt.sh — its own contract suite is fleet-halt.test.sh) at the TOP of every pass,
-# --- BEFORE any author model run spawns. rc 0 alone is GO; a maintainer HALT or a dead checker ⇒
-# --- OBSERVE-ONLY (rc 20/PAUSE is retired — since #274 an unreadable signal reads GO, see #274 STEP 3).
-# --- These rows are the mutation detectors requirement 8 demands: delete the halt check from
-# --- one_pass() and every one of them fails (authors spawn under HALT).
-echo "== R9 FLEET HALT (#151): a HALTED pass spawns NO author run — observe-only =="
-fresh; FAKE_BACKLOG=$'3\n7\n12'; export FAKE_HALT=1
-drive "halted pass: nothing authored" ""
-# …and the queue is still OBSERVED: the operator sees what a halted pass WOULD have done.
-HALTLOG="$ROOT/halted-pass.log"
-PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$BIN/fleet-halt-stub" \
-  bash "$LOOP" fedora-dev >/dev/null 2>"$HALTLOG" || true
-ck "…while the halted pass still logs the queue (one 'would author' per issue)" \
-   "$(grep -c 'would author' "$HALTLOG" | tr -d ' ')" "3"
-
-echo "== un-halting resumes on the next pass — no restart, nothing lost =="
-export FAKE_HALT=""
-drive "the same backlog is authored in full once the halt clears" "3 7 12"
-
-echo "== a HALT thrown MID-PASS does not kill in-flight work (stop starting, not stop running) =="
-fresh; FAKE_BACKLOG=$'3\n7\n12'; export FAKE_TOUCH_HALT=1   # the first author run flips the switch
-drive "pass 1 completes every author run it had already started offering" "3 7 12"
-export FAKE_TOUCH_HALT=""
-drive "pass 2 (the flag now stands) takes nothing new" ""
-
-echo "== the checker FAILS CLOSED: a checker that cannot run is never a GO =="
-fresh; FAKE_BACKLOG=$'3\n7'
-: > "$AUTHOR_LOG"
-PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$ROOT/no-such-checker" \
-  bash "$LOOP" fedora-dev >/dev/null 2>&1 || true
-ck "a MISSING fleet-halt checker spawns no author run (rc 127 ≠ 0 ⇒ observe-only)" \
-   "$(wc -l < "$AUTHOR_LOG" | tr -d ' ')" "0"
-
-echo "== --watch RUNS now — HALT-gated per pass, flock-singleton, stopped only from outside =="
+echo "== --watch RUNS now — flock-singleton, stopped only from outside =="
 fresh; FAKE_BACKLOG=$'3\n7'
 # `timeout` is the point, not decoration: --watch is an infinite loop by design; rc 124 (killed by the
 # test timeout) IS the pass condition — an early exit would be a regression toward the old refusal.
-PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$BIN/fleet-halt-stub" \
+PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" \
   DEV_LOOP_LOCK="$ROOT/watch-a.lock" LOOP_INTERVAL=1 \
   timeout 5 bash "$LOOP" --watch fedora-dev >/dev/null 2>&1
 ck "--watch loops until stopped from outside (rc 124 = the test timeout, not an exit)" "$?" "124"
 got="$(awk '{print $3}' "$AUTHOR_LOG" | sort -nu | tr '\n' ' ' | sed 's/ $//')"
 ck "…and it drove the pass: the backlog was authored on the clock" "$got" "3 7"
 
-echo "== --watch under a standing HALT keeps running (un-halt must need no restart) and spawns NOTHING =="
-fresh; FAKE_BACKLOG=$'3\n7'; export FAKE_HALT=1
-PATH="$BIN:$PATH" DEV_AUTHOR="$BIN/dev-author.sh" FLEET_HALT="$BIN/fleet-halt-stub" \
-  DEV_LOOP_LOCK="$ROOT/watch-b.lock" LOOP_INTERVAL=1 \
-  timeout 5 bash "$LOOP" --watch fedora-dev >/dev/null 2>&1
-ck "--watch under HALT stays up (rc 124 — it must NOT exit; the halt clears without a restart)" "$?" "124"
-ck "…and spawns no author run across every halted pass" "$(wc -l < "$AUTHOR_LOG" | tr -d ' ')" "0"
-export FAKE_HALT=""
-
-# --- THE PLAN ARM. Before this arm existed, `bin/dev-plan.sh` had NO caller anywhere in the fleet: the
-# --- one component that enforces R1 (a MAINTAINER must confirm an objective before anything is built
-# --- from it) was written, tested and unreachable. An intake objective filed as `backlog` was therefore
-# --- swept by the authoring arm above straight into implementation and auto-merge, with the maintainer's
-# --- `approved` tap read by nothing. These rows assert the route exists and is bounded — and the
-# --- mutation at the end of this file asserts they are carried by the WIRING, not by the harness.
 echo "== THE PLAN ARM: an APPROVED objective is handed to dev-plan (and the label filter is the query) =="
 fresh; FAKE_OBJECTIVES=$'42'
 drive "the objective is not itself authored (it is not a backlog feature)" ""
@@ -371,14 +307,6 @@ fresh; FAKE_OBJECTIVES=$'11\n12\n13'; export MAX_PLANS_PER_PASS=2
 drive "capped at two planner runs this pass" ""
 ck "…the third objective is deferred to the next pass" "$(planned)" "11 12"
 unset MAX_PLANS_PER_PASS
-
-echo "== R9 FLEET HALT gates the plan arm too — a halted pass plans nothing =="
-fresh; FAKE_OBJECTIVES=$'42'; FAKE_BACKLOG=$'3'; export FAKE_HALT=1
-drive "halted pass: nothing authored" ""
-ck "…and nothing planned" "$(planned)" ""
-export FAKE_HALT=""
-drive "un-halted: the objective is planned, nothing lost" "3"
-ck "…the planner runs on the next pass" "$(planned)" "42"
 
 echo "== the anchors the plan arm parks on are the ones bin/dev-plan.sh actually posts =="
 if [ -f "$HERE/bin/dev-plan.sh" ]; then
@@ -535,17 +463,6 @@ export FAKE_COMMENT_FAILS=""
 drive "pass 3: with the bus writable again the release proceeds" "3 7 12"
 ck "…and is recorded" "$(count_anchor 7 "$RELEASE_ANCHOR")" "1"
 
-echo "== R9 HALT gates the release too — a halted pass announces nothing and spawns nothing =="
-fresh; FAKE_BACKLOG=$'3\n7\n12'; FAKE_AUTHOR_FAIL=7
-export PARK_COOLOFF=3600 PARK_MAX_RELEASES=2 FAKE_COMMENT_AGE=7200
-drive "pass 1: 7 goes BLOCKED" "3 7 12"
-export FAKE_HALT=1
-drive "pass 2 (HALTED): no release, no author run" ""
-ck "…and nothing was filed on the bus" "$(count_anchor 7 "$RELEASE_ANCHOR")" "0"
-export FAKE_HALT=""
-drive "pass 3 (un-halted): the release is still due and fires — nothing was lost" "3 7 12"
-
-# The disclosed residual, asserted rather than assumed: a broken clock must not drive a model run.
 echo "== an UNREADABLE age HOLDS — the release never fires on a clock it cannot read =="
 fresh; FAKE_BACKLOG=$'7'
 printf '%s\t%s stuck.\t%s\n' "$DEV_LOGIN" "$ANCHOR" "" >> "$STORE/7"
@@ -622,7 +539,7 @@ ck "…and the mutant announces no release" "$(count_anchor 7 "$RELEASE_ANCHOR")
 # --- approved objective is never handed to the planner. The sed must genuinely change the copy.
 echo "== MUTATION: with plan_pass un-wired, an APPROVED objective never reaches the planner =="
 MUTP="$ROOT/mut-plan-dev-loop.sh"
-sed 's|^  plan_pass "\$repo" "\$slug" "\$halted"$|  : # plan arm un-wired (mutation)|' "$LOOP" > "$MUTP"
+sed 's|^  plan_pass "\$repo" "\$slug"$|  : # plan arm un-wired (mutation)|' "$LOOP" > "$MUTP"
 if cmp -s "$LOOP" "$MUTP"; then
   ck "the plan-arm mutation sed genuinely changed the driver (else this row proves nothing)" no yes
 else

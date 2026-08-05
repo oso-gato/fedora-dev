@@ -321,19 +321,14 @@ if [ -f "$POLLER" ]; then
     TOUT="$phome/out"
   }
   echo "── poller: flag present → files ONCE + consumes the flag ──"
-  run_tick 1 FLEET_HALT=true
+  run_tick 1
   check "tick: filed"                           'grep -q "^file file" "$RR_REC"'
   check "tick: flag consumed"                   '[ ! -e "$FLAG" ]'
   echo "── poller: NO flag → nothing runs ──"
-  run_tick 0 FLEET_HALT=true
+  run_tick 0
   check "tick: no flag, no filing"              '[ ! -s "$RR_REC" ]'
-  echo "── poller: R9 HALT → skipped, flag KEPT ──"
-  run_tick 1 FLEET_HALT=false
-  check "tick: halted → no filing"              '[ ! -s "$RR_REC" ]'
-  check "tick: halted → flag kept"              '[ -e "$FLAG" ]'
-  check "tick: halted → says so"                'grep -q "rebuild-request: R9 HALT" "$TOUT"'
   echo "── poller: filing FAILS → flag KEPT for retry ──"
-  run_tick 1 FLEET_HALT=true RR_RC=1
+  run_tick 1 RR_RC=1
   check "tick: failed filing ran"               'grep -q "^file file" "$RR_REC"'
   check "tick: failed filing keeps the flag"    '[ -e "$FLAG" ]'
 else
