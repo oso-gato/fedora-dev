@@ -87,10 +87,6 @@
 #                     count of iterations.
 #   FRESH_TREE        the isolator (default: bin/fresh-tree.sh). Every fix runs in a throwaway worktree
 #                     off the PR's own head — NEVER the shared clone (#152). Overridable for testing.
-#                     Read at the TOP of every tick, BEFORE any model run / merge / retire / comment.
-#                     rc 0 alone means GO; ANY other outcome (a maintainer HALT, or a missing/crashed
-#                     checker — rc 20/PAUSE is retired, an unreadable signal now reads GO) makes the
-#                     whole tick OBSERVE-ONLY BY CONSTRUCTION. Overridable for testing.
 #   FITNESS_REVIEW    the independent fitness harness the REVIEW arm runs (default: bin/fitness-review.sh).
 #                     Overridable for testing. Its exit code is a CONTRACT: 0 = verdict posted; 3 = the
 #                     reviewer could not be RUN / produced no verdict for this head; anything else = a
@@ -123,7 +119,7 @@
 #                     the running host, and a merged control-repo change surfaces its host apply):
 #                     HOST_REFRESH_SCAN (the scanner, default bin/host-refresh.sh — its header carries
 #                     the whole design) · HOST_REFRESH_EVERY (scan once per N sweeps; default 30;
-#                     0 disables). Runs at the END of a sweep tick, gated by THAT tick's R9 halt read.
+#                     0 disables). Runs at the END of a sweep tick.
 #   IMMUTABILITY_PROBE*  the IMMUTABILITY CADENCE (#317 — objective #310's *"the check runs on its own,
 #                     repeatedly"*). IMMUTABILITY_PROBE (the prober, default bin/immutability-probe.sh —
 #                     its header carries the whole design) · IMMUTABILITY_PROBE_EVERY (run once per N
@@ -136,9 +132,8 @@
 #                     candidate of its own. That is minutes of CPU and a bus round-trip per run, so this
 #                     is the one tick whose cost argues for daily rather than half-hourly. Daily is
 #                     still infinitely more often than "whenever a human remembers", which is the
-#                     cadence this replaces. Runs at the END of a sweep tick, gated by THAT tick's R9
-#                     halt read (starting a build on both boxes is an ACTION, and it files a bus
-#                     ticket), SINGLE-FLIGHT (never two probes at once), and FAIL-SAFE: any probe
+#                     cadence this replaces. Runs at the END of a sweep tick, SINGLE-FLIGHT (never two
+#                     probes at once), and FAIL-SAFE: any probe
 #                     failure is logged and swallowed. On RED it opens/updates ONE tracking issue and
 #                     on the next GREEN comments + closes it; while GREEN it makes ZERO gh calls.
 #   POLLER_DEFER_RC / LOCK_DEFER_MAX / LOCK_DEFER_WINDOW / POLLER_BOX_GEN_FILE / POLLER_BOX_GEN
@@ -1080,8 +1075,7 @@ LAUNCH_HEAD="${POLLER_LAUNCH_HEAD:-$(git -C "$SELF_REFRESH_CLONE" rev-parse HEAD
 # running host through the PROVEN dev→host seam (bin/host-refresh.sh → host-ticket.sh → the host
 # agent's `redeploy <workload>` → container-refresh.sh's health-gate + digest auto-rollback — R10 stays
 # where it already lives). The scan runs at the END of a sweep tick: a safe point (all sweep_repo work
-# is synchronous and done) with THIS tick's R9 halt read in hand — filing a ticket is an ACTION, so a
-# halted tick skips it. Rate-limited to once per HOST_REFRESH_EVERY sweeps (0 disables; a `--once`
+# is synchronous and done). Rate-limited to once per HOST_REFRESH_EVERY sweeps (0 disables; a `--once`
 # fires it only under HOST_REFRESH_EVERY=1 — the manual catch-up / test seam, since each --once is a
 # fresh process whose counter starts at 0). FAIL-SAFE: a scan failure logs and never stops the loop —
 # a missed redeploy degrades to the status quo (the monthly workload-refresh timer).
@@ -1089,8 +1083,8 @@ HOST_REFRESH_SCAN="${HOST_REFRESH_SCAN:-$HERE/host-refresh.sh}"
 HOST_REFRESH_EVERY="${HOST_REFRESH_EVERY:-30}"
 HOST_REFRESH_TICKS=0
 # RECONCILE (task #19) — proof-gated closure of backlog issues (design in bin/reconcile.sh's header).
-# Same wiring shape as host-refresh: once per RECONCILE_EVERY sweeps, at the END of a tick, gated by THAT
-# tick's R9 halt read (closing an issue is an ACTION). FAIL-SAFE: a scan failure logs and never stops the loop.
+# Same wiring shape as host-refresh: once per RECONCILE_EVERY sweeps, at the END of a tick.
+# FAIL-SAFE: a scan failure logs and never stops the loop.
 RECONCILE_SCAN="${RECONCILE_SCAN:-$HERE/reconcile.sh}"
 RECONCILE_EVERY="${RECONCILE_EVERY:-30}"
 RECONCILE_TICKS=0
@@ -1145,7 +1139,7 @@ IMMUT_STAGED_TITLE="${IMMUT_STAGED_TITLE:-🟡 immutability UNMEASURED — the p
 # CLONE-side instead of image-side. dev-loop-service.sh's liveness-adjudicated singleton dedups against
 # the entrypoint's own launch on a rebuilt box (both may run; the singleton keeps one). Gated
 # DEV_LOOP_ENABLED default-ON (the #220 self-arm default — a pre-loop container may not even carry the
-# var, so default-on IS the self-arm; explicit =0 disables) + R9 halt (launching a service is an ACTION).
+# var, so default-on IS the self-arm; explicit =0 disables).
 # Rate-limited to once per DEV_LOOP_LAUNCH_EVERY sweeps (0 disables; a lone `--once` fires it only under
 # =1 — the test/catch-up seam, since each --once is a fresh process whose counter starts at 0).
 DEV_LOOP_SERVICE="${DEV_LOOP_SERVICE:-$HERE/dev-loop-service.sh}"
@@ -1714,7 +1708,7 @@ host_refresh_tick(){
 }
 
 # RECONCILE tick (task #19) — proof-gated closure of backlog issues whose authored PR merged + published
-# + went live. Same discipline as host_refresh_tick: END of a tick, R9-halt-gated (a close is an ACTION),
+# + went live. Same discipline as host_refresh_tick: END of a tick,
 # rate-limited to once per RECONCILE_EVERY sweeps, failures logged + SWALLOWED (a missed close leaves the
 # issue OPEN — the safe direction — for the next scan).
 reconcile_tick(){
@@ -1728,8 +1722,8 @@ reconcile_tick(){
 }
 
 # SHIP ACTUATOR tick (R40, 2026-07-27) — the loop closes its OWN objective. Same wiring shape as
-# reconcile: once per SHIP_ACTUATOR_EVERY sweeps, R9-halt-gated (running the R34 gate and announcing a
-# ship are ACTIONS). Rarer than the others by default because a RUN_GATE costs a model run — but the
+# reconcile: once per SHIP_ACTUATOR_EVERY sweeps. Rarer than the others by default because a RUN_GATE
+# costs a model run — but the
 # actuator only reaches that branch when the backlog is already empty, and ship-gate.sh is idempotent
 # per aggregate sha, so a steady state costs one cheap oracle read per tick. FAIL-SAFE (R39): the
 # actuator returns 0 on every internal failure and this call swallows the rest — a ship that cannot be
@@ -1940,8 +1934,8 @@ immut_measure(){
 }
 
 # IMMUTABILITY PROBE tick (#317) — see the IMMUTABILITY_PROBE config block above. Same discipline as
-# host_refresh_tick/reconcile_tick: END of a sweep tick, R9-halt-gated (starting a build on BOTH boxes
-# and filing a bus ticket are ACTIONS), rate-limited through the elapsed-time-aware tick_due so a
+# host_refresh_tick/reconcile_tick: END of a sweep tick, rate-limited through the elapsed-time-aware
+# tick_due so a
 # self-refresh relaunch cannot reset a 2880-sweep cadence to never-fires — the starvation #300 caused
 # for the other actuator ticks would be far worse here, since this tick is the RAREST of them all and a
 # reset counter would mean the box is never measured at all while main is advancing.
@@ -1969,7 +1963,7 @@ immutability_probe_tick(){
 }
 
 # DEV-LOOP LAUNCH tick (self-arm, 2026-07-19) — see the DEV_LOOP config block above. Same discipline as
-# host_refresh_tick/reconcile_tick: END of a tick, R9-halt-gated (launching a service is an ACTION),
+# host_refresh_tick/reconcile_tick: END of a tick,
 # rate-limited. IDEMPOTENT: launches ONLY when no live dev-loop-service already holds the loop
 # (`dev-loop-service.sh --is-live` adjudicates the holder's liveness the #173 way), so a re-tick and the
 # entrypoint's own launch never stack a second looping service. DETACHED via setsid into its OWN session
@@ -1993,7 +1987,7 @@ dev_loop_launch_tick(){
 }
 
 # REBUILD-REQUEST tick (R17 approval flow, 2026-07-19) — see the REBUILD_REQUEST config block above.
-# Same discipline as host_refresh_tick: END of a tick, R9-halt-gated (filing a ticket is an ACTION),
+# Same discipline as host_refresh_tick: END of a tick,
 # rate-limited. Fires ONLY while the FLAG file exists; the flag is consumed on a successful filing (rc 0
 # = filed or already-open) and KEPT on failure so the next firing retries. FAIL-SAFE: a filing failure
 # logs and never stops the loop.
@@ -2017,10 +2011,13 @@ rebuild_request_tick(){
 # re-setting POLLER_REPO/SLUG per repo. sweep_repo() is the original single-repo body unchanged.
 #
 # NO SOFT STOP IS READ HERE. The maintainer-thrown HALT label was RETIRED 2026-07-30 (R9): thrown by a
-# maintainer 0 times ever, fired by itself 935 times (all false), suppressing 338 real actions — one of
-# them the ticket that would have repaired a six-day outage. It duplicated two stronger stops that need
-# no code (App-key revocation, container stop) and depended on GitHub being readable, so it failed
-# exactly when an outage made it matter. Stopping this loop is now: revoke the key, or stop the box.
+# maintainer 0 times ever, fired by itself 935 times (all false), suppressing 498 action-attempts across
+# five buckets (338 of them ONE PR at ONE sha re-declined on 338 consecutive ~26s polls — not 338 distinct
+# actions, and no outage-repair ticket among them). It duplicated ONE stronger stop that needs no code
+# (App-key revocation) and depended on GitHub being readable, so it failed exactly when an outage made it
+# matter. THE STOP OF RECORD is revoking the key. Stopping the BOX is NOT an equivalent stop (measured):
+# `Restart=always` + a 10s `claudebox-up.service` undo a `podman stop` in ~30s; a real local stop is
+# `systemctl --user stop && disable` across those units.
 sweep(){
   local _r
   REVIEW_INFRA=""   # reviewer-infra health is a per-SWEEP fact (global across all repos) — re-probed lazily on the first review failure this sweep
@@ -2045,7 +2042,6 @@ sweep(){
 }
 sweep_repo(){
   log "sweep: $SLUG open PRs (armed=$POLLER_ARMED)"
-  # R9 HALT (#151): a halted tick retires nothing — a close is an ACTION, reversible or not.
   retire_superseded
   # BATCHED list: ONE call yields number+ref+sha as TSV — the old per-PR headRefName/headRefOid
   # re-fetches duplicated fields this same list already carried (2 calls/PR saved). Branch names
@@ -2159,9 +2155,6 @@ sweep_repo(){
     # exists. The routing inputs are exactly what the line now shows: host, fitness, armed.
     action="$(plan "$host" "" "$fit" "$POLLER_ARMED" "$gaterel")"
     log "#$pr ${sha:0:7} host=$host fitness=$fit ⇒ $action"
-    # R9 HALT (#151): OBSERVE-ONLY — the decision above is LOGGED (the operator sees the queue) but not
-    # acted on: no fixer model run, no review model run, no merge, no PRESENT/blocked comment — and no
-    # state marker is written, so a halted sweep can never park, dedup or no-progress-signature a PR.
     case "$action" in
       NOOP)
         # R18 IDLE-WITH-WORK-PENDING (kd#23; audit 2026-07-18 CAT-42/01). host=NONE means no host verdict

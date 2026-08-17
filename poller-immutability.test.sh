@@ -4,8 +4,8 @@
 # miss — while a healthy probe stays completely silent.
 #
 # THE AXIS. objective #310's third scope bullet is *"the check runs on its own, repeatedly"*, so the
-# thing under test is the WIRING, not a verdict fold: whether the tick FIRES on its cadence, whether a
-# halt really stops it, whether the record is really written, and whether the alarm's LIFECYCLE (open →
+# thing under test is the WIRING, not a verdict fold: whether the tick FIRES on its cadence, whether
+# the record is really written, and whether the alarm's LIFECYCLE (open →
 # update → close) actually happens. A pure `--selftest` of immut_action() is structurally blind to every
 # one of those — #278 shipped a pure core with a green selftest and ZERO call sites, and the running
 # poller behaved byte-identically to before. So every row here drives the REAL `pr-poller.sh --once`.
@@ -14,14 +14,14 @@
 # a host round-trip over the bus — this suite must not spend that, and must be able to demand rc 1 on
 # demand, which a healthy box cannot produce) and `gh` (every row asserts on which gh calls were made,
 # which is unassertable against the real API, and no test may file issues on a live repo). Everything
-# else — the cadence arithmetic, the halt gate, the single-flight lock, the record writer, the alarm
+# else — the cadence arithmetic, the single-flight lock, the record writer, the alarm
 # lifecycle, and `bin/immutability-probe.sh --status` reading it back — is the shipped code.
 #
 # THE RECORD CONTRACT IS PINNED END-TO-END, not by two copies of a parser: the tick WRITES the record and
 # the REAL `--status` READS it in the same row, so a key renamed on either side fails here.
 #
-# TWO MUTATIONS RUN IN-SUITE (BP8), each vacuity-guarded: neutralize the halt gate → the halted tick
-# measures anyway; neutralize the RED→surface branch → a RED opens no issue.
+# ONE MUTATION RUN IN-SUITE (BP8), vacuity-guarded: neutralize the RED→surface branch → a RED opens no
+# issue. (The second, neutralizing the halt gate, went with the R9 soft HALT when it was retired.)
 #
 # `bash poller-immutability.test.sh` → exit 0 = all rows pass. No GitHub/network/model/engine.
 set -uo pipefail

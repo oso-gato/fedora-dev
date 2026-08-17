@@ -327,7 +327,7 @@ ck "$([ "$(alarms)" = 1 ] && echo 1 || echo 0)" "a re-scan duplicated the BLOCKE
 done_case
 
 # ---------------------------------------------------------------------------------------------------
-# POLLER WIRING — the real bin/pr-poller.sh fires the scan on its cadence, R9-halt-gated.
+# POLLER WIRING — the real bin/pr-poller.sh fires the scan on its cadence.
 # ---------------------------------------------------------------------------------------------------
 echo "== WIRING: the poller fires the scan at HOST_REFRESH_EVERY =="
 DESC="--once + HOST_REFRESH_EVERY=1 → the scan runs once"; OK=1

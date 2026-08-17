@@ -55,7 +55,7 @@ consequences*; each entry says what could bite, and why it is accepted for now.
 |---|---|---|
 | K1 | **GitHub is a total single point of failure.** R5 makes it the *sole* IPC, work-log and audit trail. If GitHub is unavailable the apparatus has no bus, no durable state and no audit — it does not degrade, it stops. | No second bus exists, and building one would duplicate the thing that makes the loop auditable. Accepted; a real outage is a full stop, not data loss (the record survives in GitHub). |
 | K2 | **A raw-API merge can bypass the interactive merge block.** The `gh pr merge` deny is a command-prefix rule; a direct API call is not covered. | Pattern-denying every API shape is sieve-theater (see the anti-theater doctrine); recovery is automatic (git revert + health-gate rollback). NARROWED for the confirmed spec by the R1 Code-Owner rule, which GitHub enforces server-side. |
-| K3 | **One shared credential for every tenant session.** Isolation between sessions is enforced by code, not by identity, so the hard stop (key revocation, R9) necessarily stops *all* sessions at once. | Per-tenant identities would multiply the credential surface. Accepted; the soft stop (HALT) is per-session and maintainer-thrown. |
+| K3 | **One shared credential for every tenant session.** Isolation between sessions is enforced by code, not by identity, so the hard stop (key revocation, R9) necessarily stops *all* sessions at once. | Per-tenant identities would multiply the credential surface. Accepted. (This entry formerly softened the trade by citing a per-session, maintainer-thrown soft stop; that HALT was retired 2026-07-30 — §6(g) — so revocation is now the ONLY stop, and it is all-or-nothing.) |
 | K4 | **The apparatus merges its own control-plane changes.** Under zero-gate (§6(c)) it can rewrite its own machinery without a human. | Deliberate — it is what makes self-development possible. Safety is *recoverability*, not prevention: git-revertable, health-gated, auto-rolled-back. The confirmed spec is the one carve-out (R1, §6(f)). |
 | K5 | **Stronger container isolation is undecided.** gVisor is installed and opt-in but its feasibility test has never run (§6(b)). | The plain fence is the current boundary; the decision is pending real evidence, not assumed. |
 | K6 | **The operative law can drift from the spec.** `policy/fleet-core.md` — the rules actually stamped into every agent's context — is not itself locked, and has already contradicted the confirmed spec once (it asserted control-plane auto-merge with no R1 carve-out until 2026-07-24). | Being resolved: the durable fix is to strip original authority from the stamp so it can only *derive* from these four documents. Until then, `bin/fleet-guard-parity.sh` guards its shape but not its agreement with the spec. |
@@ -217,13 +217,13 @@ the e-stop served his objective, the maintainer's answer was to delete it and re
 | Times a maintainer ever threw it | **0**, all-time |
 | Times it fired by itself | **935**, every one false |
 | Cause split | **574** `gh: command not found` (a broken tool inside the box) · **332** API garbage · **29** dead credential |
-| Real actions it suppressed | **338** — including the ticket that would have repaired a six-day outage |
+| Suppressed action-attempts | **498** across five buckets — **338** fix-attempts (ONE PR at ONE sha, re-declined on 338 consecutive ~26s polls; that PR was later closed UNMERGED; **no outage-repair ticket among them**), 101 authoring-loop launches, 31 host-refresh scans, 19 reconcile, 9 ship-actuator |
 | Cost | ~**870 lines** across both repos, **14 call sites** |
 
-**WHY IT WAS NEVER A SAFETY FEATURE.** It duplicated two stops that are strictly stronger and need no
-code — **App-key revocation** (works when GitHub is unreachable; the stop of record) and **stopping the
-containers** — while itself depending on GitHub being readable, so it failed precisely when an outage
-made it matter. An adversarial audit of the last attempt to repair it (three independent refuters, two
+**WHY IT WAS NEVER A SAFETY FEATURE.** It duplicated **one** stop that is strictly stronger and needs no
+code — **App-key revocation** (works when GitHub is unreachable; the stop of record) — while itself
+depending on GitHub being readable, so it failed precisely when an outage made it matter. (Stopping the
+containers is NOT the second such stop; that claim was measured false on 2026-07-30 — see WHAT REMAINS.) An adversarial audit of the last attempt to repair it (three independent refuters, two
 returning REFUTED) found the fix's own justification contained four false or vacuous claims, and a
 narrow case in which work could merge **while a halt was standing**. A control whose only measured
 effect is to break things is not a safety feature; it is a liability with a reassuring name.
@@ -233,7 +233,11 @@ effect is to break things is not a safety feature; it is a liability with a reas
 handle predicts, and that fact retires the "never needed, therefore safe to weaken" argument in both
 directions. It is recorded here because it was used, wrongly, to justify the preceding change.
 
-**WHAT REMAINS.** R9 keeps revocation as the stop of record. R20 and R27 lose their HALT clauses. No
+**WHAT REMAINS.** R9 keeps revocation as the stop of record — and records, measured 2026-07-30, that
+**stopping the containers is NOT an equivalent stop**: `fedora-dev.container` carries
+`Restart=always`/`RestartSec=10` and the host watchers `Wants=` a `claudebox-up.service` that re-starts
+the box on a 10s timer, so a `podman stop` is undone in ~30s with no human. A real local stop is
+`systemctl --user stop && disable` across those units over SSH. R20 and R27 lose their HALT clauses. No
 sweeper reads any soft stop, so a missing reader can no longer freeze the fleet either — the failure
 mode that produced 935 of the 935.
 

@@ -15,8 +15,8 @@
 #                                                                        this script never bypasses or
 #                                                                        duplicates it)
 #
-# WHAT ONE SCAN DOES (`--once`; bin/pr-poller.sh runs it every HOST_REFRESH_EVERY sweeps, R9-halt-gated
-# by the tick that invokes it — filing a ticket is an ACTION):
+# WHAT ONE SCAN DOES (`--once`; bin/pr-poller.sh runs it every HOST_REFRESH_EVERY sweeps, at the END of
+# the tick that invokes it):
 #
 #   WORKLOAD repos (HOST_REFRESH_WORKLOADS — mirrors the host agent's KNOWN_WORKLOADS arg allowlist; a
 #   repo without a real workload-refresh@<name> unit on the host must NOT be listed, the agent would

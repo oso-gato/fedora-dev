@@ -17,15 +17,16 @@
 # autonomous authoring (as from merging); the dumb, gate-checked service is the sanctioned autonomous
 # authoring path. It acts ONLY on the planner's backlog-labelled issues, and every PR it opens still faces
 # the host live-gate + an INDEPENDENT fitness review before the poller can merge it — so an enabled loop is
-# fenced by the SAME two independent gates that fence the merge, PLUS the R9 fleet HALT and R16 scope that
+# fenced by the SAME two independent gates that fence the merge, PLUS the R16 scope gate that
 # dev-loop.sh reads at the top of every pass, PLUS dev-author's bounded per-run timeout and MAX_PER_PASS
 # cap. ARMED BY DEFAULT (2026-07-18) — the entrypoint gate defaults ON, so the loop SELF-ARMS with the
 # apparatus: once the self-refresh deploys the new entrypoint, authoring starts with NO host action. A
 # host-set OPT-IN flag would be a deploy-CONFIG the self-refresh CANNOT set (it deploys the image +
 # live-clone, never the host quadlet env), so a default-off flag would force a MANUAL host arm —
-# contradicting "self-arming = no more manual host actions". Set DEV_LOOP_ENABLED=0 to disable; R9 fleet
-# HALT is the emergency stop (no redeploy needed). Same trust level as the already-armed poller — authoring
-# produces PRs the SAME two gates (host live-gate + fitness) decide.
+# contradicting "self-arming = no more manual host actions". Set DEV_LOOP_ENABLED=0 to disable (a host
+# edit + recreate); there is NO in-band emergency stop since the R9 soft HALT was retired 2026-07-30 —
+# revoke the App key (the stop of record), or stop+disable the units. Same trust level as the
+# already-armed poller — authoring produces PRs the SAME two gates (host live-gate + fitness) decide.
 #
 # MULTI-REPO — THIS wrapper's own job. pr-poller.sh iterates the scoped repos INSIDE its own sweep, so
 # poller-service.sh need not; dev-loop.sh is single-repo (one pass over one repo's backlog), so THIS
@@ -140,7 +141,7 @@ until [ -e "$STATE/.assembled" ]; do sleep 10; done
 log "waiting for the standing GitHub credential…"
 until gh auth status >/dev/null 2>&1 || [ -s "$HOME/.git-credentials" ]; do sleep 10; done
 
-log "up — interval=${LOOP_INTERVAL}s scope-reader=$REPO_SCOPE (R9 fleet HALT + R16 scope gate every pass, inside dev-loop.sh)"
+log "up — interval=${LOOP_INTERVAL}s scope-reader=$REPO_SCOPE (R16 scope gate every pass, inside dev-loop.sh)"
 while :; do
   one_cycle
   sleep "$LOOP_INTERVAL"
