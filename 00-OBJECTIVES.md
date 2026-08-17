@@ -2,14 +2,7 @@
 
 > **THE WHY** — the objective / north star this apparatus is built to.
 
-> **Confirmed by the maintainer on 2026-07-14; Trinity amendment 2026-07-16; NO-ALLOWLIST amendment
-> 2026-07-21; SCOPE = LIVE INSTALLATION amendment confirmed 2026-07-27** (the operating scope is the
-> App INSTALLATION read live — not a software allowlist and not a fixed split of the account:
-> **whatever the maintainer installs the App on, private repositories included, is in scope**. The
-> earlier "private-data camp the apparatus can never reach" wall is retired; the maintainer draws the
-> boundary by installing or removing the App, and the apparatus never widens its own reach. R16 states
-> this normatively.)
-> This is the durable, versioned objective the apparatus builds to. It is the ground truth the fitness gate
+> **Confirmed by the maintainer.** This is the durable objective the apparatus builds to. It is the ground truth the fitness gate
 > re-grounds on, mirrored by spec issue [#135](https://github.com/oso-gato/fedora-dev/issues/135). The
 > **functional + non-functional requirements** live in [`00-REQUIREMENTS.md`](./00-REQUIREMENTS.md); the
 > **build principles** in [`00-BUILDPRINCIPLE.md`](./00-BUILDPRINCIPLE.md). This objective is locked;
@@ -19,7 +12,7 @@
 
 The human maintainer states the objective. The dev container then responds with a tightened, expanded set of objectives and, through discussion, settles the functional requirements for confirmation. The resulting requirements document — which includes both the objective and the functional requirements — becomes the build objective; the session then designs, iterates, validates, and finally ships the product. This must take exactly **ONE interaction**: from the maintainer specifying the objective to the confirmation of the objective and the functional requirements. After that confirmation, the system runs self-autonomously until the product ships.
 
-What we are building is that apparatus itself: a **self-sustaining autonomous development-loop pair** — a HOST (erebus, fedora-bootstrap) and a DEV CONTAINER (nox, fedora-dev), both running the Claude Code agent — that, from a single confirmed requirements document, derives a work plan, builds and validates each feature, and ships the whole objective with no further human interaction and automatic recovery. Humans do not approve the final shipment. It must actually deliver: proven end-to-end, the pair building and shipping the product independently and autonomously. We build it by **dogfooding the partial apparatus we already have — the race car repaired while racing** — every piece landing through the now-gate-free loop.
+What we are building is that apparatus itself: a **self-sustaining autonomous development-loop pair** — a HOST (erebus, fedora-bootstrap) and a DEV CONTAINER (nox, fedora-dev), both running the Claude Code agent — that, from a single confirmed requirements document, derives a work plan, builds and validates each feature, and ships the whole objective with no further human interaction and automatic recovery. Humans do not approve the final shipment. It must actually deliver: proven end-to-end, the pair building and shipping the product independently and autonomously. We build it by **dogfooding the partial apparatus we already have — the race car repaired while racing** — every piece landing through the gate-free loop.
 
 The whole platform follows the **immutable-host, containerise-everything** model — the Fedora Bluefin custom-image principle: the host OS is immutable and every application runs in a container. The host runs the latest Claude Code inside a **Distrobox** container, which is why it is called **"claudebox."** The dev container is itself containerised and stays relatively stable until recreated. Claude Code advances every single day; because it is containerised it carries its own rebuild cadence, rebuilt independently of dev-container recreations and host updates — **three decoupled clocks**: the host image, the dev container, and the claudebox-resident Claude Code.
 
@@ -50,7 +43,6 @@ list in software would add no authority — only a copy that drifts out of date.
 or narrows the apparatus's reach by installing or removing the App, and **the apparatus never widens
 its own reach**. Which repositories that is today, and the identities the apparatus works under, are
 operational facts — not part of this objective.
-
 
 ## Document authority — the Trinity and the design
 
